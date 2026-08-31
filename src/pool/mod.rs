@@ -47,6 +47,10 @@ pub struct AccountUsage {
     /// The provider has stopped serving this account until a window resets,
     /// which is a harder signal than a high fraction.
     pub locked: bool,
+    /// When this sample was taken. Codex only reports quota on a served
+    /// response, so an idle account's figures go stale and a dashboard needs
+    /// to know that rather than trusting them.
+    pub observed_at: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -179,7 +183,8 @@ impl Slots {
         slot.state.lock().await.consecutive_fails = 0;
     }
 
-    pub async fn note_usage(&self, slot: &Arc<Slot>, usage: AccountUsage) {
+    pub async fn note_usage(&self, slot: &Arc<Slot>, mut usage: AccountUsage) {
+        usage.observed_at = crate::clock::unix_now();
         slot.state.lock().await.usage = Some(usage);
     }
 

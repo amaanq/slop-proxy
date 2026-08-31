@@ -66,6 +66,7 @@ impl AnthropicPool {
                             AccountUsage {
                                 windows,
                                 locked: usage.locked(),
+                                observed_at: 0,
                             },
                         )
                         .await;
@@ -234,6 +235,7 @@ mod tests {
                         resets_at: None,
                     }],
                     locked: false,
+                    observed_at: 0,
                 },
             )
             .await;
@@ -253,6 +255,7 @@ mod tests {
                         resets_at: None,
                     }],
                     locked: true,
+                    observed_at: 0,
                 },
             )
             .await;

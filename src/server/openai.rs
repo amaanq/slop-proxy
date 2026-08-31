@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::convert::Infallible;
 
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
@@ -20,6 +20,11 @@ use crate::translate::openai_stream::{OpenAiStream, render_aggregated};
 use crate::translate::{StopKind, UsageCapture, aggregate, model_map};
 
 const DIALECT: Dialect = Dialect::OpenAi;
+
+#[derive(serde::Deserialize)]
+pub struct ModelsQuery {
+    client_version: Option<String>,
+}
 
 pub async fn chat_completions(
     State(state): State<AppState>,
@@ -143,22 +148,24 @@ fn stream_response(upstream: EventStream, translator: OpenAiStream, guard: LogGu
         .into_response()
 }
 
-pub async fn models(State(state): State<AppState>) -> Response {
+/// Codex asks with a `client_version` query and reads its context window out
+/// of the reply, so it gets the backend payload untouched.
+pub async fn models(State(state): State<AppState>, Query(q): Query<ModelsQuery>) -> Response {
+    if q.client_version.is_some() {
+        return match state.catalog_raw().await {
+            Some(body) => ([("content-type", "application/json")], body).into_response(),
+            None => super::error::error_response(
+                DIALECT,
+                503,
+                "api_error",
+                "no usable codex account to read the model catalog from",
+            ),
+        };
+    }
+
     let created = crate::clock::unix_now();
 
-    let live = match state.models.get() {
-        Some(cached) => Some(cached),
-        None => match state.codex.list_models().await {
-            Ok(models) => {
-                state.models.put(models.clone());
-                Some(models)
-            }
-            Err(e) => {
-                tracing::warn!("fetching models from codex backend: {e}");
-                None
-            }
-        },
-    };
+    let live = state.catalog().await;
 
     #[derive(serde::Serialize)]
     struct ModelEntry {

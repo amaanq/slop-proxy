@@ -132,7 +132,10 @@ impl Slots {
                 _ => None,
             };
             match existing {
-                Some(s) => next.push(s.clone()),
+                // Swapping an unchanged slot would strand an in-flight
+                // cooldown write on the orphaned Arc.
+                Some(s) if slot_matches(s, &a) => next.push(s.clone()),
+                Some(s) => next.push(Arc::new(reslot(&a, s).await)),
                 None => {
                     added += 1;
                     next.push(Arc::new(slot_from_account(a)));
@@ -316,6 +319,37 @@ impl Slots {
             }
         }
         if min == i64::MAX { 30 } else { min.max(1) }
+    }
+}
+
+fn display_for(a: &crate::db::accounts::Account) -> String {
+    a.label
+        .clone()
+        .or_else(|| a.email.clone())
+        .unwrap_or_else(|| format!("account#{}", a.id))
+}
+
+fn slot_matches(s: &Slot, a: &crate::db::accounts::Account) -> bool {
+    s.trusted == a.trusted && s.plan == a.plan_type && s.display == display_for(a)
+}
+
+/// A fresh slot carrying the previous one's cooldown, tokens and quota sample.
+async fn reslot(a: &crate::db::accounts::Account, prev: &Arc<Slot>) -> Slot {
+    let state = prev.state.lock().await;
+    Slot {
+        id: a.id,
+        provider_account_id: a.provider_account_id.clone(),
+        trusted: a.trusted,
+        plan: a.plan_type.clone(),
+        display: display_for(a),
+        state: Mutex::new(SlotState {
+            access_token: state.access_token.clone(),
+            refresh_token: state.refresh_token.clone(),
+            expires_at: state.expires_at,
+            status: state.status.clone(),
+            consecutive_fails: state.consecutive_fails,
+            usage: state.usage.clone(),
+        }),
     }
 }
 

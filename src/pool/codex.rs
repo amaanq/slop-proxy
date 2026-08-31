@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::Value;
 
-use super::{PoolError, Slot, Slots};
+use super::{AccountUsage, PoolError, Slot, Slots, UsageWindow};
 use crate::codex::client::CodexClient;
 use crate::codex::models::ModelInfo;
 use crate::db::Db;
@@ -84,6 +84,9 @@ impl CodexPool {
             match self.client.send(&creds, &slot.provider_account_id, req).await {
                 Ok(resp) => {
                     self.slots.mark_ok(&slot).await;
+                    if let Some(usage) = usage_from_headers(resp.headers()) {
+                        self.slots.note_usage(&slot, usage).await;
+                    }
                     return Ok((slot.id, resp));
                 }
                 Err(SendError::Auth(body)) => {
@@ -92,6 +95,9 @@ impl CodexPool {
                         match self.client.send(&creds, &slot.provider_account_id, req).await {
                             Ok(resp) => {
                                 self.slots.mark_ok(&slot).await;
+                                if let Some(usage) = usage_from_headers(resp.headers()) {
+                                    self.slots.note_usage(&slot, usage).await;
+                                }
                                 return Ok((slot.id, resp));
                             }
                             Err(e) => {
@@ -156,5 +162,39 @@ impl CodexPool {
             }
         }
         None
+    }
+}
+
+/// The codex backend reports quota on every successful response rather than
+/// from a queryable endpoint, so consumption is only known once an account
+/// has served traffic.
+fn usage_from_headers(headers: &reqwest::header::HeaderMap) -> Option<AccountUsage> {
+    let get = |name: &str| headers.get(name)?.to_str().ok()?.parse::<i64>().ok();
+    let mut windows = Vec::new();
+    for tier in ["primary", "secondary"] {
+        let minutes = get(&format!("x-codex-{tier}-window-minutes")).unwrap_or(0);
+        let Some(percent) = get(&format!("x-codex-{tier}-used-percent")) else {
+            continue;
+        };
+        if minutes <= 0 {
+            continue;
+        }
+        windows.push(UsageWindow {
+            name: window_name(minutes),
+            utilization: percent as f64 / 100.0,
+            resets_at: get(&format!("x-codex-{tier}-reset-at")),
+        });
+    }
+    (!windows.is_empty()).then_some(AccountUsage {
+        windows,
+        locked: false,
+    })
+}
+
+fn window_name(minutes: i64) -> String {
+    match minutes {
+        m if m % 1440 == 0 => format!("{}d", m / 1440),
+        m if m % 60 == 0 => format!("{}h", m / 60),
+        m => format!("{m}m"),
     }
 }

@@ -27,6 +27,7 @@ pub(crate) struct Slot {
     pub provider_account_id: String,
     pub display: String,
     pub trusted: bool,
+    pub plan: Option<String>,
     state: Mutex<SlotState>,
 }
 
@@ -77,6 +78,8 @@ enum Status {
 pub struct AccountSnapshot {
     pub provider: Provider,
     pub display: String,
+    pub plan: Option<String>,
+    pub trusted: bool,
     pub status: u8,
     pub cooldown_seconds: i64,
     pub consecutive_fails: u32,
@@ -201,6 +204,8 @@ impl Slots {
             out.push(AccountSnapshot {
                 provider: self.provider,
                 display: slot.display.clone(),
+                plan: slot.plan.clone(),
+                trusted: slot.trusted,
                 status,
                 cooldown_seconds,
                 consecutive_fails: st.consecutive_fails,
@@ -317,6 +322,7 @@ fn slot_from_account(a: crate::db::accounts::Account) -> Slot {
         id: a.id,
         provider_account_id: a.provider_account_id,
         trusted: a.trusted,
+        plan: a.plan_type,
         display: a
             .label
             .or(a.email)
@@ -344,6 +350,7 @@ pub(crate) fn test_slots(db: Db, provider: Provider, ids: &[(i64, bool)]) -> Slo
                     provider_account_id: format!("acct-{id}"),
                     display: format!("a{id}"),
                     trusted,
+                    plan: None,
                     state: Mutex::new(SlotState {
                         access_token: "at".into(),
                         refresh_token: "rt".into(),

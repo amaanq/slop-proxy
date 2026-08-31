@@ -144,13 +144,13 @@ fn convert_message(msg: &AnthMessage, out: &mut Vec<InputItem>) -> Result<(), St
     let assistant = msg.role == "assistant";
     let role = if assistant { "assistant" } else { "user" };
 
-    let blocks: Vec<Value> = match &msg.content {
+    let blocks = match &msg.content {
         Value::String(s) => vec![serde_json::json!({"type": "text", "text": s})],
         Value::Array(a) => a.clone(),
         other => return Err(format!("unsupported message content: {other}")),
     };
 
-    let mut parts: Vec<ContentPart> = Vec::new();
+    let mut parts = Vec::<ContentPart>::new();
     let flush = |parts: &mut Vec<ContentPart>, out: &mut Vec<InputItem>| {
         if !parts.is_empty() {
             out.push(InputItem::Message {

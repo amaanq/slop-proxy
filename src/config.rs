@@ -13,7 +13,22 @@ pub struct Config {
     pub db_path: PathBuf,
     pub bind: String,
     pub codex: CodexConfig,
+    pub anthropic: AnthropicConfig,
     pub models: ModelsConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct AnthropicConfig {
+    pub base_url: String,
+}
+
+impl Default for AnthropicConfig {
+    fn default() -> Self {
+        Self {
+            base_url: "https://api.anthropic.com".into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -46,24 +61,59 @@ impl Default for CodexConfig {
 
 impl CodexConfig {
     pub fn instructions(&self) -> String {
-        if let Some(path) = &self.instructions_file {
-            if let Ok(s) = std::fs::read_to_string(path) {
+        if let Some(path) = &self.instructions_file
+            && let Ok(s) = std::fs::read_to_string(path) {
                 return s;
             }
-        }
         self.instructions
             .clone()
             .unwrap_or_else(|| DEFAULT_INSTRUCTIONS.into())
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct ModelsConfig {
     pub default: String,
     pub default_effort: Option<String>,
     pub aliases: BTreeMap<String, ModelAlias>,
     pub known: Vec<String>,
+    /// Model patterns relayed verbatim to the Anthropic backend instead of
+    /// being translated for the codex one.
+    pub anthropic_patterns: Vec<String>,
+}
+
+impl Default for ModelsConfig {
+    fn default() -> Self {
+        Self {
+            default: String::new(),
+            default_effort: None,
+            aliases: BTreeMap::new(),
+            known: Vec::new(),
+            anthropic_patterns: vec!["claude-*".into()],
+        }
+    }
+}
+
+impl ModelsConfig {
+    /// True when the requested model is relayed verbatim to the Anthropic
+    /// backend instead of being translated for the codex one.
+    pub fn routes_to_anthropic(&self, model: &str) -> bool {
+        self.anthropic_patterns
+            .iter()
+            .any(|p| pattern_specificity(p, model).is_some())
+    }
+}
+
+/// Matches `model` against a literal pattern or a `prefix*` glob, returning
+/// the match specificity (prefix length; `usize::MAX` for an exact match).
+pub fn pattern_specificity(pattern: &str, model: &str) -> Option<usize> {
+    match pattern.strip_suffix('*') {
+        Some(prefix) if model.starts_with(prefix) => Some(prefix.len()),
+        Some(_) => None,
+        None if model == pattern => Some(usize::MAX),
+        None => None,
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -79,6 +129,7 @@ struct FileConfig {
     bind: Option<String>,
     db: Option<PathBuf>,
     codex: Option<CodexConfig>,
+    anthropic: Option<AnthropicConfig>,
     models: Option<ModelsConfig>,
 }
 
@@ -92,10 +143,11 @@ impl Config {
                 xdg_dir("XDG_CONFIG_HOME", ".config").join("slop-proxy/config.toml")
             });
 
-        let file: FileConfig = if config_path.exists() {
+        let file = if config_path.exists() {
             let raw = std::fs::read_to_string(&config_path)
                 .with_context(|| format!("reading {}", config_path.display()))?;
-            toml::from_str(&raw).with_context(|| format!("parsing {}", config_path.display()))?
+            toml::from_str::<FileConfig>(&raw)
+                .with_context(|| format!("parsing {}", config_path.display()))?
         } else {
             FileConfig::default()
         };
@@ -116,6 +168,7 @@ impl Config {
             db_path,
             bind,
             codex: file.codex.unwrap_or_default(),
+            anthropic: file.anthropic.unwrap_or_default(),
             models: file.models.unwrap_or_default(),
         })
     }

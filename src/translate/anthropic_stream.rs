@@ -151,13 +151,12 @@ impl AnthropicStream {
                 }
                 OutputItem::FunctionCall { arguments, .. } => {
                     if self.open == Some(OpenBlock::Tool) {
-                        if !self.tool_args_seen {
-                            if let Some(args) = arguments.filter(|a| !a.is_empty()) {
+                        if !self.tool_args_seen
+                            && let Some(args) = arguments.filter(|a| !a.is_empty()) {
                                 out.push(self.delta(
                                     json!({"type": "input_json_delta", "partial_json": args}),
                                 ));
                             }
-                        }
                         self.close_open(&mut out);
                     }
                 }
@@ -301,7 +300,7 @@ pub fn render_aggregated(agg: &Aggregated, model: &str, emit_thinking: bool) -> 
                 name,
                 arguments,
             } => {
-                let input: Value = serde_json::from_str(arguments).unwrap_or_else(|_| json!({}));
+                let input = serde_json::from_str(arguments).unwrap_or_else(|_| json!({}));
                 content.push(json!({"type": "tool_use", "id": id, "name": name, "input": input}));
             }
         }

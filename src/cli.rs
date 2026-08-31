@@ -1,79 +1,83 @@
 use std::path::PathBuf;
 
-use anyhow::{bail, Context, Result};
-use clap::{Parser, Subcommand};
+use anyhow::{Context, Result, bail};
+use pound::Parse;
 
 use crate::config::Config;
 use crate::db::Db;
+use crate::provider::Provider;
 
-#[derive(Parser)]
-#[command(
-    name = "slop-proxy",
-    about = "Anthropic/OpenAI API proxy backed by Codex subscription accounts"
-)]
+/// Anthropic/OpenAI API proxy backed by Codex subscription accounts
+#[derive(Parse)]
+#[pound(name = "slop-proxy")]
 pub struct Cli {
     /// Path to the sqlite database
-    #[arg(long, global = true)]
+    #[pound(long, global)]
     pub db: Option<PathBuf>,
 
     /// Path to config.toml
-    #[arg(long, global = true)]
+    #[pound(long, global)]
     pub config: Option<PathBuf>,
 
-    #[arg(short, long, global = true)]
+    #[pound(short, long, global)]
     pub verbose: bool,
 
-    #[command(subcommand)]
+    #[pound(subcommand)]
     pub command: Command,
 }
 
-#[derive(Subcommand)]
+#[derive(Parse)]
 pub enum Command {
-    /// Log in to a Codex (ChatGPT) account and store it
+    /// Log in to a subscription account and store it
     Login {
         /// Human-readable label for the account
-        #[arg(long)]
+        #[pound(long)]
         label: Option<String>,
+
+        /// Which backend to log in to
+        #[pound(long, default = "codex")]
+        provider: Provider,
     },
     /// Manage stored Codex accounts
     Accounts {
-        #[command(subcommand)]
+        #[pound(subcommand)]
         command: AccountsCommand,
     },
     /// Manage issued API tokens
     Token {
-        #[command(subcommand)]
+        #[pound(subcommand)]
         command: TokenCommand,
     },
     /// Run the API server
     Serve {
         /// Listen address
-        #[arg(long)]
+        #[pound(long)]
         bind: Option<String>,
     },
     /// Show usage statistics as JSON
     Stats {
         /// Accepted for compatibility; output is always JSON
-        #[arg(long, hide = true)]
+        #[pound(long, hidden)]
+        #[allow(dead_code)]
         json: bool,
         /// Window start: 24h, 7d, 30m, or RFC3339
-        #[arg(long)]
+        #[pound(long)]
         since: Option<String>,
         /// Window end (RFC3339)
-        #[arg(long)]
+        #[pound(long)]
         until: Option<String>,
     },
     /// List the models available from the codex backend, as JSON
     Models,
     /// Debug helpers
-    #[command(hide = true)]
+    #[pound(hidden)]
     Debug {
-        #[command(subcommand)]
+        #[pound(subcommand)]
         command: DebugCommand,
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Parse)]
 pub enum AccountsCommand {
     /// List stored accounts
     List,
@@ -81,11 +85,11 @@ pub enum AccountsCommand {
     Remove { account: String },
 }
 
-#[derive(Subcommand)]
+#[derive(Parse)]
 pub enum TokenCommand {
     /// Issue a new API token for a user
     Create {
-        #[arg(long)]
+        #[pound(long)]
         user: String,
     },
     /// List issued tokens
@@ -94,13 +98,13 @@ pub enum TokenCommand {
     Revoke { token: String },
 }
 
-#[derive(Subcommand)]
+#[derive(Parse)]
 pub enum DebugCommand {
     /// Send a raw request upstream and dump the SSE events
     Ping {
-        #[arg(long)]
+        #[pound(long)]
         model: Option<String>,
-        #[arg(long, default_value = "Say the word: pong")]
+        #[pound(long, default = "Say the word: pong")]
         prompt: String,
     },
     /// Force a token refresh for an account
@@ -113,7 +117,10 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
     let db = Db::open(&cfg.db_path).await?;
 
     match args.command {
-        Command::Login { label } => crate::oauth::login(&db, label).await,
+        Command::Login { label, provider } => match provider {
+            Provider::Codex => crate::oauth::login(&db, label).await,
+            Provider::Anthropic => crate::oauth::anthropic::login(&db, label).await,
+        },
         Command::Accounts { command } => match command {
             AccountsCommand::List => accounts_list(&db).await,
             AccountsCommand::Remove { account } => accounts_remove(&db, &account).await,
@@ -148,6 +155,7 @@ async fn accounts_list(db: &Db) -> Result<()> {
     #[derive(serde::Serialize)]
     struct AccountRow<'a> {
         id: i64,
+        provider: &'a str,
         email: Option<&'a str>,
         plan_type: Option<&'a str>,
         status: &'a str,
@@ -158,10 +166,11 @@ async fn accounts_list(db: &Db) -> Result<()> {
 
     let accounts = db.list_accounts().await?;
     let now = chrono::Utc::now().timestamp();
-    let rows: Vec<AccountRow> = accounts
+    let rows = accounts
         .iter()
         .map(|a| AccountRow {
             id: a.id,
+            provider: a.provider.as_str(),
             email: a.email.as_deref(),
             plan_type: a.plan_type.as_deref(),
             status: &a.status,
@@ -171,7 +180,7 @@ async fn accounts_list(db: &Db) -> Result<()> {
                 .flatten(),
             disabled_reason: a.disabled_reason.as_deref(),
         })
-        .collect();
+        .collect::<Vec<AccountRow>>();
     println!("{}", serde_json::to_string_pretty(&rows)?);
     Ok(())
 }
@@ -205,7 +214,7 @@ async fn token_list(db: &Db) -> Result<()> {
     }
 
     let tokens = db.list_tokens().await?;
-    let rows: Vec<TokenRow> = tokens
+    let rows = tokens
         .iter()
         .map(|t| TokenRow {
             id: t.id,
@@ -215,7 +224,7 @@ async fn token_list(db: &Db) -> Result<()> {
             revoked: t.revoked_at.is_some(),
             revoked_at: t.revoked_at,
         })
-        .collect();
+        .collect::<Vec<TokenRow>>();
     println!("{}", serde_json::to_string_pretty(&rows)?);
     Ok(())
 }
@@ -230,24 +239,18 @@ async fn token_revoke(db: &Db, token: &str) -> Result<()> {
 }
 
 async fn models(db: &Db, cfg: &Config) -> Result<()> {
-    let pool = crate::pool::AccountPool::load(db.clone()).await?;
     let client = crate::codex::client::CodexClient::new(cfg.codex.clone());
+    let pool = crate::pool::codex::CodexPool::load(db.clone(), client).await?;
 
-    let models = match pool.any_active_credentials().await {
-        Some((access, account_id)) => match client.list_models(&access, &account_id).await {
-            Ok(models) => models,
-            Err(e) => {
-                eprintln!("could not fetch models from the codex backend: {e}");
-                Vec::new()
-            }
-        },
-        None => {
-            eprintln!("no usable account; run `slop-proxy login`");
+    let models = match pool.list_models().await {
+        Ok(models) => models,
+        Err(e) => {
+            eprintln!("could not fetch models from the codex backend: {e}");
             Vec::new()
         }
     };
 
-    let arr: Vec<serde_json::Value> = models
+    let arr = models
         .iter()
         .map(|m| {
             let mut v = serde_json::to_value(m).unwrap_or_else(|_| serde_json::json!({}));
@@ -256,7 +259,7 @@ async fn models(db: &Db, cfg: &Config) -> Result<()> {
             }
             v
         })
-        .collect();
+        .collect::<Vec<serde_json::Value>>();
     println!("{}", serde_json::to_string_pretty(&arr)?);
     Ok(())
 }

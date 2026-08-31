@@ -1,7 +1,7 @@
 use serde_json::json;
 use thiserror::Error;
 
-use super::{TokenSet, CLIENT_ID, TOKEN_URL};
+use super::{CLIENT_ID, TOKEN_URL, TokenSet};
 
 #[derive(Debug, Error)]
 pub enum RefreshError {
@@ -21,8 +21,7 @@ const TERMINAL_CODES: &[&str] = &[
 
 /// Note: auth.openai.com rotates refresh tokens.
 pub async fn refresh(refresh_token: &str) -> Result<TokenSet, RefreshError> {
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = super::http()
         .post(TOKEN_URL)
         .json(&json!({
             "client_id": CLIENT_ID,
@@ -61,7 +60,7 @@ pub async fn refresh(refresh_token: &str) -> Result<TokenSet, RefreshError> {
         return Err(RefreshError::Transient(msg));
     }
 
-    let parsed: super::TokenResponse = serde_json::from_str(&body)
+    let parsed = serde_json::from_str(&body)
         .map_err(|e| RefreshError::Transient(format!("bad token response: {e}")))?;
     Ok(TokenSet::from_response(parsed))
 }

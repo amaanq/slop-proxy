@@ -92,8 +92,8 @@ impl OpenAiStream {
             ResponsesEvent::OutputItemDone {
                 item: OutputItem::FunctionCall { arguments, .. },
             } => {
-                if self.tool_open && !self.tool_args_seen {
-                    if let Some(args) = arguments.filter(|a| !a.is_empty()) {
+                if self.tool_open && !self.tool_args_seen
+                    && let Some(args) = arguments.filter(|a| !a.is_empty()) {
                         out.push(self.chunk(
                             json!({
                                 "tool_calls": [{
@@ -104,7 +104,6 @@ impl OpenAiStream {
                             None,
                         ));
                     }
-                }
                 self.tool_open = false;
             }
             ResponsesEvent::Completed { response } => {

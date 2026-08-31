@@ -1,8 +1,15 @@
 # slop-proxy
 
 Serve Anthropic- and OpenAI-compatible API endpoints backed by OpenAI Codex
-subscription (ChatGPT) accounts. Log in through the CLI, pool multiple accounts
-with rotation and failover, issue per-user API tokens, and track token usage.
+subscription (ChatGPT) accounts and Anthropic (Claude Max) accounts. Log in
+through the CLI, pool multiple accounts with rotation and failover, issue
+per-user API tokens, and track token usage.
+
+Requests for `claude-*` models (configurable via `models.anthropic_patterns`)
+are relayed verbatim to the Anthropic API over the pooled Max accounts, sticky
+per session so prompt caches keep hitting. Everything else is translated to
+the Codex backend. Log in to Max accounts with
+`slop-proxy login --provider anthropic`.
 
 Endpoints: `POST /v1/messages`, `POST /v1/chat/completions`, `GET /v1/models`,
 `POST /v1/responses` — streaming, tools, images, and reasoning. Requested model

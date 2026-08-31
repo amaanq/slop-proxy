@@ -1,4 +1,4 @@
-use crate::config::ModelsConfig;
+use crate::config::{ModelsConfig, pattern_specificity};
 
 #[derive(Debug, Clone)]
 pub struct ResolvedModel {
@@ -21,13 +21,10 @@ fn split_suffix(requested: &str) -> (&str, Option<String>) {
 pub fn resolve(cfg: &ModelsConfig, requested: &str) -> ResolvedModel {
     let (name, suffix_effort) = split_suffix(requested);
 
-    let mut best: Option<(usize, &crate::config::ModelAlias)> = None;
+    let mut best = None;
     for (pattern, alias) in &cfg.aliases {
-        let specificity = match pattern.strip_suffix('*') {
-            Some(prefix) if name.starts_with(prefix) => prefix.len(),
-            Some(_) => continue,
-            None if name == pattern => usize::MAX,
-            None => continue,
+        let Some(specificity) = pattern_specificity(pattern, name) else {
+            continue;
         };
         if best.map(|(s, _)| specificity > s).unwrap_or(true) {
             best = Some((specificity, alias));

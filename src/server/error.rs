@@ -27,11 +27,11 @@ pub fn error_response(dialect: Dialect, status: u16, err_type: &str, message: &s
 
 pub fn pool_error_response(dialect: Dialect, err: PoolError) -> Response {
     match err {
-        PoolError::NoAccounts => error_response(
+        PoolError::NoAccounts(provider) => error_response(
             dialect,
             503,
             "api_error",
-            "no usable codex accounts; an admin must run `slop-proxy login`",
+            &format!("no usable {provider} accounts; an admin must run `slop-proxy login`"),
         ),
         PoolError::AllCoolingDown { retry_after } => {
             let err_type = match dialect {
@@ -64,4 +64,13 @@ pub fn pool_error_response(dialect: Dialect, err: PoolError) -> Response {
 
 pub fn translation_error(dialect: Dialect, msg: &str) -> Response {
     error_response(dialect, 400, "invalid_request_error", msg)
+}
+
+pub fn pool_error_status(e: &PoolError) -> i64 {
+    match e {
+        PoolError::NoAccounts(_) => 503,
+        PoolError::AllCoolingDown { .. } => 429,
+        PoolError::BadRequest(_) => 400,
+        PoolError::Upstream(_) => 502,
+    }
 }

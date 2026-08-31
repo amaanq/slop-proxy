@@ -1,24 +1,7 @@
 use serde_json::Value;
-use thiserror::Error;
 
 use crate::config::CodexConfig;
-
-#[derive(Debug, Error)]
-pub enum SendError {
-    #[error("upstream auth failed: {0}")]
-    Auth(String),
-    #[error("upstream rate limited")]
-    RateLimited {
-        retry_after: Option<i64>,
-        body: String,
-    },
-    #[error("upstream error {status}: {body}")]
-    Upstream { status: u16, body: String },
-    #[error("bad request upstream: {0}")]
-    BadRequest(String),
-    #[error("network error: {0}")]
-    Network(String),
-}
+use crate::upstream::{SendError, retry_after_secs};
 
 pub struct CodexClient {
     http: reqwest::Client,
@@ -102,8 +85,8 @@ impl CodexClient {
                 body.chars().take(400).collect::<String>()
             ));
         }
-        let parsed: super::models::ModelsResponse =
-            serde_json::from_str(&body).map_err(|e| format!("parsing models response: {e}"))?;
+        let parsed = serde_json::from_str::<super::models::ModelsResponse>(&body)
+            .map_err(|e| format!("parsing models response: {e}"))?;
         Ok(parsed.models)
     }
 
@@ -137,7 +120,7 @@ impl CodexClient {
             return Ok(resp);
         }
 
-        let retry_after = super::rate_limits::retry_after_secs(resp.headers());
+        let retry_after = retry_after_secs(resp.headers(), &["x-codex-primary-reset-at"]);
         let body = resp.text().await.unwrap_or_default();
         let body = body.chars().take(2000).collect::<String>();
         Err(match status.as_u16() {

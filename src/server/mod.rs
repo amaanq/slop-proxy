@@ -101,6 +101,7 @@ pub async fn serve(db: Db, cfg: Config, bind: &str) -> Result<()> {
             if let Err(e) = reload_state.anthropic.reload().await {
                 tracing::warn!("reloading anthropic accounts: {e}");
             }
+            reload_state.codex.poll_usage().await;
             reload_state.anthropic.poll_usage().await;
         }
     });

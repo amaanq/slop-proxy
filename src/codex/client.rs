@@ -3,6 +3,41 @@ use serde_json::Value;
 use crate::config::CodexConfig;
 use crate::upstream::{SendError, retry_after_secs};
 
+/// One rolling limit window as the usage endpoint reports it.
+#[derive(Debug, Default, Clone, serde::Deserialize)]
+pub struct UsageWindow {
+    #[serde(default)]
+    pub used_percent: f64,
+    #[serde(default)]
+    pub limit_window_seconds: i64,
+    #[serde(default)]
+    pub reset_at: Option<i64>,
+}
+
+#[derive(Debug, Default, Clone, serde::Deserialize)]
+pub struct RateLimit {
+    #[serde(default)]
+    pub limit_reached: bool,
+    #[serde(default)]
+    pub primary_window: Option<UsageWindow>,
+    #[serde(default)]
+    pub secondary_window: Option<UsageWindow>,
+}
+
+impl RateLimit {
+    pub fn windows(&self) -> impl Iterator<Item = &UsageWindow> {
+        [&self.primary_window, &self.secondary_window]
+            .into_iter()
+            .flatten()
+    }
+}
+
+#[derive(Debug, Default, Clone, serde::Deserialize)]
+pub struct Usage {
+    #[serde(default)]
+    pub rate_limit: RateLimit,
+}
+
 pub struct CodexClient {
     http: reqwest::Client,
     cfg: CodexConfig,
@@ -42,6 +77,32 @@ impl CodexClient {
             }
             other => other,
         }
+    }
+
+    /// Quota without spending an inference request. The same figures ride on
+    /// response headers, but only for accounts that are actively serving.
+    pub async fn usage(
+        &self,
+        access_token: &str,
+        chatgpt_account_id: &str,
+    ) -> Result<Usage, String> {
+        let resp = self
+            .http
+            .get(format!(
+                "{}/usage",
+                self.cfg.base_url.trim_end_matches('/')
+            ))
+            .bearer_auth(access_token)
+            .header("chatgpt-account-id", chatgpt_account_id)
+            .header("originator", self.cfg.originator.clone())
+            .header("version", self.cfg.version.clone())
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        if !resp.status().is_success() {
+            return Err(resp.status().to_string());
+        }
+        resp.json().await.map_err(|e| e.to_string())
     }
 
     pub fn models_url(&self) -> String {

@@ -56,10 +56,6 @@ pub enum Command {
     },
     /// Show usage statistics as JSON
     Stats {
-        /// Accepted for compatibility; output is always JSON
-        #[pound(long, hidden)]
-        #[allow(dead_code)]
-        json: bool,
         /// Window start: 24h, 7d, 30m, or RFC3339
         #[pound(long)]
         since: Option<String>,
@@ -134,11 +130,7 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
             let bind = bind.unwrap_or_else(|| cfg.bind.clone());
             crate::server::serve(db, cfg, &bind).await
         }
-        Command::Stats {
-            json: _,
-            since,
-            until,
-        } => crate::stats::run(&db, since, until).await,
+        Command::Stats { since, until } => crate::stats::run(&db, since, until).await,
         Command::Models => models(&db, &cfg).await,
         Command::Debug { command } => match command {
             DebugCommand::Ping { model, prompt } => {

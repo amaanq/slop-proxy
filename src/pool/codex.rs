@@ -103,6 +103,22 @@ impl CodexPool {
         self.client.list_models(&access, &account_id).await
     }
 
+    /// The catalog body untouched, for relaying to a codex client verbatim.
+    pub async fn models_raw(&self) -> Result<String, String> {
+        let (access, account_id) = self
+            .any_active_credentials()
+            .await
+            .ok_or_else(|| "no usable account; run `slop-proxy login`".to_string())?;
+        let (status, body) = self.client.models_raw(&access, &account_id).await?;
+        if !status.is_success() {
+            return Err(format!(
+                "{status}: {}",
+                body.chars().take(400).collect::<String>()
+            ));
+        }
+        Ok(body)
+    }
+
     pub async fn execute(
         &self,
         req: &Value,

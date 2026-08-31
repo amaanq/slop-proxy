@@ -41,7 +41,7 @@ impl AnthropicPool {
     /// Rendezvous-hashed order: a session sticks to its highest-scoring
     /// account so upstream prompt caches keep hitting, and only moves while
     /// that account is cooling down.
-    async fn ranked(&self, session_key: &str) -> Vec<Arc<Slot>> {
+    async fn ranked(&self, session_key: &str, prefer_trusted: bool) -> Vec<Arc<Slot>> {
         let mut scored = self
             .slots
             .list()
@@ -55,7 +55,12 @@ impl AnthropicPool {
                 (u64::from_le_bytes(d[..8].try_into().unwrap()), s.clone())
             })
             .collect::<Vec<(u64, Arc<Slot>)>>();
-        scored.sort_by_key(|s| std::cmp::Reverse(s.0));
+        scored.sort_by_key(|(score, slot)| {
+            (
+                std::cmp::Reverse(prefer_trusted && slot.trusted),
+                std::cmp::Reverse(*score),
+            )
+        });
         scored.into_iter().map(|(_, s)| s).collect()
     }
 
@@ -65,8 +70,9 @@ impl AnthropicPool {
         body: &Value,
         hdrs: &RelayHeaders,
         session_key: &str,
+        prefer_trusted: bool,
     ) -> Result<(i64, reqwest::Response), PoolError> {
-        let ranked = self.ranked(session_key).await;
+        let ranked = self.ranked(session_key, prefer_trusted).await;
         if ranked.is_empty() {
             return Err(PoolError::NoAccounts(Provider::Anthropic));
         }
@@ -158,7 +164,7 @@ mod tests {
     use super::*;
     use crate::config::AnthropicConfig;
 
-    async fn test_pool(ids: &[i64]) -> AnthropicPool {
+    async fn test_pool(ids: &[(i64, bool)]) -> AnthropicPool {
         let db_path = std::env::temp_dir().join(format!("slop-rdv-{}.db", uuid::Uuid::new_v4()));
         let db = Db::open(&db_path).await.unwrap();
         AnthropicPool {
@@ -169,25 +175,46 @@ mod tests {
 
     #[tokio::test]
     async fn rendezvous_is_sticky_and_spreads() {
-        let pool = test_pool(&[1, 2, 3, 4]).await;
+        let pool = test_pool(&[(1, false), (2, false), (3, false), (4, false)]).await;
 
-        let first = pool.ranked("session-a").await[0].id;
+        let first = pool.ranked("session-a", false).await[0].id;
         for _ in 0..10 {
-            assert_eq!(pool.ranked("session-a").await[0].id, first);
+            assert_eq!(pool.ranked("session-a", false).await[0].id, first);
         }
 
         let mut winners = HashSet::new();
         for i in 0..64 {
-            winners.insert(pool.ranked(&format!("session-{i}")).await[0].id);
+            winners.insert(pool.ranked(&format!("session-{i}"), false).await[0].id);
         }
         assert!(
             winners.len() > 1,
             "all sessions landed on one account"
         );
 
-        let order = pool.ranked("session-a").await;
+        let order = pool.ranked("session-a", false).await;
         assert_eq!(order.len(), 4);
         let ids = order.iter().map(|s| s.id).collect::<HashSet<i64>>();
         assert_eq!(ids.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn prefer_trusted_ranks_trusted_first() {
+        let pool = test_pool(&[(1, false), (2, true), (3, false), (4, true)]).await;
+
+        for i in 0..16 {
+            let order = pool.ranked(&format!("session-{i}"), true).await;
+            let heads = [order[0].id, order[1].id];
+            assert!(heads.contains(&2) && heads.contains(&4), "untrusted ranked first");
+        }
+
+        let plain = pool.ranked("session-x", false).await;
+        let preferred = pool.ranked("session-x", true).await;
+        let plain_trusted = plain
+            .iter()
+            .filter(|s| s.trusted)
+            .map(|s| s.id)
+            .collect::<Vec<_>>();
+        let preferred_trusted = preferred[..2].iter().map(|s| s.id).collect::<Vec<_>>();
+        assert_eq!(plain_trusted, preferred_trusted, "stickiness broken within trusted group");
     }
 }

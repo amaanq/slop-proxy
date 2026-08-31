@@ -56,7 +56,7 @@ pub async fn messages(
         Ok(v) => v,
         Err(e) => return translation_error(DIALECT, &format!("serializing request: {e}")),
     };
-    let (account_id, resp) = match state.codex.execute(&req_value).await {
+    let (account_id, resp) = match state.codex.execute(&req_value, auth.prefer_trusted).await {
         Ok(r) => r,
         Err(e) => {
             let status = pool_error_status(&e);

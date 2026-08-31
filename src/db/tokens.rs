@@ -20,6 +20,7 @@ pub struct TokenLimits {
     pub tokens: Option<i64>,
     pub window_seconds: i64,
     pub slowdown_ms: i64,
+    pub prefer_trusted: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -55,7 +56,7 @@ impl Db {
         let conn = self.0.lock().await;
         let mut stmt = conn.prepare(
             "SELECT id, user, token_prefix, created_at, revoked_at,
-                    request_limit, token_limit, window_seconds, slowdown_ms
+                    request_limit, token_limit, window_seconds, slowdown_ms, prefer_trusted
              FROM api_tokens ORDER BY id",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -70,6 +71,7 @@ impl Db {
                     tokens: r.get(6)?,
                     window_seconds: r.get(7)?,
                     slowdown_ms: r.get(8)?,
+                    prefer_trusted: r.get(9)?,
                 },
             })
         })?;
@@ -91,7 +93,8 @@ impl Db {
         let id = key.parse::<i64>().unwrap_or(-1);
         Ok(conn.execute(
             "UPDATE api_tokens
-             SET request_limit = ?3, token_limit = ?4, window_seconds = ?5, slowdown_ms = ?6
+             SET request_limit = ?3, token_limit = ?4, window_seconds = ?5, slowdown_ms = ?6,
+                 prefer_trusted = ?7
              WHERE id = ?1 OR token_prefix = ?2",
             params![
                 id,
@@ -100,6 +103,7 @@ impl Db {
                 limits.tokens,
                 limits.window_seconds,
                 limits.slowdown_ms,
+                limits.prefer_trusted,
             ],
         )?)
     }
@@ -107,7 +111,7 @@ impl Db {
     pub async fn auth_token(&self, raw: &str) -> Result<Option<AuthenticatedToken>> {
         let conn = self.0.lock().await;
         let mut stmt = conn.prepare(
-            "SELECT id, user, request_limit, token_limit, window_seconds, slowdown_ms
+            "SELECT id, user, request_limit, token_limit, window_seconds, slowdown_ms, prefer_trusted
              FROM api_tokens WHERE token_hash = ?1 AND revoked_at IS NULL",
         )?;
         let mut rows = stmt.query_map(params![hash(raw)], |r| {
@@ -119,6 +123,7 @@ impl Db {
                     tokens: r.get(3)?,
                     window_seconds: r.get(4)?,
                     slowdown_ms: r.get(5)?,
+                    prefer_trusted: r.get(6)?,
                 },
             })
         })?;

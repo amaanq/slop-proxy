@@ -10,6 +10,7 @@ pub struct Account {
     pub id: i64,
     pub provider: Provider,
     pub provider_account_id: String,
+    pub trusted: bool,
     pub email: Option<String>,
     pub label: Option<String>,
     pub plan_type: Option<String>,
@@ -26,6 +27,7 @@ fn from_row(row: &Row) -> rusqlite::Result<Account> {
         id: row.get("id")?,
         provider: row.get("provider")?,
         provider_account_id: row.get("provider_account_id")?,
+        trusted: row.get("trusted")?,
         email: row.get("email")?,
         label: row.get("label")?,
         plan_type: row.get("plan_type")?,
@@ -38,7 +40,7 @@ fn from_row(row: &Row) -> rusqlite::Result<Account> {
     })
 }
 
-const COLS: &str = "id, provider, provider_account_id, email, label, plan_type, access_token, refresh_token, access_expires_at, status, cooldown_until, disabled_reason";
+const COLS: &str = "id, provider, provider_account_id, trusted, email, label, plan_type, access_token, refresh_token, access_expires_at, status, cooldown_until, disabled_reason";
 
 impl Db {
     #[allow(clippy::too_many_arguments)]
@@ -122,6 +124,16 @@ impl Db {
             params![id, tokens.access_token, tokens.refresh_token, tokens.expires_at],
         )?;
         Ok(())
+    }
+
+    pub async fn set_account_trusted(&self, key: &str, trusted: bool) -> Result<usize> {
+        let conn = self.0.lock().await;
+        let id = key.parse::<i64>().unwrap_or(-1);
+        Ok(conn.execute(
+            "UPDATE accounts SET trusted = ?3, updated_at = unixepoch()
+             WHERE id = ?1 OR email = ?2 OR label = ?2",
+            params![id, key, trusted],
+        )?)
     }
 
     pub async fn set_account_status(

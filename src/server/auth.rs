@@ -12,6 +12,7 @@ pub struct AuthInfo {
     pub token_id: i64,
     pub user: String,
     pub meter_id: i64,
+    pub prefer_trusted: bool,
 }
 
 pub async fn require_token(
@@ -77,6 +78,7 @@ pub async fn require_token(
                 token_id: token.id,
                 user: token.user,
                 meter_id: admission.meter_id,
+                prefer_trusted: token.limits.prefer_trusted,
             });
             let mut response = next.run(req).await;
             if let Some(limit) = admission.request_limit {

@@ -2,6 +2,7 @@ CREATE TABLE IF NOT EXISTS accounts (
   id                  INTEGER PRIMARY KEY,
   provider            TEXT    NOT NULL,
   provider_account_id TEXT    NOT NULL,
+  trusted             INTEGER NOT NULL DEFAULT 0,
   email               TEXT,
   label               TEXT,
   plan_type           TEXT,
@@ -26,6 +27,7 @@ CREATE TABLE IF NOT EXISTS api_tokens (
   token_limit    INTEGER,
   window_seconds INTEGER NOT NULL DEFAULT 3600,
   slowdown_ms    INTEGER NOT NULL DEFAULT 0,
+  prefer_trusted INTEGER NOT NULL DEFAULT 0,
   created_at     INTEGER NOT NULL DEFAULT (unixepoch()),
   revoked_at     INTEGER
 );

@@ -57,7 +57,7 @@ pub async fn chat_completions(
         Ok(v) => v,
         Err(e) => return translation_error(DIALECT, &format!("serializing request: {e}")),
     };
-    let (account_id, resp) = match state.codex.execute(&req_value).await {
+    let (account_id, resp) = match state.codex.execute(&req_value, auth.prefer_trusted).await {
         Ok(r) => r,
         Err(e) => {
             log_error(&state.db, record, pool_error_status(&e), "pool");
@@ -277,7 +277,7 @@ pub async fn responses_passthrough(
         ..Default::default()
     };
 
-    let (account_id, resp) = match state.codex.execute(&body).await {
+    let (account_id, resp) = match state.codex.execute(&body, auth.prefer_trusted).await {
         Ok(r) => r,
         Err(e) => {
             log_error(&state.db, record, pool_error_status(&e), "pool");

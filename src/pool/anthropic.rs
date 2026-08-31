@@ -77,12 +77,7 @@ impl AnthropicPool {
     }
 
     /// Rendezvous-hashed order: a session sticks to its highest-scoring
-    /// account so upstream prompt caches keep hitting, and only moves while
-    /// that account is cooling down. Accounts matching the token's trusted
-    /// preference sort ahead of the rest, which keeps ordinary traffic off
-    /// the scarce trusted accounts until the others are unavailable, and an
-    /// account whose window is nearly spent sorts behind its peers so
-    /// sessions migrate before it starts rejecting them.
+    /// account so upstream prompt caches keep hitting.
     async fn ranked(&self, session_key: &str, prefer_trusted: bool) -> Vec<Arc<Slot>> {
         let mut scored = Vec::new();
         for slot in self.slots.list().await {

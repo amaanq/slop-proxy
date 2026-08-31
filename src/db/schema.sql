@@ -1,0 +1,50 @@
+CREATE TABLE IF NOT EXISTS accounts (
+  id                  INTEGER PRIMARY KEY,
+  provider            TEXT    NOT NULL,
+  provider_account_id TEXT    NOT NULL,
+  email               TEXT,
+  label               TEXT,
+  plan_type           TEXT,
+  access_token        TEXT    NOT NULL,
+  refresh_token       TEXT    NOT NULL,
+  id_token            TEXT,
+  access_expires_at   INTEGER,
+  last_refresh_at     INTEGER,
+  status              TEXT    NOT NULL DEFAULT 'active',
+  cooldown_until      INTEGER,
+  disabled_reason     TEXT,
+  created_at          INTEGER NOT NULL DEFAULT (unixepoch()),
+  updated_at          INTEGER NOT NULL DEFAULT (unixepoch()),
+  UNIQUE (provider, provider_account_id)
+);
+
+CREATE TABLE IF NOT EXISTS api_tokens (
+  id           INTEGER PRIMARY KEY,
+  user         TEXT    NOT NULL,
+  token_hash   BLOB    NOT NULL UNIQUE,
+  token_prefix TEXT    NOT NULL,
+  created_at   INTEGER NOT NULL DEFAULT (unixepoch()),
+  revoked_at   INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS usage_log (
+  id                INTEGER PRIMARY KEY,
+  ts                INTEGER NOT NULL DEFAULT (unixepoch()),
+  token_id          INTEGER REFERENCES api_tokens(id),
+  user              TEXT    NOT NULL,
+  account_id        INTEGER REFERENCES accounts(id),
+  dialect           TEXT    NOT NULL,
+  requested_model   TEXT    NOT NULL,
+  upstream_model    TEXT    NOT NULL,
+  input_tokens      INTEGER NOT NULL DEFAULT 0,
+  output_tokens     INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+  reasoning_tokens  INTEGER NOT NULL DEFAULT 0,
+  status            INTEGER NOT NULL,
+  error_kind        TEXT,
+  duration_ms       INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_usage_ts         ON usage_log(ts);
+CREATE INDEX IF NOT EXISTS idx_usage_user_ts    ON usage_log(user, ts);
+CREATE INDEX IF NOT EXISTS idx_usage_account_ts ON usage_log(account_id, ts);

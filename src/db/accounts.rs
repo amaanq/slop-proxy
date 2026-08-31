@@ -55,8 +55,7 @@ impl Db {
         conn.execute(
             "INSERT INTO accounts (provider, provider_account_id, email, label, plan_type, access_token, refresh_token, id_token, access_expires_at, last_refresh_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, unixepoch())
-             ON CONFLICT(provider_account_id) DO UPDATE SET
-               provider = excluded.provider,
+             ON CONFLICT(provider, provider_account_id) DO UPDATE SET
                email = excluded.email,
                label = COALESCE(excluded.label, label),
                plan_type = excluded.plan_type,
@@ -82,8 +81,8 @@ impl Db {
             ],
         )?;
         let id = conn.query_row(
-            "SELECT id FROM accounts WHERE provider_account_id = ?1",
-            [provider_account_id],
+            "SELECT id FROM accounts WHERE provider = ?1 AND provider_account_id = ?2",
+            params![provider, provider_account_id],
             |r| r.get(0),
         )?;
         Ok(id)

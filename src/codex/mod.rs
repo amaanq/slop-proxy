@@ -82,7 +82,12 @@ pub async fn debug_ping(
     let client = client::CodexClient::new(cfg.codex.clone());
     let req = serde_json::to_value(&req)?;
     let mut stream = match client
-        .send(&account.access_token, &account.provider_account_id, &req)
+        .send(
+            &account.access_token,
+            &account.provider_account_id,
+            &req,
+            &uuid::Uuid::new_v4().to_string(),
+        )
         .await
     {
         Ok(resp) => sse::event_stream(resp),

@@ -128,6 +128,7 @@ impl CodexPool {
             return Err(PoolError::NoAccounts(Provider::Codex));
         }
         let mut last_err = Option::<SendError>::None;
+        let session_id = session_uuid(session_key);
 
         for _ in 0..attempts {
             let Some(slot) = self.next_available(prefer_trusted, session_key).await else {
@@ -139,7 +140,7 @@ impl CodexPool {
 
             match self
                 .client
-                .send(&creds, &slot.provider_account_id, req)
+                .send(&creds, &slot.provider_account_id, req, &session_id)
                 .await
             {
                 Ok(resp) => {
@@ -154,7 +155,7 @@ impl CodexPool {
                     if let Ok(creds) = self.slots.fresh_token(&slot, true).await {
                         match self
                             .client
-                            .send(&creds, &slot.provider_account_id, req)
+                            .send(&creds, &slot.provider_account_id, req, &session_id)
                             .await
                         {
                             Ok(resp) => {
@@ -264,6 +265,19 @@ fn usage_from_headers(headers: &reqwest::header::HeaderMap) -> Option<AccountUsa
         locked: false,
         observed_at: 0,
     })
+}
+
+/// Codex sends one session id per conversation, not per request. Deriving it
+/// from the same key means upstream sees a continuing thread rather than a
+/// stranger every turn.
+fn session_uuid(session_key: &str) -> String {
+    if session_key.is_empty() {
+        return uuid::Uuid::new_v4().to_string();
+    }
+    let digest = hmac_sha256::Hash::hash(session_key.as_bytes());
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    uuid::Builder::from_random_bytes(bytes).into_uuid().to_string()
 }
 
 fn window_name(minutes: i64) -> String {

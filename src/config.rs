@@ -12,6 +12,8 @@ pub const DEFAULT_INSTRUCTIONS: &str = "You are Codex, based on GPT-5. You are r
 pub struct Config {
     pub db_path: PathBuf,
     pub bind: String,
+    /// Extra unauthenticated listener serving GET /metrics when set.
+    pub metrics_bind: Option<String>,
     pub codex: CodexConfig,
     pub anthropic: AnthropicConfig,
     pub models: ModelsConfig,
@@ -127,6 +129,7 @@ pub struct ModelAlias {
 #[serde(default)]
 struct FileConfig {
     bind: Option<String>,
+    metrics_bind: Option<String>,
     db: Option<PathBuf>,
     codex: Option<CodexConfig>,
     anthropic: Option<AnthropicConfig>,
@@ -167,6 +170,7 @@ impl Config {
         Ok(Self {
             db_path,
             bind,
+            metrics_bind: file.metrics_bind,
             codex: file.codex.unwrap_or_default(),
             anthropic: file.anthropic.unwrap_or_default(),
             models: file.models.unwrap_or_default(),

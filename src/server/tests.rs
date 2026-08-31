@@ -100,6 +100,7 @@ async fn spawn_proxy_with(models: ModelsConfig, anthropic_base: Option<String>) 
     let cfg = Config {
         db_path,
         bind: String::new(),
+        metrics_bind: None,
         codex: CodexConfig {
             base_url,
             ..CodexConfig::default()
@@ -352,4 +353,52 @@ async fn anthropic_relay_passthrough() {
     assert_eq!(totals.requests, 1);
     assert_eq!(totals.input_tokens, 50);
     assert_eq!(totals.output_tokens, 7);
+}
+
+#[tokio::test]
+async fn metrics_render_accounts_and_usage() {
+    let (base, db) = spawn_proxy().await;
+    let body = serde_json::json!({
+        "model": "gpt-5-codex",
+        "messages": [{"role": "user", "content": "hi"}]
+    });
+    reqwest::Client::new()
+        .post(format!("{base}/v1/chat/completions"))
+        .bearer_auth("sp-test")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let cfg = Config {
+        db_path: std::path::PathBuf::new(),
+        bind: String::new(),
+        metrics_bind: None,
+        codex: CodexConfig::default(),
+        anthropic: AnthropicConfig::default(),
+        models: ModelsConfig::default(),
+    };
+    let state = AppState {
+        db: db.clone(),
+        codex: Arc::new(
+            CodexPool::load(db.clone(), CodexClient::new(cfg.codex.clone()))
+                .await
+                .unwrap(),
+        ),
+        anthropic: Arc::new(
+            AnthropicPool::load(db.clone(), AnthropicClient::new(cfg.anthropic.clone()))
+                .await
+                .unwrap(),
+        ),
+        cfg: Arc::new(cfg),
+        models: Arc::new(super::ModelCache::new()),
+    };
+    let resp = super::metrics::metrics(axum::extract::State(state)).await;
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+    let text = String::from_utf8(bytes.to_vec()).unwrap();
+
+    assert!(text.contains("slop_account_status{provider=\"codex\",account=\"test@example.com\"} 0"));
+    assert!(text.contains("slop_requests_total{user=\"alice\",model=\"gpt-5-codex\",dialect=\"openai\"} 1"));
+    assert!(text.contains("kind=\"input\"} 100"));
 }

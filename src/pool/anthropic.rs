@@ -31,6 +31,10 @@ impl AnthropicPool {
         self.slots.is_empty()
     }
 
+    pub async fn snapshot(&self) -> Vec<super::AccountSnapshot> {
+        self.slots.snapshot().await
+    }
+
     /// Rendezvous-hashed order: a session sticks to its highest-scoring
     /// account so upstream prompt caches keep hitting, and only moves while
     /// that account is cooling down.
@@ -79,6 +83,9 @@ impl AnthropicPool {
             match self.client.send(&token, path, body, hdrs).await {
                 Ok(resp) => {
                     self.slots.mark_ok(&slot).await;
+                    self.slots
+                        .note_utilization(&slot, utilization(resp.headers()))
+                        .await;
                     return Ok((slot.id, resp));
                 }
                 Err(SendError::Auth(body_text)) => {
@@ -87,6 +94,9 @@ impl AnthropicPool {
                         match self.client.send(&token, path, body, hdrs).await {
                             Ok(resp) => {
                                 self.slots.mark_ok(&slot).await;
+                                self.slots
+                                    .note_utilization(&slot, utilization(resp.headers()))
+                                    .await;
                                 return Ok((slot.id, resp));
                             }
                             Err(e) => {
@@ -118,6 +128,22 @@ impl AnthropicPool {
             Some(e) => Err(PoolError::Upstream(e.to_string())),
         }
     }
+}
+
+/// The unified-limit windows Anthropic reports utilization for, e.g.
+/// `anthropic-ratelimit-unified-5h-utilization: 0.4`.
+fn utilization(headers: &reqwest::header::HeaderMap) -> Vec<(String, f64)> {
+    headers
+        .iter()
+        .filter_map(|(name, value)| {
+            let window = name
+                .as_str()
+                .strip_prefix("anthropic-ratelimit-unified-")?
+                .strip_suffix("-utilization")?;
+            let ratio = value.to_str().ok()?.parse::<f64>().ok()?;
+            Some((window.to_string(), ratio))
+        })
+        .collect()
 }
 
 #[cfg(test)]

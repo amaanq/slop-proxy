@@ -117,3 +117,44 @@ pub enum UsageDim {
     Account,
     Model,
 }
+
+#[derive(Debug)]
+pub struct MetricsRow {
+    pub user: String,
+    pub model: String,
+    pub dialect: String,
+    pub requests: i64,
+    pub errors: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub reasoning_tokens: i64,
+}
+
+impl Db {
+    /// Whole-table sums per (user, model, dialect). The log is append-only,
+    /// so these are monotonic and safe to expose as Prometheus counters.
+    pub async fn usage_metrics(&self) -> Result<Vec<MetricsRow>> {
+        let conn = self.0.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT user, upstream_model, dialect, COUNT(*), SUM(status >= 400),
+                    COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
+                    COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(reasoning_tokens),0)
+             FROM usage_log GROUP BY user, upstream_model, dialect",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(MetricsRow {
+                user: r.get(0)?,
+                model: r.get(1)?,
+                dialect: r.get(2)?,
+                requests: r.get(3)?,
+                errors: r.get::<_, Option<i64>>(4)?.unwrap_or(0),
+                input_tokens: r.get(5)?,
+                output_tokens: r.get(6)?,
+                cache_read_tokens: r.get(7)?,
+                reasoning_tokens: r.get(8)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+}

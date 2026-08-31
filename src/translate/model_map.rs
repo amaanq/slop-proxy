@@ -19,9 +19,7 @@ pub fn suffix_effort(requested: &str) -> Option<String> {
     split_suffix(requested).1
 }
 
-/// The requested model is passed through to the backend as-is. No default
-/// name mapping is applied; the only remapping is optional user-defined
-/// aliases from config. An effort may be attached via a `model:effort` suffix.
+/// The requested model is passed through to the backend as-is.
 pub fn resolve(cfg: &ModelsConfig, requested: &str) -> ResolvedModel {
     let (name, suffix_effort) = split_suffix(requested);
 

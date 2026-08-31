@@ -56,11 +56,9 @@ pub struct CapturedUsage {
 pub struct UsageCapture(pub Arc<Mutex<CapturedUsage>>);
 
 impl UsageCapture {
-    /// Codex counts cached tokens inside `input_tokens`, while Anthropic
-    /// reports them alongside its own. Subtracting here leaves `input_tokens`
-    /// meaning freshly billed prompt on both backends, so the two are
-    /// comparable and a total can add the kinds without counting twice.
-    /// `reasoning_tokens` stays a subset of `output_tokens`, as both report it.
+    /// Codex counts cached tokens inside `input_tokens`, Anthropic reports
+    /// them alongside. Subtracting leaves it meaning freshly billed prompt on
+    /// both. `reasoning_tokens` stays a subset of `output_tokens`.
     pub fn record(&self, usage: &Usage) {
         let mut c = self.0.lock().unwrap();
         let cached = usage.input_tokens_details.cached_tokens;

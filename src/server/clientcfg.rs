@@ -8,11 +8,8 @@ use serde_json::json;
 /// far enough ahead that it never fires.
 const LIFETIME_SECS: i64 = 10 * 365 * 24 * 3600;
 
-/// Codex only asks a provider for its model catalog when it is in ChatGPT-auth
-/// mode, which reads the bearer out of `auth.json` instead of the environment.
-/// Minting that file here is what lets a client learn its own context window
-/// rather than restating it, and it is scoped to whatever CODEX_HOME the
-/// caller drops it in, so it never displaces a real codex login.
+/// Codex only asks a provider for its catalog in ChatGPT-auth mode, which
+/// reads the bearer from `auth.json` rather than `env_key`.
 pub async fn codex_auth(headers: HeaderMap) -> Response {
     let Some(token) = bearer(&headers) else {
         return super::error::error_response(

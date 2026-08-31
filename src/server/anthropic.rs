@@ -70,7 +70,12 @@ pub async fn messages(
             return translation_error(DIALECT, &format!("serializing request: {e}"));
         }
     };
-    let (account_id, resp) = match state.codex.execute(&req_value, auth.prefer_trusted).await {
+    let session_key = upstream_req.prompt_cache_key.clone().unwrap_or_default();
+    let (account_id, resp) = match state
+        .codex
+        .execute(&req_value, auth.prefer_trusted, &session_key)
+        .await
+    {
         Ok(r) => r,
         Err(e) => {
             let status = pool_error_status(&e);

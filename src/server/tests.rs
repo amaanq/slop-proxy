@@ -1,15 +1,18 @@
 use std::sync::Arc;
 
+use axum::Router;
 use axum::response::IntoResponse;
 use axum::routing::post;
-use axum::Router;
 
-use super::{router, AppState};
+use super::{AppState, router};
+use crate::anthropic::client::AnthropicClient;
 use crate::codex::client::CodexClient;
-use crate::config::{CodexConfig, Config, ModelsConfig};
+use crate::config::{AnthropicConfig, CodexConfig, Config, ModelsConfig};
 use crate::db::Db;
 use crate::oauth::TokenSet;
-use crate::pool::AccountPool;
+use crate::pool::anthropic::AnthropicPool;
+use crate::pool::codex::CodexPool;
+use crate::provider::Provider;
 
 const MOCK_SSE: &str = concat!(
     "event: response.created\n",
@@ -55,7 +58,16 @@ async fn spawn_mock_upstream() -> String {
     format!("http://{addr}")
 }
 
-async fn spawn_proxy() -> (String, Db) {
+fn fresh_tokens() -> TokenSet {
+    TokenSet {
+        access_token: "at".into(),
+        refresh_token: "rt".into(),
+        id_token: None,
+        expires_at: Some(chrono::Utc::now().timestamp() + 3600),
+    }
+}
+
+async fn spawn_proxy_with(models: ModelsConfig, anthropic_base: Option<String>) -> (String, Db) {
     let base_url = spawn_mock_upstream().await;
     let db_path = std::env::temp_dir().join(format!("slop-test-{}.db", uuid::Uuid::new_v4()));
     let db = Db::open(&db_path).await.unwrap();
@@ -63,19 +75,27 @@ async fn spawn_proxy() -> (String, Db) {
         .await
         .unwrap();
     db.upsert_account(
+        Provider::Codex,
         "acct-1",
         Some("test@example.com"),
         None,
         Some("plus"),
-        &TokenSet {
-            access_token: "at".into(),
-            refresh_token: "rt".into(),
-            id_token: None,
-            expires_at: Some(chrono::Utc::now().timestamp() + 3600),
-        },
+        &fresh_tokens(),
     )
     .await
     .unwrap();
+    if anthropic_base.is_some() {
+        db.upsert_account(
+            Provider::Anthropic,
+            "acct-a1",
+            None,
+            None,
+            None,
+            &fresh_tokens(),
+        )
+        .await
+        .unwrap();
+    }
 
     let cfg = Config {
         db_path,
@@ -84,13 +104,21 @@ async fn spawn_proxy() -> (String, Db) {
             base_url,
             ..CodexConfig::default()
         },
-        models: ModelsConfig::default(),
+        anthropic: AnthropicConfig {
+            base_url: anthropic_base.unwrap_or_default(),
+        },
+        models,
     };
-    let pool = AccountPool::load(db.clone()).await.unwrap();
+    let codex = CodexPool::load(db.clone(), CodexClient::new(cfg.codex.clone()))
+        .await
+        .unwrap();
+    let anthropic = AnthropicPool::load(db.clone(), AnthropicClient::new(cfg.anthropic.clone()))
+        .await
+        .unwrap();
     let state = AppState {
         db: db.clone(),
-        pool: Arc::new(pool),
-        client: Arc::new(CodexClient::new(cfg.codex.clone())),
+        codex: Arc::new(codex),
+        anthropic: Arc::new(anthropic),
         cfg: Arc::new(cfg),
         models: Arc::new(super::ModelCache::new()),
     };
@@ -100,6 +128,16 @@ async fn spawn_proxy() -> (String, Db) {
         axum::serve(listener, router(state)).await.unwrap();
     });
     (format!("http://{addr}"), db)
+}
+
+/// Translation tests use claude-* model names against the codex mock, so
+/// relay routing is switched off for them.
+async fn spawn_proxy() -> (String, Db) {
+    let models = ModelsConfig {
+        anthropic_patterns: Vec::new(),
+        ..ModelsConfig::default()
+    };
+    spawn_proxy_with(models, None).await
 }
 
 #[tokio::test]
@@ -173,7 +211,7 @@ async fn openai_non_streaming_end_to_end() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    let v: serde_json::Value = resp.json().await.unwrap();
+    let v = resp.json::<serde_json::Value>().await.unwrap();
 
     assert_eq!(v["object"], "chat.completion");
     let msg = &v["choices"][0]["message"];
@@ -239,13 +277,79 @@ async fn thinking_disabled_hides_thinking_blocks() {
         .send()
         .await
         .unwrap();
-    let v: serde_json::Value = resp.json().await.unwrap();
-    let types: Vec<&str> = v["content"]
+    let v = resp.json::<serde_json::Value>().await.unwrap();
+    let types = v["content"]
         .as_array()
         .unwrap()
         .iter()
         .map(|b| b["type"].as_str().unwrap())
-        .collect();
+        .collect::<Vec<&str>>();
     assert_eq!(types, vec!["text", "tool_use"]);
     assert_eq!(v["stop_reason"], "tool_use");
+}
+
+const MOCK_ANTHROPIC_SSE: &str = concat!(
+    "event: message_start\n",
+    "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"usage\":{\"input_tokens\":50,\"cache_read_input_tokens\":40,\"output_tokens\":1}}}\n\n",
+    "event: content_block_delta\n",
+    "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n",
+    "event: message_delta\n",
+    "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":7}}\n\n",
+    "event: message_stop\n",
+    "data: {\"type\":\"message_stop\"}\n\n",
+);
+
+#[tokio::test]
+async fn anthropic_relay_passthrough() {
+    use axum::http::HeaderMap;
+
+    let seen = Arc::new(std::sync::Mutex::new(HeaderMap::new()));
+    let seen2 = seen.clone();
+    let app = Router::new().route(
+        "/v1/messages",
+        post(move |headers: HeaderMap| async move {
+            *seen2.lock().unwrap() = headers;
+            ([("content-type", "text/event-stream")], MOCK_ANTHROPIC_SSE).into_response()
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let (base, db) = spawn_proxy_with(ModelsConfig::default(), Some(upstream)).await;
+    let body = serde_json::json!({
+        "model": "claude-opus-5",
+        "max_tokens": 100,
+        "stream": true,
+        "metadata": {"user_id": "session-1"},
+        "messages": [{"role": "user", "content": "hi"}]
+    });
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/v1/messages"))
+        .header("x-api-key", "sp-test")
+        .header("anthropic-beta", "context-1m-2025-08-07")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let text = resp.text().await.unwrap();
+    assert_eq!(text, MOCK_ANTHROPIC_SSE);
+
+    let upstream_headers = seen.lock().unwrap().clone();
+    let beta = upstream_headers["anthropic-beta"].to_str().unwrap();
+    assert!(beta.contains("oauth-2025-04-20"));
+    assert!(beta.contains("context-1m-2025-08-07"));
+    assert_eq!(
+        upstream_headers["authorization"].to_str().unwrap(),
+        "Bearer at"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let totals = db.usage_totals(0, i64::MAX).await.unwrap();
+    assert_eq!(totals.requests, 1);
+    assert_eq!(totals.input_tokens, 50);
+    assert_eq!(totals.output_tokens, 7);
 }

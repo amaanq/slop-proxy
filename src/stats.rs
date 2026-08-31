@@ -57,8 +57,8 @@ fn parse_time(s: &str, now: i64) -> Result<i64> {
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
         return Ok(dt.timestamp());
     }
-    if let Some(rest) = s.strip_suffix(['h', 'd', 'm', 'w']) {
-        if let Ok(n) = rest.parse::<i64>() {
+    if let Some(rest) = s.strip_suffix(['h', 'd', 'm', 'w'])
+        && let Ok(n) = rest.parse::<i64>() {
             let secs = match s.chars().last().unwrap() {
                 'm' => n * 60,
                 'h' => n * 3600,
@@ -68,6 +68,5 @@ fn parse_time(s: &str, now: i64) -> Result<i64> {
             };
             return Ok(now - secs);
         }
-    }
     bail!("cannot parse time {s:?}; use RFC3339 or 30m/24h/7d/2w");
 }

@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::convert::Infallible;
 
 use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
@@ -9,22 +10,27 @@ use futures_util::StreamExt;
 use serde_json::Value;
 
 use super::auth::AuthInfo;
-use super::error::{pool_error_response, translation_error, Dialect};
-use super::{cache_key, log_error, AppState, LogGuard};
-use crate::codex::sse::{event_stream, EventStream};
+use super::error::{Dialect, pool_error_response, pool_error_status, translation_error};
+use super::{AppState, LogGuard, cache_key, log_error, log_usage};
+use crate::codex::sse::{EventStream, event_stream};
 use crate::db::usage::UsageRecord;
 use crate::translate::anthropic_req::{self, AnthropicRequest};
-use crate::translate::anthropic_stream::{render_aggregated, AnthropicStream};
-use crate::translate::{aggregate, count_tokens, StopKind, UsageCapture};
+use crate::translate::anthropic_stream::{AnthropicStream, render_aggregated};
+use crate::translate::{StopKind, UsageCapture, aggregate, count_tokens};
 
 const DIALECT: Dialect = Dialect::Anthropic;
 
 pub async fn messages(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthInfo>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    let req: AnthropicRequest = match serde_json::from_value(body) {
+    let peek = super::relay::Peek::from_body(&body);
+    if state.cfg.models.routes_to_anthropic(&peek.model) {
+        return super::relay::messages(state, auth, headers, body, peek).await;
+    }
+    let req = match serde_json::from_value::<AnthropicRequest>(body) {
         Ok(r) => r,
         Err(e) => return translation_error(DIALECT, &format!("invalid request: {e}")),
     };
@@ -49,7 +55,7 @@ pub async fn messages(
         Ok(v) => v,
         Err(e) => return translation_error(DIALECT, &format!("serializing request: {e}")),
     };
-    let (account_id, resp) = match state.pool.execute(&state.client, &req_value).await {
+    let (account_id, resp) = match state.codex.execute(&req_value).await {
         Ok(r) => r,
         Err(e) => {
             let status = pool_error_status(&e);
@@ -84,10 +90,7 @@ pub async fn messages(
             return super::error::error_response(DIALECT, 502, "api_error", &msg);
         }
         record.error_kind = snap.error_kind;
-        let db = state.db.clone();
-        tokio::spawn(async move {
-            let _ = db.log_usage(&record).await;
-        });
+        log_usage(&state.db, record);
         Json(render_aggregated(&agg, &req.model, emit_thinking)).into_response()
     }
 }
@@ -143,10 +146,15 @@ fn stream_response(
 
 pub async fn count_tokens(
     State(state): State<AppState>,
-    Extension(_auth): Extension<AuthInfo>,
+    Extension(auth): Extension<AuthInfo>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    let req: AnthropicRequest = match serde_json::from_value(body) {
+    let peek = super::relay::Peek::from_body(&body);
+    if state.cfg.models.routes_to_anthropic(&peek.model) {
+        return super::relay::count_tokens(state, auth, headers, body, peek).await;
+    }
+    let req = match serde_json::from_value::<AnthropicRequest>(body) {
         Ok(r) => r,
         Err(e) => return translation_error(DIALECT, &format!("invalid request: {e}")),
     };
@@ -156,15 +164,5 @@ pub async fn count_tokens(
         }))
         .into_response(),
         Err(e) => translation_error(DIALECT, &e),
-    }
-}
-
-pub(crate) fn pool_error_status(e: &crate::pool::PoolError) -> i64 {
-    use crate::pool::PoolError::*;
-    match e {
-        NoAccounts => 503,
-        AllCoolingDown { .. } => 429,
-        BadRequest(_) => 400,
-        Upstream(_) => 502,
     }
 }

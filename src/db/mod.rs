@@ -12,7 +12,8 @@ use tokio::sync::Mutex;
 #[derive(Clone)]
 pub struct Db(pub(crate) Arc<Mutex<Connection>>);
 
-const MIGRATIONS: &[&str] = &[r#"
+const MIGRATIONS: &[&str] = &[
+    r#"
 CREATE TABLE accounts (
   id INTEGER PRIMARY KEY,
   chatgpt_account_id TEXT NOT NULL UNIQUE,
@@ -56,7 +57,12 @@ CREATE TABLE usage_log (
 CREATE INDEX idx_usage_ts ON usage_log(ts);
 CREATE INDEX idx_usage_user_ts ON usage_log(user, ts);
 CREATE INDEX idx_usage_account_ts ON usage_log(account_id, ts);
-"#];
+"#,
+    r#"
+ALTER TABLE accounts RENAME COLUMN chatgpt_account_id TO provider_account_id;
+ALTER TABLE accounts ADD COLUMN provider TEXT NOT NULL DEFAULT 'codex';
+"#,
+];
 
 impl Db {
     pub async fn open(path: &Path) -> Result<Self> {
@@ -68,7 +74,7 @@ impl Db {
         conn.pragma_update(None, "busy_timeout", 5000)?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
 
-        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        let version = conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?;
         for (i, sql) in MIGRATIONS.iter().enumerate().skip(version as usize) {
             conn.execute_batch(sql)
                 .with_context(|| format!("applying migration {}", i + 1))?;

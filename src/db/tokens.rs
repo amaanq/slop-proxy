@@ -59,7 +59,7 @@ impl Db {
 
     pub async fn revoke_token(&self, key: &str) -> Result<usize> {
         let conn = self.0.lock().await;
-        let id: i64 = key.parse().unwrap_or(-1);
+        let id = key.parse::<i64>().unwrap_or(-1);
         Ok(conn.execute(
             "UPDATE api_tokens SET revoked_at = unixepoch()
              WHERE revoked_at IS NULL AND (id = ?1 OR token_prefix = ?2)",

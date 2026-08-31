@@ -22,15 +22,14 @@ pub fn encode_signature(id: Option<&str>, encrypted_content: &str) -> String {
 }
 
 pub fn decode_signature(sig: &str) -> (Option<String>, Option<String>) {
-    if let Ok(bytes) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(sig) {
-        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+    if let Ok(bytes) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(sig)
+        && let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
             let id = v.get("id").and_then(|x| x.as_str()).map(String::from);
             let ec = v.get("ec").and_then(|x| x.as_str()).map(String::from);
             if ec.is_some() {
                 return (id, ec);
             }
         }
-    }
     (None, Some(sig.to_string()))
 }
 

@@ -1,26 +1,27 @@
 pub mod client;
 pub mod models;
-pub mod rate_limits;
 pub mod sse;
 pub mod types;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use futures_util::StreamExt;
 
 use crate::config::Config;
 use crate::db::Db;
-use crate::pool::AccountPool;
+use crate::pool::codex::CodexPool;
+use crate::provider::Provider;
 
 pub async fn debug_models(db: &Db, cfg: &Config) -> Result<()> {
-    let pool = AccountPool::load(db.clone()).await?;
     let client = client::CodexClient::new(cfg.codex.clone());
+    let pool = CodexPool::load(db.clone(), client).await?;
     let (access, account_id) = pool
         .any_active_credentials()
         .await
         .context("no usable account; run `slop-proxy login`")?;
 
-    println!("GET {}", client.models_url());
-    let (status, body) = client
+    println!("GET {}", pool.client().models_url());
+    let (status, body) = pool
+        .client()
         .models_raw(&access, &account_id)
         .await
         .map_err(|e| anyhow!(e))?;
@@ -41,7 +42,7 @@ pub async fn debug_ping(
     let accounts = db.list_accounts().await?;
     let account = accounts
         .iter()
-        .find(|a| a.status != "disabled")
+        .find(|a| a.provider == Provider::Codex && a.status != "disabled")
         .context("no usable account; run `slop-proxy login`")?
         .clone();
 
@@ -81,7 +82,7 @@ pub async fn debug_ping(
     let client = client::CodexClient::new(cfg.codex.clone());
     let req = serde_json::to_value(&req)?;
     let mut stream = match client
-        .send(&account.access_token, &account.chatgpt_account_id, &req)
+        .send(&account.access_token, &account.provider_account_id, &req)
         .await
     {
         Ok(resp) => sse::event_stream(resp),

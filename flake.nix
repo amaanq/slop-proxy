@@ -14,7 +14,7 @@
       forEachSystem =
         fn:
         nixpkgs.lib.genAttrs nixpkgs.lib.platforms.linux (
-          system: fn system (nixpkgs.legacyPackages.${system})
+          system: fn system nixpkgs.legacyPackages.${system}
         );
     in
     {

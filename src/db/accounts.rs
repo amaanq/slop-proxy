@@ -1,13 +1,15 @@
 use anyhow::Result;
-use rusqlite::{params, Row};
+use rusqlite::{Row, params};
 
 use super::Db;
 use crate::oauth::TokenSet;
+use crate::provider::Provider;
 
 #[derive(Debug, Clone)]
 pub struct Account {
     pub id: i64,
-    pub chatgpt_account_id: String,
+    pub provider: Provider,
+    pub provider_account_id: String,
     pub email: Option<String>,
     pub label: Option<String>,
     pub plan_type: Option<String>,
@@ -22,7 +24,8 @@ pub struct Account {
 fn from_row(row: &Row) -> rusqlite::Result<Account> {
     Ok(Account {
         id: row.get("id")?,
-        chatgpt_account_id: row.get("chatgpt_account_id")?,
+        provider: row.get("provider")?,
+        provider_account_id: row.get("provider_account_id")?,
         email: row.get("email")?,
         label: row.get("label")?,
         plan_type: row.get("plan_type")?,
@@ -35,12 +38,14 @@ fn from_row(row: &Row) -> rusqlite::Result<Account> {
     })
 }
 
-const COLS: &str = "id, chatgpt_account_id, email, label, plan_type, access_token, refresh_token, access_expires_at, status, cooldown_until, disabled_reason";
+const COLS: &str = "id, provider, provider_account_id, email, label, plan_type, access_token, refresh_token, access_expires_at, status, cooldown_until, disabled_reason";
 
 impl Db {
+    #[allow(clippy::too_many_arguments)]
     pub async fn upsert_account(
         &self,
-        chatgpt_account_id: &str,
+        provider: Provider,
+        provider_account_id: &str,
         email: Option<&str>,
         label: Option<&str>,
         plan_type: Option<&str>,
@@ -48,9 +53,10 @@ impl Db {
     ) -> Result<i64> {
         let conn = self.0.lock().await;
         conn.execute(
-            "INSERT INTO accounts (chatgpt_account_id, email, label, plan_type, access_token, refresh_token, id_token, access_expires_at, last_refresh_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, unixepoch())
-             ON CONFLICT(chatgpt_account_id) DO UPDATE SET
+            "INSERT INTO accounts (provider, provider_account_id, email, label, plan_type, access_token, refresh_token, id_token, access_expires_at, last_refresh_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, unixepoch())
+             ON CONFLICT(provider_account_id) DO UPDATE SET
+               provider = excluded.provider,
                email = excluded.email,
                label = COALESCE(excluded.label, label),
                plan_type = excluded.plan_type,
@@ -64,7 +70,8 @@ impl Db {
                disabled_reason = NULL,
                updated_at = unixepoch()",
             params![
-                chatgpt_account_id,
+                provider,
+                provider_account_id,
                 email,
                 label,
                 plan_type,
@@ -75,8 +82,8 @@ impl Db {
             ],
         )?;
         let id = conn.query_row(
-            "SELECT id FROM accounts WHERE chatgpt_account_id = ?1",
-            [chatgpt_account_id],
+            "SELECT id FROM accounts WHERE provider_account_id = ?1",
+            [provider_account_id],
             |r| r.get(0),
         )?;
         Ok(id)
@@ -94,14 +101,14 @@ impl Db {
         let mut stmt = conn.prepare(&format!(
             "SELECT {COLS} FROM accounts WHERE id = ?1 OR email = ?2 OR label = ?2"
         ))?;
-        let id: i64 = key.parse().unwrap_or(-1);
+        let id = key.parse::<i64>().unwrap_or(-1);
         let mut rows = stmt.query_map(params![id, key], from_row)?;
         Ok(rows.next().transpose()?)
     }
 
     pub async fn remove_account(&self, key: &str) -> Result<usize> {
         let conn = self.0.lock().await;
-        let id: i64 = key.parse().unwrap_or(-1);
+        let id = key.parse::<i64>().unwrap_or(-1);
         Ok(conn.execute(
             "DELETE FROM accounts WHERE id = ?1 OR email = ?2 OR label = ?2",
             params![id, key],

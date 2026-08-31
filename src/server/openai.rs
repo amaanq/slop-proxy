@@ -7,17 +7,16 @@ use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use super::anthropic::pool_error_status;
 use super::auth::AuthInfo;
-use super::error::{pool_error_response, translation_error, Dialect};
-use super::{cache_key, log_error, AppState, LogGuard};
-use crate::codex::sse::{event_stream, EventStream};
+use super::error::{Dialect, pool_error_response, pool_error_status, translation_error};
+use super::{AppState, LogGuard, cache_key, log_error, log_usage};
+use crate::codex::sse::{EventStream, event_stream};
 use crate::db::usage::UsageRecord;
 use crate::translate::openai_req::{self, OpenAiRequest};
-use crate::translate::openai_stream::{render_aggregated, OpenAiStream};
-use crate::translate::{aggregate, model_map, StopKind, UsageCapture};
+use crate::translate::openai_stream::{OpenAiStream, render_aggregated};
+use crate::translate::{StopKind, UsageCapture, aggregate, model_map};
 
 const DIALECT: Dialect = Dialect::OpenAi;
 
@@ -26,10 +25,16 @@ pub async fn chat_completions(
     Extension(auth): Extension<AuthInfo>,
     Json(body): Json<Value>,
 ) -> Response {
-    let req: OpenAiRequest = match serde_json::from_value(body) {
+    let req = match serde_json::from_value::<OpenAiRequest>(body) {
         Ok(r) => r,
         Err(e) => return translation_error(DIALECT, &format!("invalid request: {e}")),
     };
+    if state.cfg.models.routes_to_anthropic(&req.model) {
+        return translation_error(
+            DIALECT,
+            "this model is relayed to Anthropic and only available on /v1/messages",
+        );
+    }
     let mut upstream_req = match openai_req::to_responses(&req, &state.cfg) {
         Ok(r) => r,
         Err(e) => return translation_error(DIALECT, &e),
@@ -50,7 +55,7 @@ pub async fn chat_completions(
         Ok(v) => v,
         Err(e) => return translation_error(DIALECT, &format!("serializing request: {e}")),
     };
-    let (account_id, resp) = match state.pool.execute(&state.client, &req_value).await {
+    let (account_id, resp) = match state.codex.execute(&req_value).await {
         Ok(r) => r,
         Err(e) => {
             log_error(&state.db, record, pool_error_status(&e), "pool");
@@ -82,10 +87,7 @@ pub async fn chat_completions(
             return super::error::error_response(DIALECT, 502, "api_error", &msg);
         }
         record.error_kind = snap.error_kind;
-        let db = state.db.clone();
-        tokio::spawn(async move {
-            let _ = db.log_usage(&record).await;
-        });
+        log_usage(&state.db, record);
         Json(render_aggregated(&agg, &req.model)).into_response()
     }
 }
@@ -144,24 +146,19 @@ pub async fn models(State(state): State<AppState>) -> Response {
 
     let live = match state.models.get() {
         Some(cached) => Some(cached),
-        None => match state.pool.any_active_credentials().await {
-            Some((access, account_id)) => {
-                match state.client.list_models(&access, &account_id).await {
-                    Ok(models) => {
-                        state.models.put(models.clone());
-                        Some(models)
-                    }
-                    Err(e) => {
-                        tracing::warn!("fetching models from codex backend: {e}");
-                        None
-                    }
-                }
+        None => match state.codex.list_models().await {
+            Ok(models) => {
+                state.models.put(models.clone());
+                Some(models)
             }
-            None => None,
+            Err(e) => {
+                tracing::warn!("fetching models from codex backend: {e}");
+                None
+            }
         },
     };
 
-    let data: Vec<Value> = match live {
+    let data = match live {
         Some(models) => models
             .iter()
             .filter(|m| m.listed())
@@ -174,7 +171,7 @@ pub async fn models(State(state): State<AppState>) -> Response {
                     "context_window": m.context_window
                 })
             })
-            .collect(),
+            .collect::<Vec<Value>>(),
         None => {
             let mut ids = state.cfg.models.known.clone();
             let default = &state.cfg.models.default;
@@ -190,7 +187,7 @@ pub async fn models(State(state): State<AppState>) -> Response {
                         "owned_by": "slop-proxy"
                     })
                 })
-                .collect()
+                .collect::<Vec<Value>>()
         }
     };
 
@@ -234,7 +231,7 @@ pub async fn responses_passthrough(
         ..Default::default()
     };
 
-    let (account_id, resp) = match state.pool.execute(&state.client, &body).await {
+    let (account_id, resp) = match state.codex.execute(&body).await {
         Ok(r) => r,
         Err(e) => {
             log_error(&state.db, record, pool_error_status(&e), "pool");
@@ -268,11 +265,10 @@ pub async fn responses_passthrough(
                 | Some("response.incomplete")
                 | Some("response.failed") => {
                     if let Some(r) = v.get("response") {
-                        if let Some(u) = r.get("usage") {
-                            if let Ok(u) = serde_json::from_value(u.clone()) {
+                        if let Some(u) = r.get("usage")
+                            && let Ok(u) = serde_json::from_value(u.clone()) {
                                 capture.record(&u);
                             }
-                        }
                         final_response = Some(r.clone());
                     }
                 }
@@ -284,10 +280,7 @@ pub async fn responses_passthrough(
         record.output_tokens = snap.output_tokens;
         record.cache_read_tokens = snap.cache_read_tokens;
         record.reasoning_tokens = snap.reasoning_tokens;
-        let db = state.db.clone();
-        tokio::spawn(async move {
-            let _ = db.log_usage(&record).await;
-        });
+        log_usage(&state.db, record);
         match final_response {
             Some(v) => Json(v).into_response(),
             None => super::error::error_response(
@@ -306,17 +299,13 @@ fn relay_stream(resp: reqwest::Response, guard: LogGuard, capture: UsageCapture)
         async move {
             match ev {
                 Ok(ev) => {
-                    if ev.event == "response.completed"
-                        || ev.data.contains("\"response.completed\"")
-                    {
-                        if let Ok(v) = serde_json::from_str::<Value>(&ev.data) {
-                            if let Some(usage) = v.get("response").and_then(|r| r.get("usage")) {
-                                if let Ok(u) = serde_json::from_value(usage.clone()) {
+                    if (ev.event == "response.completed"
+                        || ev.data.contains("\"response.completed\""))
+                        && let Ok(v) = serde_json::from_str::<Value>(&ev.data)
+                            && let Some(usage) = v.get("response").and_then(|r| r.get("usage"))
+                                && let Ok(u) = serde_json::from_value(usage.clone()) {
                                     capture.record(&u);
                                 }
-                            }
-                        }
-                    }
                     let mut out = Event::default().data(ev.data);
                     if !ev.event.is_empty() && ev.event != "message" {
                         out = out.event(ev.event);

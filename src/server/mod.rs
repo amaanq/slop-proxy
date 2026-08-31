@@ -2,6 +2,7 @@ pub mod anthropic;
 pub mod auth;
 pub mod error;
 pub mod openai;
+pub mod relay;
 #[cfg(test)]
 mod tests;
 
@@ -14,20 +15,22 @@ use axum::routing::{get, post};
 use axum::Router;
 use sha2::{Digest, Sha256};
 
+use crate::anthropic::client::AnthropicClient;
 use crate::codex::client::CodexClient;
 use crate::codex::models::ModelInfo;
 use crate::config::Config;
 use crate::db::usage::UsageRecord;
 use crate::db::Db;
-use crate::pool::AccountPool;
+use crate::pool::anthropic::AnthropicPool;
+use crate::pool::codex::CodexPool;
 use crate::translate::UsageCapture;
 
 #[derive(Clone)]
 pub struct AppState {
     pub db: Db,
-    pub pool: Arc<AccountPool>,
+    pub codex: Arc<CodexPool>,
+    pub anthropic: Arc<AnthropicPool>,
     pub cfg: Arc<Config>,
-    pub client: Arc<CodexClient>,
     pub models: Arc<ModelCache>,
 }
 
@@ -63,17 +66,26 @@ impl Default for ModelCache {
 }
 
 pub async fn serve(db: Db, cfg: Config, bind: &str) -> Result<()> {
-    let pool = AccountPool::load(db.clone()).await?;
-    if pool.len() == 0 {
+    let codex = CodexPool::load(db.clone(), CodexClient::new(cfg.codex.clone())).await?;
+    if codex.is_empty() {
         tracing::warn!("no codex accounts in the database; run `slop-proxy login`");
     } else {
-        tracing::info!("loaded {} codex account(s)", pool.len());
+        tracing::info!("loaded {} codex account(s)", codex.len());
+    }
+    let anthropic =
+        AnthropicPool::load(db.clone(), AnthropicClient::new(cfg.anthropic.clone())).await?;
+    if anthropic.is_empty() {
+        tracing::warn!(
+            "no anthropic accounts in the database; run `slop-proxy login --provider anthropic`"
+        );
+    } else {
+        tracing::info!("loaded {} anthropic account(s)", anthropic.len());
     }
 
     let state = AppState {
         db,
-        pool: Arc::new(pool),
-        client: Arc::new(CodexClient::new(cfg.codex.clone())),
+        codex: Arc::new(codex),
+        anthropic: Arc::new(anthropic),
         cfg: Arc::new(cfg),
         models: Arc::new(ModelCache::new()),
     };
@@ -149,6 +161,10 @@ impl Drop for LogGuard {
 pub fn log_error(db: &Db, mut record: UsageRecord, status: i64, kind: &str) {
     record.status = status;
     record.error_kind = Some(kind.to_string());
+    log_usage(db, record);
+}
+
+pub fn log_usage(db: &Db, record: UsageRecord) {
     let db = db.clone();
     tokio::spawn(async move {
         if let Err(e) = db.log_usage(&record).await {

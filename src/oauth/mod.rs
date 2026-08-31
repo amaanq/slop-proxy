@@ -1,11 +1,20 @@
+pub mod anthropic;
 pub mod jwt;
 pub mod refresh;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::db::Db;
+
+/// One shared client so token refreshes reuse connections instead of paying
+/// TLS setup per call (refreshes run while a slot mutex is held).
+pub(crate) fn http() -> &'static reqwest::Client {
+    static HTTP: std::sync::LazyLock<reqwest::Client> =
+        std::sync::LazyLock::new(reqwest::Client::new);
+    &HTTP
+}
 
 pub const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 pub const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
@@ -69,14 +78,19 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
         .await
         .context("requesting device user code")?;
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
-        bail!("device login is not enabled for this account. A workspace admin must enable Codex device auth.");
+        bail!(
+            "device login is not enabled for this account. A workspace admin must enable Codex device auth."
+        );
     }
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
         bail!("device user code request failed: {status}: {body}");
     }
-    let uc: UserCodeResp = resp.json().await.context("parsing user code response")?;
+    let uc = resp
+        .json::<UserCodeResp>()
+        .await
+        .context("parsing user code response")?;
     let interval = parse_interval(uc.interval.as_ref());
 
     println!(
@@ -117,6 +131,7 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
 
     let db_id = db
         .upsert_account(
+            crate::provider::Provider::Codex,
             &account_id,
             info.email.as_deref(),
             label.as_deref(),

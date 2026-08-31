@@ -42,16 +42,27 @@ struct SlotState {
 /// Provider-reported consumption of an account's rolling limit windows.
 #[derive(Debug, Default, Clone)]
 pub struct AccountUsage {
-    /// Window name to fraction consumed, 0.0 to 1.0.
-    pub windows: Vec<(String, f64)>,
+    pub windows: Vec<UsageWindow>,
     /// The provider has stopped serving this account until a window resets,
     /// which is a harder signal than a high fraction.
     pub locked: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct UsageWindow {
+    pub name: String,
+    /// Fraction consumed, 0.0 to 1.0.
+    pub utilization: f64,
+    /// Unix seconds at which the window rolls over, when reported.
+    pub resets_at: Option<i64>,
+}
+
 impl AccountUsage {
     pub fn peak(&self) -> f64 {
-        self.windows.iter().map(|(_, v)| *v).fold(0.0, f64::max)
+        self.windows
+            .iter()
+            .map(|w| w.utilization)
+            .fold(0.0, f64::max)
     }
 }
 

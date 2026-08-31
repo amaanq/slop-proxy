@@ -45,15 +45,31 @@ pub async fn refresh(refresh_token: &str) -> Result<TokenSet, RefreshError> {
         .map_err(|e| RefreshError::Transient(e.to_string()))?;
 
     if !status.is_success() {
-        let code = serde_json::from_str::<serde_json::Value>(&body)
-            .ok()
-            .and_then(|v| {
-                v.get("error").and_then(|e| {
-                    e.as_str()
-                        .map(String::from)
-                        .or_else(|| e.get("code").and_then(|c| c.as_str()).map(String::from))
-                        .or_else(|| e.get("type").and_then(|c| c.as_str()).map(String::from))
-                })
+        #[derive(serde::Deserialize, Default)]
+        struct ErrorBody {
+            #[serde(default)]
+            error: Option<ErrorShape>,
+        }
+        /// The endpoint returns the error both as a bare code string and as
+        /// an object carrying `code` or `type`.
+        #[derive(serde::Deserialize)]
+        #[serde(untagged)]
+        enum ErrorShape {
+            Code(String),
+            Detail {
+                #[serde(default)]
+                code: Option<String>,
+                #[serde(default, rename = "type")]
+                kind: Option<String>,
+            },
+        }
+
+        let code = serde_json::from_str::<ErrorBody>(&body)
+            .unwrap_or_default()
+            .error
+            .and_then(|e| match e {
+                ErrorShape::Code(c) => Some(c),
+                ErrorShape::Detail { code, kind } => code.or(kind),
             })
             .unwrap_or_default();
         let msg = format!("{status}: {body}");

@@ -4,7 +4,6 @@ pub mod refresh;
 
 use eyre::{Result, WrapErr, bail, eyre};
 use serde::Deserialize;
-use serde_json::Value;
 
 use crate::db::Db;
 
@@ -64,13 +63,22 @@ struct DevicePollRequest<'a> {
     user_code: &'a str,
 }
 
+/// The endpoint has been observed sending the poll interval both as a number
+/// and as a string.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Interval {
+    Seconds(u64),
+    Text(String),
+}
+
 #[derive(Deserialize)]
 struct UserCodeResp {
     device_auth_id: String,
     #[serde(alias = "usercode")]
     user_code: String,
     #[serde(default)]
-    interval: Option<Value>,
+    interval: Option<Interval>,
 }
 
 #[derive(Deserialize)]
@@ -201,27 +209,25 @@ async fn poll_for_code(
     }
 }
 
-fn parse_interval(v: Option<&Value>) -> u64 {
+fn parse_interval(v: Option<&Interval>) -> u64 {
     let secs = match v {
-        Some(Value::Number(n)) => n.as_u64(),
-        Some(Value::String(s)) => s.parse().ok(),
-        _ => None,
+        Some(Interval::Seconds(n)) => Some(*n),
+        Some(Interval::Text(s)) => s.parse().ok(),
+        None => None,
     };
     secs.unwrap_or(5).clamp(1, 60)
 }
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
-
     use super::*;
 
     #[test]
     fn interval_accepts_string_number_and_missing() {
-        assert_eq!(parse_interval(Some(&json!("7"))), 7);
-        assert_eq!(parse_interval(Some(&json!(3))), 3);
+        assert_eq!(parse_interval(Some(&Interval::Text("7".into()))), 7);
+        assert_eq!(parse_interval(Some(&Interval::Seconds(3))), 3);
         assert_eq!(parse_interval(None), 5);
-        assert_eq!(parse_interval(Some(&json!(0))), 1);
-        assert_eq!(parse_interval(Some(&json!(999))), 60);
+        assert_eq!(parse_interval(Some(&Interval::Seconds(0))), 1);
+        assert_eq!(parse_interval(Some(&Interval::Seconds(999))), 60);
     }
 }

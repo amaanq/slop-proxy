@@ -1,5 +1,5 @@
 use eyre::{Result, WrapErr, eyre};
-use serde_json::Value;
+use serde::Deserialize;
 
 pub struct IdTokenInfo {
     pub email: Option<String>,
@@ -7,8 +7,34 @@ pub struct IdTokenInfo {
     pub plan_type: Option<String>,
 }
 
+#[derive(Deserialize, Default)]
+struct Claims {
+    #[serde(default)]
+    exp: Option<i64>,
+    #[serde(default)]
+    email: Option<String>,
+    #[serde(default, rename = "https://api.openai.com/auth")]
+    auth: Option<AuthClaims>,
+    #[serde(default, rename = "https://api.openai.com/profile")]
+    profile: Option<ProfileClaims>,
+}
+
+#[derive(Deserialize, Default)]
+struct AuthClaims {
+    #[serde(default)]
+    chatgpt_account_id: Option<String>,
+    #[serde(default)]
+    chatgpt_plan_type: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct ProfileClaims {
+    #[serde(default)]
+    email: Option<String>,
+}
+
 /// Decodes a JWT payload without signature verification.
-pub fn payload(token: &str) -> Result<Value> {
+fn claims(token: &str) -> Result<Claims> {
     let part = token.split('.').nth(1).ok_or_else(|| eyre!("not a JWT"))?;
     let bytes = data_encoding::BASE64URL_NOPAD
         .decode(part.trim_end_matches('=').as_bytes())
@@ -17,30 +43,15 @@ pub fn payload(token: &str) -> Result<Value> {
 }
 
 pub fn exp(token: &str) -> Option<i64> {
-    payload(token).ok()?.get("exp")?.as_i64()
+    claims(token).ok()?.exp
 }
 
 pub fn parse_id_token(token: &str) -> Result<IdTokenInfo> {
-    let p = payload(token)?;
-    let auth = p.get("https://api.openai.com/auth");
-    let email = p
-        .get("email")
-        .and_then(Value::as_str)
-        .or_else(|| {
-            p.get("https://api.openai.com/profile")
-                .and_then(|v| v.get("email"))
-                .and_then(Value::as_str)
-        })
-        .map(String::from);
+    let c = claims(token)?;
+    let auth = c.auth.unwrap_or_default();
     Ok(IdTokenInfo {
-        email,
-        chatgpt_account_id: auth
-            .and_then(|a| a.get("chatgpt_account_id"))
-            .and_then(Value::as_str)
-            .map(String::from),
-        plan_type: auth
-            .and_then(|a| a.get("chatgpt_plan_type"))
-            .and_then(Value::as_str)
-            .map(String::from),
+        email: c.email.or_else(|| c.profile.unwrap_or_default().email),
+        chatgpt_account_id: auth.chatgpt_account_id,
+        plan_type: auth.chatgpt_plan_type,
     })
 }

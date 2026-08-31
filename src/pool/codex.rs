@@ -87,10 +87,11 @@ impl CodexPool {
         }
     }
 
-    /// Fresh (access_token, account_id) for any active account, for
-    /// non-completion calls like the models listing.
+    /// Fresh (access_token, account_id) for the models listing. Trusted
+    /// first, since gated models are absent from an untrusted account's
+    /// catalog.
     pub async fn any_active_credentials(&self) -> Option<(String, String)> {
-        let slot = self.next_available(false).await?;
+        let slot = self.next_available(true).await?;
         let access = self.slots.fresh_token(&slot, false).await.ok()?;
         Some((access, slot.provider_account_id.clone()))
     }

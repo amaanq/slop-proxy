@@ -31,6 +31,7 @@ pub struct ModelsResponse {
 
 impl ModelInfo {
     pub fn listed(&self) -> bool {
-        self.visibility.as_deref() != Some("none") && self.supported_in_api != Some(false)
+        !matches!(self.visibility.as_deref(), Some("none" | "hide"))
+            && self.supported_in_api != Some(false)
     }
 }

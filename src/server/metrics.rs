@@ -17,6 +17,10 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
         Ok(rows) => render_usage(&mut out, &rows),
         Err(e) => tracing::error!("reading usage metrics: {e}"),
     }
+    match state.db.error_metrics().await {
+        Ok(rows) => render_errors(&mut out, &rows),
+        Err(e) => tracing::error!("reading error metrics: {e}"),
+    }
 
     ([(CONTENT_TYPE, "text/plain; version=0.0.4")], out).into_response()
 }
@@ -162,6 +166,20 @@ fn render_usage(out: &mut String, rows: &[crate::db::usage::MetricsRow]) {
                 get(r),
             );
         }
+    }
+}
+
+fn render_errors(out: &mut String, rows: &[crate::db::usage::ErrorRow]) {
+    counter_header(out, "slop_errors_total", "Failed requests by cause");
+    for r in rows {
+        let _ = writeln!(
+            out,
+            "slop_errors_total{{user={},provider={},kind={}}} {}",
+            quote(&r.user),
+            quote(&r.provider),
+            quote(&r.kind),
+            r.count,
+        );
     }
 }
 

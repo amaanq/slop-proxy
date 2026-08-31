@@ -69,6 +69,14 @@ pub struct TokenMeter {
     pub reset_after_seconds: i64,
 }
 
+#[derive(Debug, Clone)]
+pub struct ErrorRow {
+    pub user: String,
+    pub provider: String,
+    pub kind: String,
+    pub count: i64,
+}
+
 impl Db {
     pub async fn log_usage(&self, r: &UsageRecord) -> Result<()> {
         let mut conn = self.0.lock().await;
@@ -140,6 +148,10 @@ impl Db {
             return Ok(Err(AdmissionError::TokenLimit { retry_after }));
         }
 
+        tx.execute(
+            "DELETE FROM api_meter WHERE token_id = ?1 AND ts_ms <= ?2",
+            params![token_id, since],
+        )?;
         tx.execute(
             "INSERT INTO api_meter (token_id, ts_ms) VALUES (?1, ?2)",
             params![token_id, now],
@@ -242,7 +254,7 @@ impl Db {
         };
         let conn = self.0.lock().await;
         let sql = format!(
-            "SELECT {key_expr} AS k, COUNT(*), SUM(u.status >= 400), COALESCE(SUM(u.input_tokens),0),
+            "SELECT {key_expr} AS k, COUNT(*), SUM(u.status >= 400 OR u.error_kind IS NOT NULL), COALESCE(SUM(u.input_tokens),0),
                     COALESCE(SUM(u.output_tokens),0), COALESCE(SUM(u.cache_read_tokens),0),
                     COALESCE(SUM(u.cache_write_tokens),0), COALESCE(SUM(u.reasoning_tokens),0)
              FROM usage_log u WHERE u.ts >= ?1 AND u.ts < ?2
@@ -305,7 +317,7 @@ impl Db {
                               FROM accounts a WHERE a.id = u.account_id), 'none') AS account,
                     COALESCE((SELECT a.provider
                               FROM accounts a WHERE a.id = u.account_id), 'none') AS provider,
-                    u.upstream_model, u.dialect, COUNT(*), SUM(u.status >= 400),
+                    u.upstream_model, u.dialect, COUNT(*), SUM(u.status >= 400 OR u.error_kind IS NOT NULL),
                     COALESCE(SUM(u.input_tokens),0), COALESCE(SUM(u.output_tokens),0),
                     COALESCE(SUM(u.cache_read_tokens),0), COALESCE(SUM(u.cache_write_tokens),0),
                     COALESCE(SUM(u.reasoning_tokens),0)
@@ -325,6 +337,31 @@ impl Db {
                 cache_read_tokens: r.get(9)?,
                 cache_write_tokens: r.get(10)?,
                 reasoning_tokens: r.get(11)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Failures grouped by what went wrong. Kept off MetricsRow because
+    /// error_kind would otherwise split every token counter by it too.
+    pub async fn error_metrics(&self) -> Result<Vec<ErrorRow>> {
+        let conn = self.0.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT u.user,
+                    COALESCE((SELECT a.provider
+                              FROM accounts a WHERE a.id = u.account_id), 'none') AS provider,
+                    COALESCE(u.error_kind, 'http_' || (u.status / 100) || 'xx') AS kind,
+                    COUNT(*)
+             FROM usage_log u
+             WHERE u.status >= 400 OR u.error_kind IS NOT NULL
+             GROUP BY u.user, provider, kind",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(ErrorRow {
+                user: r.get(0)?,
+                provider: r.get(1)?,
+                kind: r.get(2)?,
+                count: r.get(3)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)

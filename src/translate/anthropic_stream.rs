@@ -24,7 +24,7 @@ enum OpenBlock {
     Tool,
 }
 
-pub type OutEvent = (&'static str, Value);
+pub type OutEvent = (&'static str, String);
 
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -66,7 +66,8 @@ impl AnthEvent {
             AnthEvent::MessageStop => "message_stop",
             AnthEvent::Error { .. } => "error",
         };
-        (name, serde_json::to_value(self).expect("event serializes"))
+        let value = serde_json::to_value(self).expect("event serializes");
+        (name, value.to_string())
     }
 }
 
@@ -129,7 +130,7 @@ struct ErrorBody {
 }
 
 #[derive(Serialize)]
-struct AnthUsage {
+pub struct AnthUsage {
     input_tokens: i64,
     output_tokens: i64,
     cache_read_input_tokens: i64,
@@ -409,14 +410,14 @@ impl AnthropicStream {
 
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum RenderedBlock {
+pub enum RenderedBlock {
     Thinking { thinking: String, signature: String },
     Text { text: String },
     ToolUse { id: String, name: String, input: Value },
 }
 
 #[derive(Serialize)]
-struct RenderedMessage {
+pub struct RenderedMessage {
     id: String,
     #[serde(rename = "type")]
     kind: &'static str,
@@ -428,7 +429,7 @@ struct RenderedMessage {
     usage: AnthUsage,
 }
 
-pub fn render_aggregated(agg: &Aggregated, model: &str, emit_thinking: bool) -> Value {
+pub fn render_aggregated(agg: &Aggregated, model: &str, emit_thinking: bool) -> RenderedMessage {
     let mut content = Vec::new();
     for block in &agg.blocks {
         match block {
@@ -461,7 +462,7 @@ pub fn render_aggregated(agg: &Aggregated, model: &str, emit_thinking: bool) -> 
         StopKind::MaxTokens => "max_tokens",
         _ => "end_turn",
     };
-    serde_json::to_value(RenderedMessage {
+    RenderedMessage {
         id: agg.id.clone(),
         kind: "message",
         role: "assistant",
@@ -470,6 +471,5 @@ pub fn render_aggregated(agg: &Aggregated, model: &str, emit_thinking: bool) -> 
         stop_reason,
         stop_sequence: None,
         usage: anthropic_usage(&agg.usage),
-    })
-    .expect("message serializes")
+    }
 }

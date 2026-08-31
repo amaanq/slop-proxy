@@ -1,5 +1,4 @@
 use serde::Serialize;
-use serde_json::Value;
 
 use super::{Aggregated, Block, StopKind, UsageCapture};
 use crate::codex::types::{OutputItem, ResponsesEvent, Usage};
@@ -81,7 +80,7 @@ struct ErrorBody {
 }
 
 #[derive(Serialize)]
-struct OpenAiUsage {
+pub struct OpenAiUsage {
     prompt_tokens: i64,
     completion_tokens: i64,
     total_tokens: i64,
@@ -90,12 +89,12 @@ struct OpenAiUsage {
 }
 
 #[derive(Serialize)]
-struct PromptTokensDetails {
+pub struct PromptTokensDetails {
     cached_tokens: i64,
 }
 
 #[derive(Serialize)]
-struct CompletionTokensDetails {
+pub struct CompletionTokensDetails {
     reasoning_tokens: i64,
 }
 
@@ -113,8 +112,12 @@ fn openai_usage(usage: &Usage) -> OpenAiUsage {
     }
 }
 
-fn to_value<T: Serialize>(payload: T) -> Value {
-    serde_json::to_value(payload).expect("chunk serializes")
+/// Streamed chunks keep serde_json's sorted key order (structs serialize in
+/// declaration order, but Value maps sort), which the e2e stream assertions
+/// pin down.
+fn to_json<T: Serialize>(payload: T) -> String {
+    let value = serde_json::to_value(payload).expect("chunk serializes");
+    value.to_string()
 }
 
 impl OpenAiStream {
@@ -134,7 +137,7 @@ impl OpenAiStream {
         }
     }
 
-    pub fn handle(&mut self, ev: ResponsesEvent) -> Vec<Value> {
+    pub fn handle(&mut self, ev: ResponsesEvent) -> Vec<String> {
         let mut out = Vec::new();
         match ev {
             ResponsesEvent::Created { response } => {
@@ -233,7 +236,7 @@ impl OpenAiStream {
                     .error
                     .and_then(|e| e.message)
                     .unwrap_or_else(|| "upstream response failed".into());
-                out.push(to_value(StreamError {
+                out.push(to_json(StreamError {
                     error: ErrorBody {
                         message: msg,
                         kind: "api_error",
@@ -248,13 +251,13 @@ impl OpenAiStream {
         out
     }
 
-    pub fn finalize(&mut self) -> Vec<Value> {
+    pub fn finalize(&mut self) -> Vec<String> {
         if self.done {
             return Vec::new();
         }
         self.done = true;
         self.capture.fail("midstream");
-        vec![to_value(StreamError {
+        vec![to_json(StreamError {
             error: ErrorBody {
                 message: "upstream stream ended unexpectedly".into(),
                 kind: "api_error",
@@ -263,12 +266,12 @@ impl OpenAiStream {
         })]
     }
 
-    fn finish(&mut self, out: &mut Vec<Value>, usage: Option<Usage>, reason: &'static str) {
+    fn finish(&mut self, out: &mut Vec<String>, usage: Option<Usage>, reason: &'static str) {
         let usage = usage.unwrap_or_default();
         self.capture.record(&usage);
         out.push(self.chunk(ChunkDelta::default(), Some(reason)));
         if self.include_usage {
-            out.push(to_value(Chunk {
+            out.push(to_json(Chunk {
                 id: self.id.clone(),
                 object: "chat.completion.chunk",
                 created: self.created,
@@ -280,7 +283,7 @@ impl OpenAiStream {
         self.done = true;
     }
 
-    fn args_chunk(&self, arguments: String) -> Value {
+    fn args_chunk(&self, arguments: String) -> String {
         self.chunk(
             ChunkDelta {
                 tool_calls: Some(vec![ToolCallDelta {
@@ -298,8 +301,8 @@ impl OpenAiStream {
         )
     }
 
-    fn chunk(&self, delta: ChunkDelta, finish_reason: Option<&'static str>) -> Value {
-        to_value(Chunk {
+    fn chunk(&self, delta: ChunkDelta, finish_reason: Option<&'static str>) -> String {
+        to_json(Chunk {
             id: self.id.clone(),
             object: "chat.completion.chunk",
             created: self.created,
@@ -316,7 +319,7 @@ impl OpenAiStream {
 }
 
 #[derive(Serialize)]
-struct RenderedCompletion {
+pub struct RenderedCompletion {
     id: String,
     object: &'static str,
     created: i64,
@@ -326,7 +329,7 @@ struct RenderedCompletion {
 }
 
 #[derive(Serialize)]
-struct RenderedChoice {
+pub struct RenderedChoice {
     index: i64,
     message: RenderedMessage,
     finish_reason: &'static str,
@@ -334,7 +337,7 @@ struct RenderedChoice {
 }
 
 #[derive(Serialize)]
-struct RenderedMessage {
+pub struct RenderedMessage {
     role: &'static str,
     content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -344,7 +347,7 @@ struct RenderedMessage {
 }
 
 #[derive(Serialize)]
-struct RenderedToolCall {
+pub struct RenderedToolCall {
     id: String,
     #[serde(rename = "type")]
     kind: &'static str,
@@ -352,12 +355,12 @@ struct RenderedToolCall {
 }
 
 #[derive(Serialize)]
-struct RenderedFunction {
+pub struct RenderedFunction {
     name: String,
     arguments: String,
 }
 
-pub fn render_aggregated(agg: &Aggregated, model: &str) -> Value {
+pub fn render_aggregated(agg: &Aggregated, model: &str) -> RenderedCompletion {
     let mut text = String::new();
     let mut reasoning = String::new();
     let mut tool_calls = Vec::new();
@@ -392,7 +395,7 @@ pub fn render_aggregated(agg: &Aggregated, model: &str) -> Value {
         StopKind::MaxTokens => "length",
         _ => "stop",
     };
-    to_value(RenderedCompletion {
+    RenderedCompletion {
         id: format!("chatcmpl-{}", agg.id),
         object: "chat.completion",
         created: crate::clock::unix_now(),
@@ -409,5 +412,5 @@ pub fn render_aggregated(agg: &Aggregated, model: &str) -> Value {
             logprobs: None,
         }],
         usage: openai_usage(&agg.usage),
-    })
+    }
 }

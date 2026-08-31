@@ -28,7 +28,7 @@ names pass through to the backend as-is; use `slop-proxy models` for the real sl
         {
           services.slop-proxy = {
             enable = true;
-            bind = "127.0.0.1:8484";
+            bind = "[::1]:8484";
           };
         }
       ];
@@ -48,6 +48,6 @@ slop-proxy slop-proxy --db /var/lib/slop-proxy/slop.db token create --user alice
 Point a client at it with the issued token:
 
 ```sh
-ANTHROPIC_BASE_URL=http://127.0.0.1:8484 ANTHROPIC_API_KEY=sp-... claude
-OPENAI_BASE_URL=http://127.0.0.1:8484/v1 OPENAI_API_KEY=sp-...
+ANTHROPIC_BASE_URL=http://[::1]:8484 ANTHROPIC_API_KEY=sp-... claude
+OPENAI_BASE_URL=http://[::1]:8484/v1 OPENAI_API_KEY=sp-...
 ```

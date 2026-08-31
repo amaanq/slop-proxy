@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use super::{PoolError, Slot, Slots};
+use super::{AccountUsage, PoolError, Slot, Slots};
 use crate::anthropic::client::{AnthropicClient, RelayHeaders};
 use crate::db::Db;
 use crate::provider::Provider;
@@ -12,11 +12,13 @@ use crate::upstream::SendError;
 pub struct AnthropicPool {
     slots: Slots,
     client: AnthropicClient,
+    soft_limit: f64,
 }
 
 impl AnthropicPool {
     pub async fn load(db: Db, client: AnthropicClient) -> eyre::Result<Self> {
         Ok(Self {
+            soft_limit: client.soft_utilization_limit(),
             slots: Slots::load(db, Provider::Anthropic).await?,
             client,
         })
@@ -38,30 +40,66 @@ impl AnthropicPool {
         self.slots.snapshot().await
     }
 
+    /// Reads each account's rolling-window consumption from the provider.
+    /// This needs no inference request, so idle accounts report real numbers
+    /// and a locked account is known before it rejects traffic.
+    pub async fn poll_usage(&self) {
+        for slot in self.slots.list().await {
+            let Ok(token) = self.slots.fresh_token(&slot, false).await else {
+                continue;
+            };
+            match self.client.usage(&token).await {
+                Ok(usage) => {
+                    let windows = usage
+                        .windows()
+                        // The endpoint reports percentages while the response
+                        // headers report fractions; normalize to fractions.
+                        .map(|(name, w)| (name.to_string(), w.utilization / 100.0))
+                        .collect();
+                    self.slots
+                        .note_usage(
+                            &slot,
+                            AccountUsage {
+                                windows,
+                                locked: usage.locked(),
+                            },
+                        )
+                        .await;
+                }
+                Err(e) => tracing::debug!("usage for {}: {e}", slot.display),
+            }
+        }
+    }
+
     /// Rendezvous-hashed order: a session sticks to its highest-scoring
     /// account so upstream prompt caches keep hitting, and only moves while
-    /// that account is cooling down.
+    /// that account is cooling down. Accounts matching the token's trusted
+    /// preference sort ahead of the rest, which keeps ordinary traffic off
+    /// the scarce trusted accounts until the others are unavailable, and an
+    /// account whose window is nearly spent sorts behind its peers so
+    /// sessions migrate before it starts rejecting them.
     async fn ranked(&self, session_key: &str, prefer_trusted: bool) -> Vec<Arc<Slot>> {
-        let mut scored = self
-            .slots
-            .list()
-            .await
-            .iter()
-            .map(|s| {
-                let mut h = hmac_sha256::Hash::new();
-                h.update(session_key.as_bytes());
-                h.update(s.id.to_le_bytes());
-                let d = h.finalize();
-                (u64::from_le_bytes(d[..8].try_into().unwrap()), s.clone())
-            })
-            .collect::<Vec<(u64, Arc<Slot>)>>();
-        scored.sort_by_key(|(score, slot)| {
+        let mut scored = Vec::new();
+        for slot in self.slots.list().await {
+            let strained = self
+                .slots
+                .usage_of(&slot)
+                .await
+                .is_some_and(|u| u.locked || u.peak() >= self.soft_limit);
+            let mut h = hmac_sha256::Hash::new();
+            h.update(session_key.as_bytes());
+            h.update(slot.id.to_le_bytes());
+            let d = h.finalize();
+            scored.push((u64::from_le_bytes(d[..8].try_into().unwrap()), strained, slot));
+        }
+        scored.sort_by_key(|(score, strained, slot)| {
             (
-                std::cmp::Reverse(prefer_trusted && slot.trusted),
+                std::cmp::Reverse(slot.trusted == prefer_trusted),
+                *strained,
                 std::cmp::Reverse(*score),
             )
         });
-        scored.into_iter().map(|(_, s)| s).collect()
+        scored.into_iter().map(|(_, _, s)| s).collect()
     }
 
     pub async fn execute(
@@ -94,9 +132,6 @@ impl AnthropicPool {
             match self.client.send(&token, path, body, hdrs).await {
                 Ok(resp) => {
                     self.slots.mark_ok(&slot).await;
-                    self.slots
-                        .note_utilization(&slot, utilization(resp.headers()))
-                        .await;
                     return Ok((slot.id, resp));
                 }
                 Err(SendError::Auth(body_text)) => {
@@ -105,9 +140,6 @@ impl AnthropicPool {
                         match self.client.send(&token, path, body, hdrs).await {
                             Ok(resp) => {
                                 self.slots.mark_ok(&slot).await;
-                                self.slots
-                                    .note_utilization(&slot, utilization(resp.headers()))
-                                    .await;
                                 return Ok((slot.id, resp));
                             }
                             Err(e) => {
@@ -141,22 +173,6 @@ impl AnthropicPool {
     }
 }
 
-/// The unified-limit windows Anthropic reports utilization for, e.g.
-/// `anthropic-ratelimit-unified-5h-utilization: 0.4`.
-fn utilization(headers: &reqwest::header::HeaderMap) -> Vec<(String, f64)> {
-    headers
-        .iter()
-        .filter_map(|(name, value)| {
-            let window = name
-                .as_str()
-                .strip_prefix("anthropic-ratelimit-unified-")?
-                .strip_suffix("-utilization")?;
-            let ratio = value.to_str().ok()?.parse::<f64>().ok()?;
-            Some((window.to_string(), ratio))
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -170,6 +186,7 @@ mod tests {
         AnthropicPool {
             slots: super::super::test_slots(db, Provider::Anthropic, ids),
             client: AnthropicClient::new(AnthropicConfig::default()),
+            soft_limit: 0.9,
         }
     }
 
@@ -198,13 +215,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prefer_trusted_ranks_trusted_first() {
+    async fn a_spent_window_sinks_below_its_peers() {
+        let pool = test_pool(&[(1, false), (2, false), (3, false), (4, false)]).await;
+        let key = "session-strain";
+        let head = pool.ranked(key, false).await[0].clone();
+
+        pool.slots
+            .note_usage(
+                &head,
+                AccountUsage {
+                    windows: vec![("5h".into(), 0.97)],
+                    locked: false,
+                },
+            )
+            .await;
+        let after = pool.ranked(key, false).await;
+        assert_ne!(after[0].id, head.id, "spent account still ranked first");
+        assert_eq!(after[3].id, head.id, "spent account should sort last");
+
+        // A locked account sinks the same way regardless of its fraction.
+        let fresh = after[0].clone();
+        pool.slots
+            .note_usage(
+                &fresh,
+                AccountUsage {
+                    windows: vec![("5h".into(), 0.01)],
+                    locked: true,
+                },
+            )
+            .await;
+        let after = pool.ranked(key, false).await;
+        assert_ne!(after[0].id, fresh.id, "locked account still ranked first");
+    }
+
+    #[tokio::test]
+    async fn trusted_preference_partitions_both_ways() {
         let pool = test_pool(&[(1, false), (2, true), (3, false), (4, true)]).await;
 
         for i in 0..16 {
             let order = pool.ranked(&format!("session-{i}"), true).await;
             let heads = [order[0].id, order[1].id];
             assert!(heads.contains(&2) && heads.contains(&4), "untrusted ranked first");
+
+            let plain = pool.ranked(&format!("session-{i}"), false).await;
+            let plain_heads = [plain[0].id, plain[1].id];
+            assert!(
+                plain_heads.contains(&1) && plain_heads.contains(&3),
+                "trusted accounts served an ordinary token before untrusted ones"
+            );
         }
 
         let plain = pool.ranked("session-x", false).await;

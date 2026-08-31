@@ -61,10 +61,11 @@ fn render_accounts(out: &mut String, accounts: &[AccountSnapshot]) {
     gauge_header(
         out,
         "slop_account_utilization_ratio",
-        "Upstream rate-limit window utilization as last reported",
+        "Fraction of the account's rolling limit window consumed",
     );
     for a in accounts {
-        for (window, ratio) in &a.utilization {
+        let Some(usage) = &a.usage else { continue };
+        for (window, ratio) in &usage.windows {
             line(
                 out,
                 "slop_account_utilization_ratio",
@@ -73,6 +74,15 @@ fn render_accounts(out: &mut String, accounts: &[AccountSnapshot]) {
                 *ratio,
             );
         }
+    }
+    gauge_header(
+        out,
+        "slop_account_locked",
+        "1 when the provider has locked the account out until a window resets",
+    );
+    for a in accounts {
+        let Some(usage) = &a.usage else { continue };
+        line(out, "slop_account_locked", a, &[], f64::from(usage.locked));
     }
 }
 

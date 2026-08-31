@@ -23,12 +23,16 @@ pub struct Config {
 #[serde(default)]
 pub struct AnthropicConfig {
     pub base_url: String,
+    /// Fraction of a rolling window past which an account is ranked behind
+    /// its peers, so sessions migrate before the window rejects them.
+    pub soft_utilization_limit: f64,
 }
 
 impl Default for AnthropicConfig {
     fn default() -> Self {
         Self {
             base_url: "https://api.anthropic.com".into(),
+            soft_utilization_limit: 0.9,
         }
     }
 }

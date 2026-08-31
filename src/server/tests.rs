@@ -107,6 +107,7 @@ async fn spawn_proxy_with(models: ModelsConfig, anthropic_base: Option<String>) 
         },
         anthropic: AnthropicConfig {
             base_url: anthropic_base.unwrap_or_default(),
+            ..AnthropicConfig::default()
         },
         models,
     };

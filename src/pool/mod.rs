@@ -36,7 +36,23 @@ struct SlotState {
     expires_at: Option<i64>,
     status: Status,
     consecutive_fails: u32,
-    utilization: Vec<(String, f64)>,
+    usage: Option<AccountUsage>,
+}
+
+/// Provider-reported consumption of an account's rolling limit windows.
+#[derive(Debug, Default, Clone)]
+pub struct AccountUsage {
+    /// Window name to fraction consumed, 0.0 to 1.0.
+    pub windows: Vec<(String, f64)>,
+    /// The provider has stopped serving this account until a window resets,
+    /// which is a harder signal than a high fraction.
+    pub locked: bool,
+}
+
+impl AccountUsage {
+    pub fn peak(&self) -> f64 {
+        self.windows.iter().map(|(_, v)| *v).fold(0.0, f64::max)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -53,7 +69,7 @@ pub struct AccountSnapshot {
     pub status: u8,
     pub cooldown_seconds: i64,
     pub consecutive_fails: u32,
-    pub utilization: Vec<(String, f64)>,
+    pub usage: Option<AccountUsage>,
 }
 
 /// The per-account state machine shared by both backend pools: cooldown
@@ -149,10 +165,14 @@ impl Slots {
         slot.state.lock().await.consecutive_fails = 0;
     }
 
-    pub async fn note_utilization(&self, slot: &Arc<Slot>, utilization: Vec<(String, f64)>) {
-        if !utilization.is_empty() {
-            slot.state.lock().await.utilization = utilization;
-        }
+    pub async fn note_usage(&self, slot: &Arc<Slot>, usage: AccountUsage) {
+        slot.state.lock().await.usage = Some(usage);
+    }
+
+    /// Fraction of the busiest window consumed, and whether the provider has
+    /// locked the account out entirely.
+    pub async fn usage_of(&self, slot: &Arc<Slot>) -> Option<AccountUsage> {
+        slot.state.lock().await.usage.clone()
     }
 
     pub async fn snapshot(&self) -> Vec<AccountSnapshot> {
@@ -173,7 +193,7 @@ impl Slots {
                 status,
                 cooldown_seconds,
                 consecutive_fails: st.consecutive_fails,
-                utilization: st.utilization.clone(),
+                usage: st.usage.clone(),
             });
         }
         out
@@ -296,7 +316,7 @@ fn slot_from_account(a: crate::db::accounts::Account) -> Slot {
             expires_at: a.access_expires_at,
             status,
             consecutive_fails: 0,
-            utilization: Vec::new(),
+            usage: None,
         }),
     }
 }
@@ -319,7 +339,7 @@ pub(crate) fn test_slots(db: Db, provider: Provider, ids: &[(i64, bool)]) -> Slo
                         expires_at: None,
                         status: Status::Active,
                         consecutive_fails: 0,
-                        utilization: Vec::new(),
+                        usage: None,
                     }),
                 })
             })

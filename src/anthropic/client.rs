@@ -10,6 +10,40 @@ const RESET_HEADERS: &[&str] = &[
     "anthropic-ratelimit-requests-reset",
 ];
 
+/// Rolling-window usage as the subscription reports it, without spending an
+/// inference request. `locked_reason` is set when the window is exhausted
+/// rather than merely busy.
+#[derive(Debug, Default, Clone, serde::Deserialize)]
+pub struct Window {
+    #[serde(default)]
+    pub utilization: f64,
+    #[serde(default)]
+    pub locked_reason: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, serde::Deserialize)]
+pub struct Usage {
+    #[serde(default)]
+    pub five_hour: Option<Window>,
+    #[serde(default)]
+    pub seven_day: Option<Window>,
+}
+
+impl Usage {
+    pub fn locked(&self) -> bool {
+        [&self.five_hour, &self.seven_day]
+            .into_iter()
+            .flatten()
+            .any(|w| w.locked_reason.is_some())
+    }
+
+    pub fn windows(&self) -> impl Iterator<Item = (&'static str, &Window)> {
+        [("5h", &self.five_hour), ("7d", &self.seven_day)]
+            .into_iter()
+            .filter_map(|(n, w)| w.as_ref().map(|w| (n, w)))
+    }
+}
+
 /// Client headers worth carrying through to the upstream request.
 #[derive(Debug, Default, Clone)]
 pub struct RelayHeaders {
@@ -30,6 +64,28 @@ impl AnthropicClient {
             .build()
             .expect("building http client");
         Self { http, cfg }
+    }
+
+    pub fn soft_utilization_limit(&self) -> f64 {
+        self.cfg.soft_utilization_limit
+    }
+
+    pub async fn usage(&self, access_token: &str) -> Result<Usage, String> {
+        let resp = self
+            .http
+            .get(format!(
+                "{}/api/oauth/usage",
+                self.cfg.base_url.trim_end_matches('/')
+            ))
+            .bearer_auth(access_token)
+            .header("anthropic-beta", OAUTH_BETA)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        if !resp.status().is_success() {
+            return Err(resp.status().to_string());
+        }
+        resp.json().await.map_err(|e| e.to_string())
     }
 
     /// Statuses other than 401/429/5xx come back as `Ok` so the caller can

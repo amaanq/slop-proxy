@@ -4,7 +4,7 @@ pub mod codex;
 use std::sync::Arc;
 
 use thiserror::Error;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::db::Db;
 use crate::oauth::refresh::RefreshError;
@@ -60,61 +60,74 @@ pub struct AccountSnapshot {
 /// the owning pool.
 pub(crate) struct Slots {
     provider: Provider,
-    slots: Vec<Arc<Slot>>,
+    slots: RwLock<Vec<Arc<Slot>>>,
     db: Db,
 }
 
 impl Slots {
     pub async fn load(db: Db, provider: Provider) -> eyre::Result<Self> {
-        let now = crate::clock::unix_now();
-        let slots = db
+        let slots = Self {
+            provider,
+            slots: RwLock::new(Vec::new()),
+            db,
+        };
+        slots.reload().await?;
+        Ok(slots)
+    }
+
+    /// Syncs slots with the accounts table so logins land without a restart.
+    /// Existing slots keep their in-memory cooldown and token state unless the
+    /// db row's refresh token changed, which means someone re-logged-in and
+    /// the in-memory grant is stale.
+    pub async fn reload(&self) -> eyre::Result<()> {
+        let accounts: Vec<_> = self
+            .db
             .list_accounts()
             .await?
             .into_iter()
-            .filter(|a| a.provider == provider)
-            .map(|a| {
-                let status = match a.status.as_str() {
-                    "disabled" => Status::Disabled,
-                    "cooldown" if a.cooldown_until.unwrap_or(0) > now => Status::Cooldown {
-                        until: a.cooldown_until.unwrap_or(0),
-                    },
-                    _ => Status::Active,
-                };
-                Arc::new(Slot {
-                    id: a.id,
-                    provider_account_id: a.provider_account_id,
-                    display: a
-                        .label
-                        .or(a.email)
-                        .unwrap_or_else(|| format!("account#{}", a.id)),
-                    state: Mutex::new(SlotState {
-                        access_token: a.access_token,
-                        refresh_token: a.refresh_token,
-                        expires_at: a.access_expires_at,
-                        status,
-                        consecutive_fails: 0,
-                        utilization: Vec::new(),
-                    }),
-                })
-            })
+            .filter(|a| a.provider == self.provider)
             .collect();
-        Ok(Self {
-            provider,
-            slots,
-            db,
-        })
+
+        let mut slots = self.slots.write().await;
+        let mut next = Vec::with_capacity(accounts.len());
+        let mut added = 0;
+        for a in accounts {
+            let existing = match slots.iter().find(|s| s.id == a.id) {
+                Some(s) if s.state.lock().await.refresh_token == a.refresh_token => Some(s),
+                _ => None,
+            };
+            match existing {
+                Some(s) => next.push(s.clone()),
+                None => {
+                    added += 1;
+                    next.push(Arc::new(slot_from_account(a)));
+                }
+            }
+        }
+        let removed = slots
+            .iter()
+            .filter(|s| !next.iter().any(|n| n.id == s.id))
+            .count();
+        if added > 0 || removed > 0 {
+            tracing::info!(
+                "reloaded {} accounts: {added} added or replaced, {removed} removed",
+                self.provider
+            );
+        }
+        *slots = next;
+        Ok(())
     }
 
-    pub fn len(&self) -> usize {
-        self.slots.len()
+    pub async fn len(&self) -> usize {
+        self.slots.read().await.len()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.slots.is_empty()
+    pub async fn is_empty(&self) -> bool {
+        self.slots.read().await.is_empty()
     }
 
-    pub fn all(&self) -> &[Arc<Slot>] {
-        &self.slots
+    pub async fn list(&self) -> Vec<Arc<Slot>> {
+        self.slots.read().await.clone()
     }
 
     /// Claims the slot for a request if it is not disabled or cooling down.
@@ -143,8 +156,9 @@ impl Slots {
 
     pub async fn snapshot(&self) -> Vec<AccountSnapshot> {
         let now = crate::clock::unix_now();
-        let mut out = Vec::with_capacity(self.slots.len());
-        for slot in &self.slots {
+        let slots = self.list().await;
+        let mut out = Vec::with_capacity(slots.len());
+        for slot in &slots {
             let st = slot.state.lock().await;
             let (status, cooldown_seconds) = match st.status {
                 Status::Active => (0, 0),
@@ -248,7 +262,7 @@ impl Slots {
     pub async fn min_cooldown(&self) -> i64 {
         let now = crate::clock::unix_now();
         let mut min = i64::MAX;
-        for slot in &self.slots {
+        for slot in &self.list().await {
             let st = slot.state.lock().await;
             if let Status::Cooldown { until } = st.status {
                 min = min.min(until - now);
@@ -258,11 +272,38 @@ impl Slots {
     }
 }
 
+fn slot_from_account(a: crate::db::accounts::Account) -> Slot {
+    let now = crate::clock::unix_now();
+    let status = match a.status.as_str() {
+        "disabled" => Status::Disabled,
+        "cooldown" if a.cooldown_until.unwrap_or(0) > now => Status::Cooldown {
+            until: a.cooldown_until.unwrap_or(0),
+        },
+        _ => Status::Active,
+    };
+    Slot {
+        id: a.id,
+        provider_account_id: a.provider_account_id,
+        display: a
+            .label
+            .or(a.email)
+            .unwrap_or_else(|| format!("account#{}", a.id)),
+        state: Mutex::new(SlotState {
+            access_token: a.access_token,
+            refresh_token: a.refresh_token,
+            expires_at: a.access_expires_at,
+            status,
+            consecutive_fails: 0,
+            utilization: Vec::new(),
+        }),
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn test_slots(db: Db, provider: Provider, ids: &[i64]) -> Slots {
     Slots {
         provider,
-        slots: ids
+        slots: RwLock::new(ids
             .iter()
             .map(|&id| {
                 Arc::new(Slot {
@@ -279,7 +320,7 @@ pub(crate) fn test_slots(db: Db, provider: Provider, ids: &[i64]) -> Slots {
                     }),
                 })
             })
-            .collect(),
+            .collect()),
         db,
     }
 }

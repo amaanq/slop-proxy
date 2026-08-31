@@ -67,19 +67,19 @@ impl Default for ModelCache {
 
 pub async fn serve(db: Db, cfg: Config, bind: &str) -> Result<()> {
     let codex = CodexPool::load(db.clone(), CodexClient::new(cfg.codex.clone())).await?;
-    if codex.is_empty() {
+    if codex.is_empty().await {
         tracing::warn!("no codex accounts in the database; run `slop-proxy login`");
     } else {
-        tracing::info!("loaded {} codex account(s)", codex.len());
+        tracing::info!("loaded {} codex account(s)", codex.len().await);
     }
     let anthropic =
         AnthropicPool::load(db.clone(), AnthropicClient::new(cfg.anthropic.clone())).await?;
-    if anthropic.is_empty() {
+    if anthropic.is_empty().await {
         tracing::warn!(
             "no anthropic accounts in the database; run `slop-proxy login --provider anthropic`"
         );
     } else {
-        tracing::info!("loaded {} anthropic account(s)", anthropic.len());
+        tracing::info!("loaded {} anthropic account(s)", anthropic.len().await);
     }
 
     let state = AppState {
@@ -89,6 +89,21 @@ pub async fn serve(db: Db, cfg: Config, bind: &str) -> Result<()> {
         cfg: Arc::new(cfg),
         models: Arc::new(ModelCache::new()),
     };
+    let reload_state = state.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(60));
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            if let Err(e) = reload_state.codex.reload().await {
+                tracing::warn!("reloading codex accounts: {e}");
+            }
+            if let Err(e) = reload_state.anthropic.reload().await {
+                tracing::warn!("reloading anthropic accounts: {e}");
+            }
+        }
+    });
+
     if let Some(mbind) = state.cfg.metrics_bind.clone() {
         let mstate = state.clone();
         let listener = tokio::net::TcpListener::bind(&mbind)

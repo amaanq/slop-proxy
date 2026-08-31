@@ -26,12 +26,16 @@ impl CodexPool {
         })
     }
 
-    pub fn len(&self) -> usize {
-        self.slots.len()
+    pub async fn len(&self) -> usize {
+        self.slots.len().await
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.slots.is_empty()
+    pub async fn is_empty(&self) -> bool {
+        self.slots.is_empty().await
+    }
+
+    pub async fn reload(&self) -> eyre::Result<()> {
+        self.slots.reload().await
     }
 
     pub fn client(&self) -> &CodexClient {
@@ -59,10 +63,10 @@ impl CodexPool {
     }
 
     pub async fn execute(&self, req: &Value) -> Result<(i64, reqwest::Response), PoolError> {
-        if self.slots.is_empty() {
+        let attempts = self.slots.len().await.min(3);
+        if attempts == 0 {
             return Err(PoolError::NoAccounts(Provider::Codex));
         }
-        let attempts = self.slots.len().min(3);
         let mut last_err = Option::<SendError>::None;
 
         for _ in 0..attempts {
@@ -120,10 +124,14 @@ impl CodexPool {
     }
 
     async fn next_available(&self) -> Option<Arc<Slot>> {
-        let n = self.slots.len();
+        let slots = self.slots.list().await;
+        let n = slots.len();
+        if n == 0 {
+            return None;
+        }
         for _ in 0..n {
             let i = self.cursor.fetch_add(1, Ordering::Relaxed) % n;
-            let slot = &self.slots.all()[i];
+            let slot = &slots[i];
             if self.slots.try_claim(slot).await {
                 return Some(slot.clone());
             }

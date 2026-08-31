@@ -211,32 +211,58 @@ pub async fn models(State(state): State<AppState>) -> Response {
     .into_response()
 }
 
+/// The fields the proxy rewrites on a `/v1/responses` request
+#[derive(serde::Deserialize, serde::Serialize)]
+struct PassthroughRequest {
+    model: Option<String>,
+    store: Option<bool>,
+    stream: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instructions: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<ReasoningPatch>,
+    #[serde(flatten)]
+    rest: serde_json::Map<String, Value>,
+}
+
+#[derive(Default, serde::Deserialize, serde::Serialize)]
+struct ReasoningPatch {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effort: Option<String>,
+    #[serde(flatten)]
+    rest: serde_json::Map<String, Value>,
+}
+
 pub async fn responses_passthrough(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthInfo>,
-    Json(mut body): Json<Value>,
+    Json(body): Json<Value>,
 ) -> Response {
-    let Some(obj) = body.as_object_mut() else {
-        return translation_error(DIALECT, "request body must be a JSON object");
+    let mut req = match serde_json::from_value::<PassthroughRequest>(body) {
+        Ok(r) => r,
+        Err(e) => return translation_error(DIALECT, &format!("invalid request: {e}")),
     };
 
-    let requested_model = obj
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or(&state.cfg.models.default)
-        .to_string();
+    let requested_model = req
+        .model
+        .unwrap_or_else(|| state.cfg.models.default.clone());
     let resolved = model_map::resolve(&state.cfg.models, &requested_model);
-    obj.insert("model".into(), Value::String(resolved.model.clone()));
-
-    let client_streams = obj.get("stream").and_then(Value::as_bool).unwrap_or(false);
-    obj.insert("store".into(), Value::Bool(false));
-    obj.insert("stream".into(), Value::Bool(true));
-    if !obj.contains_key("instructions") {
-        obj.insert(
-            "instructions".into(),
-            Value::String(state.cfg.codex.instructions()),
-        );
+    req.model = Some(resolved.model.clone());
+    if let Some(effort) = model_map::suffix_effort(&requested_model) {
+        req.reasoning.get_or_insert_default().effort =
+            Some(model_map::clamp_effort(&resolved.model, &effort));
     }
+
+    let client_streams = req.stream.unwrap_or(false);
+    req.store = Some(false);
+    req.stream = Some(true);
+    if req.instructions.is_none() {
+        req.instructions = Some(state.cfg.codex.instructions());
+    }
+    let body = match serde_json::to_value(&req) {
+        Ok(v) => v,
+        Err(e) => return translation_error(DIALECT, &format!("serializing request: {e}")),
+    };
 
     let record = UsageRecord {
         token_id: Some(auth.token_id),

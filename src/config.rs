@@ -165,7 +165,7 @@ impl Config {
         let bind = std::env::var("SLOP_BIND")
             .ok()
             .or(file.bind)
-            .unwrap_or_else(|| "127.0.0.1:8484".into());
+            .unwrap_or_else(|| "[::1]:8484".into());
 
         Ok(Self {
             db_path,

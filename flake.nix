@@ -73,7 +73,7 @@
 
             bind = lib.mkOption {
               type = lib.types.str;
-              default = "127.0.0.1:8484";
+              default = "[::1]:8484";
               description = "Address the API server listens on.";
             };
 

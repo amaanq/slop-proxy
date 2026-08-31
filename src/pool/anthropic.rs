@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use super::{AccountUsage, PoolError, Slot, Slots};
+use super::{AccountUsage, PoolError, Slot, Slots, UsageWindow};
 use crate::anthropic::client::{AnthropicClient, RelayHeaders};
 use crate::db::Db;
 use crate::provider::Provider;
@@ -52,9 +52,13 @@ impl AnthropicPool {
                 Ok(usage) => {
                     let windows = usage
                         .windows()
-                        // The endpoint reports percentages while the response
-                        // headers report fractions; normalize to fractions.
-                        .map(|(name, w)| (name.to_string(), w.utilization / 100.0))
+                        .map(|(name, w)| UsageWindow {
+                            name: name.to_string(),
+                            // The endpoint reports percentages while the
+                            // response headers report fractions.
+                            utilization: w.utilization / 100.0,
+                            resets_at: w.resets_at_unix(),
+                        })
                         .collect();
                     self.slots
                         .note_usage(
@@ -224,7 +228,11 @@ mod tests {
             .note_usage(
                 &head,
                 AccountUsage {
-                    windows: vec![("5h".into(), 0.97)],
+                    windows: vec![UsageWindow {
+                        name: "5h".into(),
+                        utilization: 0.97,
+                        resets_at: None,
+                    }],
                     locked: false,
                 },
             )
@@ -239,7 +247,11 @@ mod tests {
             .note_usage(
                 &fresh,
                 AccountUsage {
-                    windows: vec![("5h".into(), 0.01)],
+                    windows: vec![UsageWindow {
+                        name: "5h".into(),
+                        utilization: 0.01,
+                        resets_at: None,
+                    }],
                     locked: true,
                 },
             )

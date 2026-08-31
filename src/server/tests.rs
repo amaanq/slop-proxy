@@ -400,7 +400,7 @@ async fn metrics_render_accounts_and_usage() {
     let text = String::from_utf8(bytes.to_vec()).unwrap();
 
     assert!(text.contains("slop_account_status{provider=\"codex\",account=\"test@example.com\"} 0"));
-    assert!(text.contains("slop_requests_total{user=\"alice\",model=\"gpt-5-codex\",dialect=\"openai\"} 1"));
+    assert!(text.contains("slop_requests_total{user=\"alice\",account=\"test@example.com\",model=\"gpt-5-codex\",dialect=\"openai\"} 1"));
     assert!(text.contains("kind=\"input\"} 100"));
 }
 

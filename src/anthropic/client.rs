@@ -19,6 +19,14 @@ pub struct Window {
     pub utilization: f64,
     #[serde(default)]
     pub locked_reason: Option<String>,
+    #[serde(default)]
+    pub resets_at: Option<String>,
+}
+
+impl Window {
+    pub fn resets_at_unix(&self) -> Option<i64> {
+        self.resets_at.as_deref()?.parse::<jiff::Timestamp>().ok().map(|t| t.as_second())
+    }
 }
 
 #[derive(Debug, Default, Clone, serde::Deserialize)]

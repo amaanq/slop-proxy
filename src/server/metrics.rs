@@ -65,13 +65,32 @@ fn render_accounts(out: &mut String, accounts: &[AccountSnapshot]) {
     );
     for a in accounts {
         let Some(usage) = &a.usage else { continue };
-        for (window, ratio) in &usage.windows {
+        for w in &usage.windows {
             line(
                 out,
                 "slop_account_utilization_ratio",
                 a,
-                &[("window", window)],
-                *ratio,
+                &[("window", &w.name)],
+                w.utilization,
+            );
+        }
+    }
+    gauge_header(
+        out,
+        "slop_account_window_reset_seconds",
+        "Seconds until the account's limit window rolls over",
+    );
+    let now = crate::clock::unix_now();
+    for a in accounts {
+        let Some(usage) = &a.usage else { continue };
+        for w in &usage.windows {
+            let Some(resets_at) = w.resets_at else { continue };
+            line(
+                out,
+                "slop_account_window_reset_seconds",
+                a,
+                &[("window", &w.name)],
+                (resets_at - now).max(0) as f64,
             );
         }
     }
@@ -100,8 +119,9 @@ fn render_usage(out: &mut String, rows: &[crate::db::usage::MetricsRow]) {
         for r in rows {
             let _ = writeln!(
                 out,
-                "slop_tokens_total{{user={},model={},dialect={},kind=\"{kind}\"}} {}",
+                "slop_tokens_total{{user={},account={},model={},dialect={},kind=\"{kind}\"}} {}",
                 quote(&r.user),
+                quote(&r.account),
                 quote(&r.model),
                 quote(&r.dialect),
                 get(r),
@@ -137,8 +157,9 @@ fn line(out: &mut String, name: &str, a: &AccountSnapshot, extra: &[(&str, &str)
 fn usage_line(out: &mut String, name: &str, r: &crate::db::usage::MetricsRow, value: f64) {
     let _ = writeln!(
         out,
-        "{name}{{user={},model={},dialect={}}} {value}",
+        "{name}{{user={},account={},model={},dialect={}}} {value}",
         quote(&r.user),
+        quote(&r.account),
         quote(&r.model),
         quote(&r.dialect),
     );

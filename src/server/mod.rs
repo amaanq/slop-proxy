@@ -224,6 +224,24 @@ impl Drop for LogGuard {
     }
 }
 
+/// A request rejected before dispatch has already spent the caller's
+/// admission, so without a row it burns their limit invisibly.
+pub fn log_rejected(db: &Db, auth: &auth::AuthInfo, dialect: &'static str, model: &str) {
+    log_error(
+        db,
+        UsageRecord {
+            meter_id: Some(auth.meter_id),
+            token_id: Some(auth.token_id),
+            user: auth.user.clone(),
+            dialect,
+            requested_model: model.to_string(),
+            ..Default::default()
+        },
+        400,
+        "invalid_request",
+    );
+}
+
 pub fn log_error(db: &Db, mut record: UsageRecord, status: i64, kind: &str) {
     record.status = status;
     record.error_kind = Some(kind.to_string());

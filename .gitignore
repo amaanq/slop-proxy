@@ -1,0 +1,5 @@
+/target
+/result
+*.db
+*.db-wal
+*.db-shm

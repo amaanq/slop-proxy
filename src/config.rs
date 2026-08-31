@@ -49,6 +49,9 @@ pub struct CodexConfig {
     pub instructions: Option<String>,
     pub instructions_file: Option<PathBuf>,
     pub forward_max_tokens: bool,
+    /// Fraction of a rolling window past which an account is ranked behind
+    /// its peers, so traffic moves before the window rejects it.
+    pub soft_utilization_limit: f64,
 }
 
 impl Default for CodexConfig {
@@ -61,6 +64,7 @@ impl Default for CodexConfig {
             instructions: None,
             instructions_file: None,
             forward_max_tokens: true,
+            soft_utilization_limit: 0.9,
         }
     }
 }

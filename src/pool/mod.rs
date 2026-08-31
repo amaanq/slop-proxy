@@ -188,10 +188,15 @@ impl Slots {
         slot.state.lock().await.usage = Some(usage);
     }
 
-    /// Fraction of the busiest window consumed, and whether the provider has
-    /// locked the account out entirely.
-    pub async fn usage_of(&self, slot: &Arc<Slot>) -> Option<AccountUsage> {
-        slot.state.lock().await.usage.clone()
+    /// True when the account is near or past its limit. Routing sinks these
+    /// below their peers so sessions move before a window rejects them.
+    pub async fn is_strained(&self, slot: &Arc<Slot>, soft_limit: f64) -> bool {
+        slot.state
+            .lock()
+            .await
+            .usage
+            .as_ref()
+            .is_some_and(|u| u.locked || u.peak() >= soft_limit)
     }
 
     pub async fn snapshot(&self) -> Vec<AccountSnapshot> {

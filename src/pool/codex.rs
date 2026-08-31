@@ -46,6 +46,45 @@ impl CodexPool {
         self.slots.snapshot().await
     }
 
+    /// Reads quota for every account from the usage endpoint, so idle
+    /// accounts report current figures instead of whatever they last saw on
+    /// a served response.
+    pub async fn poll_usage(&self) {
+        for slot in self.slots.list().await {
+            let Ok(token) = self.slots.fresh_token(&slot, false).await else {
+                continue;
+            };
+            match self.client.usage(&token, &slot.provider_account_id).await {
+                Ok(usage) => {
+                    let windows = usage
+                        .rate_limit
+                        .windows()
+                        .filter(|w| w.limit_window_seconds > 0)
+                        .map(|w| UsageWindow {
+                            name: window_name(w.limit_window_seconds / 60),
+                            utilization: w.used_percent / 100.0,
+                            resets_at: w.reset_at,
+                        })
+                        .collect::<Vec<_>>();
+                    if windows.is_empty() {
+                        continue;
+                    }
+                    self.slots
+                        .note_usage(
+                            &slot,
+                            AccountUsage {
+                                windows,
+                                locked: usage.rate_limit.limit_reached,
+                                observed_at: 0,
+                            },
+                        )
+                        .await;
+                }
+                Err(e) => tracing::debug!("usage for {}: {e}", slot.display),
+            }
+        }
+    }
+
     /// Fresh (access_token, account_id) for any active account, for
     /// non-completion calls like the models listing.
     pub async fn any_active_credentials(&self) -> Option<(String, String)> {

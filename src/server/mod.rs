@@ -1,5 +1,6 @@
 pub mod anthropic;
 pub mod auth;
+pub mod clientcfg;
 pub mod error;
 pub mod metrics;
 pub mod openai;
@@ -10,17 +11,17 @@ mod tests;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use axum::Router;
 use axum::middleware;
 use axum::routing::{get, post};
-use axum::Router;
 use eyre::{Result, WrapErr};
 
 use crate::anthropic::client::AnthropicClient;
 use crate::codex::client::CodexClient;
 use crate::codex::models::ModelInfo;
 use crate::config::Config;
-use crate::db::usage::UsageRecord;
 use crate::db::Db;
+use crate::db::usage::UsageRecord;
 use crate::pool::anthropic::AnthropicPool;
 use crate::pool::codex::CodexPool;
 use crate::translate::UsageCapture;
@@ -34,8 +35,38 @@ pub struct AppState {
     pub models: Arc<ModelCache>,
 }
 
+impl AppState {
+    /// The catalog exactly as the codex backend sent it.
+    pub async fn catalog_raw(&self) -> Option<String> {
+        if let Some(cached) = self.models.get() {
+            return Some(cached);
+        }
+        match self.codex.models_raw().await {
+            Ok(body) => {
+                self.models.put(body.clone());
+                Some(body)
+            }
+            Err(e) => {
+                tracing::warn!("fetching models from codex backend: {e}");
+                None
+            }
+        }
+    }
+
+    pub async fn catalog(&self) -> Option<Vec<ModelInfo>> {
+        let raw = self.catalog_raw().await?;
+        match serde_json::from_str::<crate::codex::models::ModelsResponse>(&raw) {
+            Ok(parsed) => Some(parsed.models),
+            Err(e) => {
+                tracing::warn!("parsing models response: {e}");
+                None
+            }
+        }
+    }
+}
+
 pub struct ModelCache {
-    inner: Mutex<Option<(Instant, Vec<ModelInfo>)>>,
+    inner: Mutex<Option<(Instant, String)>>,
     ttl: Duration,
 }
 
@@ -47,15 +78,15 @@ impl ModelCache {
         }
     }
 
-    pub fn get(&self) -> Option<Vec<ModelInfo>> {
+    pub fn get(&self) -> Option<String> {
         let g = self.inner.lock().unwrap();
         g.as_ref()
             .filter(|(t, _)| t.elapsed() < self.ttl)
             .map(|(_, m)| m.clone())
     }
 
-    pub fn put(&self, models: Vec<ModelInfo>) {
-        *self.inner.lock().unwrap() = Some((Instant::now(), models));
+    pub fn put(&self, catalog: String) {
+        *self.inner.lock().unwrap() = Some((Instant::now(), catalog));
     }
 }
 
@@ -141,6 +172,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/messages/count_tokens", post(anthropic::count_tokens))
         .route("/v1/chat/completions", post(openai::chat_completions))
         .route("/v1/models", get(openai::models))
+        .route("/config/codex/auth.json", get(clientcfg::codex_auth))
+        .route("/config/codex/config.toml", get(clientcfg::codex_config))
         .route("/v1/responses", post(openai::responses_passthrough))
         .layer(middleware::from_fn_with_state(
             state.clone(),

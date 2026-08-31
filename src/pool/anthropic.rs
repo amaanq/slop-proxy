@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 use super::{PoolError, Slot, Slots};
 use crate::anthropic::client::{AnthropicClient, RelayHeaders};
@@ -16,7 +15,7 @@ pub struct AnthropicPool {
 }
 
 impl AnthropicPool {
-    pub async fn load(db: Db, client: AnthropicClient) -> anyhow::Result<Self> {
+    pub async fn load(db: Db, client: AnthropicClient) -> eyre::Result<Self> {
         Ok(Self {
             slots: Slots::load(db, Provider::Anthropic).await?,
             client,
@@ -44,7 +43,7 @@ impl AnthropicPool {
             .all()
             .iter()
             .map(|s| {
-                let mut h = Sha256::new();
+                let mut h = hmac_sha256::Hash::new();
                 h.update(session_key.as_bytes());
                 h.update(s.id.to_le_bytes());
                 let d = h.finalize();

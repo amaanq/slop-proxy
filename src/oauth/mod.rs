@@ -2,7 +2,7 @@ pub mod anthropic;
 pub mod jwt;
 pub mod refresh;
 
-use anyhow::{Context, Result, bail};
+use eyre::{Result, WrapErr, bail, eyre};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -43,7 +43,7 @@ pub(crate) struct TokenResponse {
 impl TokenSet {
     pub(crate) fn from_response(r: TokenResponse) -> Self {
         let expires_at = jwt::exp(&r.access_token)
-            .or_else(|| r.expires_in.map(|s| chrono::Utc::now().timestamp() + s));
+            .or_else(|| r.expires_in.map(|s| crate::clock::unix_now() + s));
         Self {
             access_token: r.access_token,
             refresh_token: r.refresh_token,
@@ -89,7 +89,7 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
         })
         .send()
         .await
-        .context("requesting device user code")?;
+        .wrap_err("requesting device user code")?;
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
         bail!(
             "device login is not enabled for this account. A workspace admin must enable Codex device auth."
@@ -103,7 +103,7 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
     let uc = resp
         .json::<UserCodeResp>()
         .await
-        .context("parsing user code response")?;
+        .wrap_err("parsing user code response")?;
     let interval = parse_interval(uc.interval.as_ref());
 
     println!(
@@ -125,22 +125,22 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
         ])
         .send()
         .await
-        .context("token exchange request failed")?;
+        .wrap_err("token exchange request failed")?;
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
         bail!("token exchange failed: {status}: {body}");
     }
 
-    let tokens = TokenSet::from_response(resp.json().await.context("parsing token response")?);
+    let tokens = TokenSet::from_response(resp.json().await.wrap_err("parsing token response")?);
     let id_token = tokens
         .id_token
         .as_deref()
-        .context("no id_token in token response")?;
+        .ok_or_else(|| eyre!("no id_token in token response"))?;
     let info = jwt::parse_id_token(id_token)?;
     let account_id = info
         .chatgpt_account_id
-        .context("id_token has no chatgpt account id")?;
+        .ok_or_else(|| eyre!("id_token has no chatgpt account id"))?;
 
     let db_id = db
         .upsert_account(
@@ -179,13 +179,13 @@ async fn poll_for_code(
             })
             .send()
             .await
-            .context("polling device token")?;
+            .wrap_err("polling device token")?;
         match resp.status().as_u16() {
             200 => {
                 return resp
                     .json::<DeviceTokenResp>()
                     .await
-                    .context("parsing device token response");
+                    .wrap_err("parsing device token response");
             }
             // 403/404 mean the user has not finished authorizing yet.
             403 | 404 => {}

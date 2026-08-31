@@ -1,9 +1,7 @@
-use anyhow::{Context, Result, bail};
-use base64::Engine;
+use eyre::{Result, WrapErr, bail, eyre};
 use rand::RngCore;
 use reqwest::Url;
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 
 use super::TokenSet;
 use super::refresh::RefreshError;
@@ -37,7 +35,7 @@ impl TokenResponse {
         Some(TokenSet {
             expires_at: self
                 .expires_in
-                .map(|s| chrono::Utc::now().timestamp() + s),
+                .map(|s| crate::clock::unix_now() + s),
             access_token: self.access_token,
             refresh_token: self
                 .refresh_token
@@ -47,15 +45,11 @@ impl TokenResponse {
     }
 }
 
-fn b64url(bytes: &[u8]) -> String {
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
-}
-
 pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
     let mut raw = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut raw);
-    let verifier = b64url(&raw);
-    let challenge = b64url(&Sha256::digest(verifier.as_bytes()));
+    let verifier = data_encoding::BASE64URL_NOPAD.encode(&raw);
+    let challenge = data_encoding::BASE64URL_NOPAD.encode(&hmac_sha256::Hash::hash(verifier.as_bytes()));
 
     let mut url = Url::parse(AUTHORIZE_URL).expect("static url");
     url.query_pairs_mut()
@@ -73,7 +67,7 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
     let mut line = String::new();
     std::io::stdin()
         .read_line(&mut line)
-        .context("reading authorization code")?;
+        .wrap_err("reading authorization code")?;
     let pasted = line.trim();
     if pasted.is_empty() {
         bail!("no authorization code provided");
@@ -104,7 +98,7 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
         })
         .send()
         .await
-        .context("token exchange request failed")?;
+        .wrap_err("token exchange request failed")?;
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
@@ -113,16 +107,16 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
     let parsed = resp
         .json::<TokenResponse>()
         .await
-        .context("parsing token response")?;
+        .wrap_err("parsing token response")?;
 
     let account = parsed.account.as_ref();
     let account_id = account
         .and_then(|a| a.uuid.clone())
-        .context("token response has no account uuid")?;
+        .ok_or_else(|| eyre!("token response has no account uuid"))?;
     let email = account.and_then(|a| a.email_address.clone());
     let tokens = parsed
         .into_token_set(None)
-        .context("no refresh_token in token response")?;
+        .ok_or_else(|| eyre!("no refresh_token in token response"))?;
 
     let db_id = db
         .upsert_account(

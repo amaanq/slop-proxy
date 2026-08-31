@@ -18,7 +18,7 @@ pub struct CodexPool {
 }
 
 impl CodexPool {
-    pub async fn load(db: Db, client: CodexClient) -> anyhow::Result<Self> {
+    pub async fn load(db: Db, client: CodexClient) -> eyre::Result<Self> {
         Ok(Self {
             slots: Slots::load(db, Provider::Codex).await?,
             cursor: AtomicUsize::new(0),

@@ -1,8 +1,6 @@
-use anyhow::Result;
-use base64::Engine;
+use eyre::Result;
 use rand::RngCore;
 use rusqlite::params;
-use sha2::{Digest, Sha256};
 
 use super::Db;
 
@@ -18,16 +16,13 @@ pub struct ApiToken {
 pub fn generate() -> (String, String) {
     let mut bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut bytes);
-    let raw = format!(
-        "sp-{}",
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
-    );
+    let raw = format!("sp-{}", data_encoding::BASE64URL_NOPAD.encode(&bytes));
     let prefix = raw.chars().take(12).collect();
     (raw, prefix)
 }
 
 pub fn hash(raw: &str) -> Vec<u8> {
-    Sha256::digest(raw.as_bytes()).to_vec()
+    hmac_sha256::Hash::hash(raw.as_bytes()).to_vec()
 }
 
 impl Db {

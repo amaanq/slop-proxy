@@ -142,7 +142,7 @@ fn stream_response(upstream: EventStream, translator: OpenAiStream, guard: LogGu
 }
 
 pub async fn models(State(state): State<AppState>) -> Response {
-    let created = chrono::Utc::now().timestamp();
+    let created = crate::clock::unix_now();
 
     let live = match state.models.get() {
         Some(cached) => Some(cached),

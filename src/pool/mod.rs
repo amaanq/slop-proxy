@@ -65,8 +65,8 @@ pub(crate) struct Slots {
 }
 
 impl Slots {
-    pub async fn load(db: Db, provider: Provider) -> anyhow::Result<Self> {
-        let now = chrono::Utc::now().timestamp();
+    pub async fn load(db: Db, provider: Provider) -> eyre::Result<Self> {
+        let now = crate::clock::unix_now();
         let slots = db
             .list_accounts()
             .await?
@@ -119,7 +119,7 @@ impl Slots {
 
     /// Claims the slot for a request if it is not disabled or cooling down.
     pub async fn try_claim(&self, slot: &Arc<Slot>) -> bool {
-        let now = chrono::Utc::now().timestamp();
+        let now = crate::clock::unix_now();
         let mut st = slot.state.lock().await;
         match st.status {
             Status::Disabled => false,
@@ -142,7 +142,7 @@ impl Slots {
     }
 
     pub async fn snapshot(&self) -> Vec<AccountSnapshot> {
-        let now = chrono::Utc::now().timestamp();
+        let now = crate::clock::unix_now();
         let mut out = Vec::with_capacity(self.slots.len());
         for slot in &self.slots {
             let st = slot.state.lock().await;
@@ -168,7 +168,7 @@ impl Slots {
     /// refreshing the same account concurrently would invalidate each other.
     /// The slot's state mutex is held across the refresh call for that reason.
     pub async fn fresh_token(&self, slot: &Arc<Slot>, force: bool) -> Result<String, ()> {
-        let now = chrono::Utc::now().timestamp();
+        let now = crate::clock::unix_now();
         let mut st = slot.state.lock().await;
         if !force && st.expires_at.map(|e| e - now > 60).unwrap_or(false) {
             return Ok(st.access_token.clone());
@@ -216,7 +216,7 @@ impl Slots {
     }
 
     pub async fn cool(&self, slot: &Arc<Slot>, secs: i64, why: &str) {
-        let until = chrono::Utc::now().timestamp() + secs;
+        let until = crate::clock::unix_now() + secs;
         {
             let mut st = slot.state.lock().await;
             st.status = Status::Cooldown { until };
@@ -246,7 +246,7 @@ impl Slots {
     }
 
     pub async fn min_cooldown(&self) -> i64 {
-        let now = chrono::Utc::now().timestamp();
+        let now = crate::clock::unix_now();
         let mut min = i64::MAX;
         for slot in &self.slots {
             let st = slot.state.lock().await;

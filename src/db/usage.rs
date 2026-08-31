@@ -295,6 +295,7 @@ pub struct MetricsRow {
     pub user: String,
     pub account: String,
     pub provider: String,
+    pub requested_model: String,
     pub model: String,
     pub dialect: String,
     pub requests: i64,
@@ -304,6 +305,7 @@ pub struct MetricsRow {
     pub cache_read_tokens: i64,
     pub cache_write_tokens: i64,
     pub reasoning_tokens: i64,
+    pub duration_ms: i64,
 }
 
 impl Db {
@@ -317,26 +319,30 @@ impl Db {
                               FROM accounts a WHERE a.id = u.account_id), 'none') AS account,
                     COALESCE((SELECT a.provider
                               FROM accounts a WHERE a.id = u.account_id), 'none') AS provider,
-                    u.upstream_model, u.dialect, COUNT(*), SUM(u.status >= 400 OR u.error_kind IS NOT NULL),
+                    u.requested_model, u.upstream_model, u.dialect, COUNT(*),
+                    SUM(u.status >= 400 OR u.error_kind IS NOT NULL),
                     COALESCE(SUM(u.input_tokens),0), COALESCE(SUM(u.output_tokens),0),
                     COALESCE(SUM(u.cache_read_tokens),0), COALESCE(SUM(u.cache_write_tokens),0),
-                    COALESCE(SUM(u.reasoning_tokens),0)
-             FROM usage_log u GROUP BY u.user, account, provider, u.upstream_model, u.dialect",
+                    COALESCE(SUM(u.reasoning_tokens),0), COALESCE(SUM(u.duration_ms),0)
+             FROM usage_log u
+             GROUP BY u.user, account, provider, u.requested_model, u.upstream_model, u.dialect",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok(MetricsRow {
                 user: r.get(0)?,
                 account: r.get(1)?,
                 provider: r.get(2)?,
-                model: r.get(3)?,
-                dialect: r.get(4)?,
-                requests: r.get(5)?,
-                errors: r.get::<_, Option<i64>>(6)?.unwrap_or(0),
-                input_tokens: r.get(7)?,
-                output_tokens: r.get(8)?,
-                cache_read_tokens: r.get(9)?,
-                cache_write_tokens: r.get(10)?,
-                reasoning_tokens: r.get(11)?,
+                requested_model: r.get(3)?,
+                model: r.get(4)?,
+                dialect: r.get(5)?,
+                requests: r.get(6)?,
+                errors: r.get::<_, Option<i64>>(7)?.unwrap_or(0),
+                input_tokens: r.get(8)?,
+                output_tokens: r.get(9)?,
+                cache_read_tokens: r.get(10)?,
+                cache_write_tokens: r.get(11)?,
+                reasoning_tokens: r.get(12)?,
+                duration_ms: r.get(13)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)

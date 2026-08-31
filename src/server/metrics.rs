@@ -152,15 +152,29 @@ fn render_usage(out: &mut String, rows: &[crate::db::usage::MetricsRow]) {
     for r in rows {
         usage_line(out, "slop_request_errors_total", r, r.errors as f64);
     }
+    counter_header(
+        out,
+        "slop_request_duration_seconds_sum",
+        "Total time served, divide by slop_requests_total for the mean",
+    );
+    for r in rows {
+        usage_line(
+            out,
+            "slop_request_duration_seconds_sum",
+            r,
+            r.duration_ms as f64 / 1000.0,
+        );
+    }
     counter_header(out, "slop_tokens_total", "Tokens by kind");
     for (kind, get) in TOKEN_KINDS {
         for r in rows {
             let _ = writeln!(
                 out,
-                "slop_tokens_total{{user={},account={},provider={},model={},dialect={},kind=\"{kind}\"}} {}",
+                "slop_tokens_total{{user={},account={},provider={},requested_model={},model={},dialect={},kind=\"{kind}\"}} {}",
                 quote(&r.user),
                 quote(&r.account),
                 quote(&r.provider),
+                quote(&r.requested_model),
                 quote(&r.model),
                 quote(&r.dialect),
                 get(r),
@@ -211,10 +225,11 @@ fn line(out: &mut String, name: &str, a: &AccountSnapshot, extra: &[(&str, &str)
 fn usage_line(out: &mut String, name: &str, r: &crate::db::usage::MetricsRow, value: f64) {
     let _ = writeln!(
         out,
-        "{name}{{user={},account={},provider={},model={},dialect={}}} {value}",
+        "{name}{{user={},account={},provider={},requested_model={},model={},dialect={}}} {value}",
         quote(&r.user),
         quote(&r.account),
         quote(&r.provider),
+        quote(&r.requested_model),
         quote(&r.model),
         quote(&r.dialect),
     );

@@ -22,6 +22,24 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
 }
 
 fn render_accounts(out: &mut String, accounts: &[AccountSnapshot]) {
+    // An info metric keeps slow-moving identity off the sampled series while
+    // still letting a dashboard group or weight by it, e.g.
+    //   slop_account_utilization_ratio * on(account) group_left(plan) slop_account_info
+    gauge_header(
+        out,
+        "slop_account_info",
+        "Constant 1, carrying the account's plan and trusted access as labels",
+    );
+    for a in accounts {
+        let plan = a.plan.as_deref().unwrap_or("unknown");
+        line(
+            out,
+            "slop_account_info",
+            a,
+            &[("plan", plan), ("trusted", bool_label(a.trusted))],
+            1.0,
+        );
+    }
     gauge_header(
         out,
         "slop_account_status",
@@ -163,6 +181,10 @@ fn usage_line(out: &mut String, name: &str, r: &crate::db::usage::MetricsRow, va
         quote(&r.model),
         quote(&r.dialect),
     );
+}
+
+fn bool_label(v: bool) -> &'static str {
+    if v { "true" } else { "false" }
 }
 
 fn quote(s: &str) -> String {

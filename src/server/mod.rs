@@ -208,6 +208,7 @@ impl Drop for LogGuard {
         record.input_tokens = cap.input_tokens;
         record.output_tokens = cap.output_tokens;
         record.cache_read_tokens = cap.cache_read_tokens;
+        record.cache_write_tokens = cap.cache_write_tokens;
         record.reasoning_tokens = cap.reasoning_tokens;
         record.error_kind = cap.error_kind;
         if !cap.completed && record.error_kind.is_none() {

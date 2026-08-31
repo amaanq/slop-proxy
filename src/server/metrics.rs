@@ -153,9 +153,10 @@ fn render_usage(out: &mut String, rows: &[crate::db::usage::MetricsRow]) {
         for r in rows {
             let _ = writeln!(
                 out,
-                "slop_tokens_total{{user={},account={},model={},dialect={},kind=\"{kind}\"}} {}",
+                "slop_tokens_total{{user={},account={},provider={},model={},dialect={},kind=\"{kind}\"}} {}",
                 quote(&r.user),
                 quote(&r.account),
+                quote(&r.provider),
                 quote(&r.model),
                 quote(&r.dialect),
                 get(r),
@@ -165,10 +166,11 @@ fn render_usage(out: &mut String, rows: &[crate::db::usage::MetricsRow]) {
 }
 
 type TokenGetter = fn(&crate::db::usage::MetricsRow) -> i64;
-const TOKEN_KINDS: [(&str, TokenGetter); 4] = [
+const TOKEN_KINDS: [(&str, TokenGetter); 5] = [
     ("input", |r| r.input_tokens),
     ("output", |r| r.output_tokens),
     ("cache_read", |r| r.cache_read_tokens),
+    ("cache_write", |r| r.cache_write_tokens),
     ("reasoning", |r| r.reasoning_tokens),
 ];
 
@@ -191,9 +193,10 @@ fn line(out: &mut String, name: &str, a: &AccountSnapshot, extra: &[(&str, &str)
 fn usage_line(out: &mut String, name: &str, r: &crate::db::usage::MetricsRow, value: f64) {
     let _ = writeln!(
         out,
-        "{name}{{user={},account={},model={},dialect={}}} {value}",
+        "{name}{{user={},account={},provider={},model={},dialect={}}} {value}",
         quote(&r.user),
         quote(&r.account),
+        quote(&r.provider),
         quote(&r.model),
         quote(&r.dialect),
     );

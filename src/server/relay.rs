@@ -65,6 +65,10 @@ struct RelayUsage {
     output_tokens: i64,
     #[serde(default)]
     cache_read_input_tokens: i64,
+    /// Priced above fresh input, so dropping it undercounts the users who
+    /// start new sessions most.
+    #[serde(default)]
+    cache_creation_input_tokens: i64,
 }
 
 #[derive(Deserialize)]
@@ -168,6 +172,7 @@ pub async fn messages(
                 record.input_tokens = m.usage.input_tokens;
                 record.output_tokens = m.usage.output_tokens;
                 record.cache_read_tokens = m.usage.cache_read_input_tokens;
+                record.cache_write_tokens = m.usage.cache_creation_input_tokens;
             }
         } else {
             record.error_kind = Some("upstream_error".into());
@@ -267,6 +272,7 @@ fn apply_event(capture: &UsageCapture, ev: RelayEvent) {
             c.input_tokens = message.usage.input_tokens;
             c.output_tokens = message.usage.output_tokens;
             c.cache_read_tokens = message.usage.cache_read_input_tokens;
+            c.cache_write_tokens = message.usage.cache_creation_input_tokens;
         }
         RelayEvent::MessageDelta { usage: Some(usage) } => {
             c.output_tokens = usage.output_tokens;

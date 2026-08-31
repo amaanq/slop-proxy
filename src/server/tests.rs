@@ -402,3 +402,19 @@ async fn metrics_render_accounts_and_usage() {
     assert!(text.contains("slop_requests_total{user=\"alice\",model=\"gpt-5-codex\",dialect=\"openai\"} 1"));
     assert!(text.contains("kind=\"input\"} 100"));
 }
+
+#[tokio::test]
+async fn pool_reload_picks_up_new_logins() {
+    let db_path = std::env::temp_dir().join(format!("slop-reload-{}.db", uuid::Uuid::new_v4()));
+    let db = Db::open(&db_path).await.unwrap();
+    let pool = CodexPool::load(db.clone(), CodexClient::new(CodexConfig::default()))
+        .await
+        .unwrap();
+    assert_eq!(pool.len().await, 0);
+
+    db.upsert_account(Provider::Codex, "acct-r1", None, None, None, &fresh_tokens())
+        .await
+        .unwrap();
+    pool.reload().await.unwrap();
+    assert_eq!(pool.len().await, 1);
+}

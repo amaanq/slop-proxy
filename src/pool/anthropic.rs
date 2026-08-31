@@ -22,12 +22,16 @@ impl AnthropicPool {
         })
     }
 
-    pub fn len(&self) -> usize {
-        self.slots.len()
+    pub async fn len(&self) -> usize {
+        self.slots.len().await
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.slots.is_empty()
+    pub async fn is_empty(&self) -> bool {
+        self.slots.is_empty().await
+    }
+
+    pub async fn reload(&self) -> eyre::Result<()> {
+        self.slots.reload().await
     }
 
     pub async fn snapshot(&self) -> Vec<super::AccountSnapshot> {
@@ -37,10 +41,11 @@ impl AnthropicPool {
     /// Rendezvous-hashed order: a session sticks to its highest-scoring
     /// account so upstream prompt caches keep hitting, and only moves while
     /// that account is cooling down.
-    fn ranked(&self, session_key: &str) -> Vec<Arc<Slot>> {
+    async fn ranked(&self, session_key: &str) -> Vec<Arc<Slot>> {
         let mut scored = self
             .slots
-            .all()
+            .list()
+            .await
             .iter()
             .map(|s| {
                 let mut h = hmac_sha256::Hash::new();
@@ -61,13 +66,14 @@ impl AnthropicPool {
         hdrs: &RelayHeaders,
         session_key: &str,
     ) -> Result<(i64, reqwest::Response), PoolError> {
-        if self.slots.is_empty() {
+        let ranked = self.ranked(session_key).await;
+        if ranked.is_empty() {
             return Err(PoolError::NoAccounts(Provider::Anthropic));
         }
         let mut last_err = Option::<SendError>::None;
         let mut attempts = 0;
 
-        for slot in self.ranked(session_key) {
+        for slot in ranked {
             if attempts >= 3 {
                 break;
             }
@@ -165,17 +171,21 @@ mod tests {
     async fn rendezvous_is_sticky_and_spreads() {
         let pool = test_pool(&[1, 2, 3, 4]).await;
 
-        let first = pool.ranked("session-a")[0].id;
+        let first = pool.ranked("session-a").await[0].id;
         for _ in 0..10 {
-            assert_eq!(pool.ranked("session-a")[0].id, first);
+            assert_eq!(pool.ranked("session-a").await[0].id, first);
         }
 
-        let winners = (0..64)
-            .map(|i| pool.ranked(&format!("session-{i}"))[0].id)
-            .collect::<HashSet<i64>>();
-        assert!(winners.len() > 1, "all sessions landed on one account");
+        let mut winners = HashSet::new();
+        for i in 0..64 {
+            winners.insert(pool.ranked(&format!("session-{i}")).await[0].id);
+        }
+        assert!(
+            winners.len() > 1,
+            "all sessions landed on one account"
+        );
 
-        let order = pool.ranked("session-a");
+        let order = pool.ranked("session-a").await;
         assert_eq!(order.len(), 4);
         let ids = order.iter().map(|s| s.id).collect::<HashSet<i64>>();
         assert_eq!(ids.len(), 4);

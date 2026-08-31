@@ -1,4 +1,3 @@
-use serde_json::json;
 use thiserror::Error;
 
 use super::{CLIENT_ID, TOKEN_URL, TokenSet};
@@ -21,13 +20,20 @@ const TERMINAL_CODES: &[&str] = &[
 
 /// Note: auth.openai.com rotates refresh tokens.
 pub async fn refresh(refresh_token: &str) -> Result<TokenSet, RefreshError> {
+    #[derive(serde::Serialize)]
+    struct RefreshRequest<'a> {
+        client_id: &'a str,
+        grant_type: &'a str,
+        refresh_token: &'a str,
+    }
+
     let resp = super::http()
         .post(TOKEN_URL)
-        .json(&json!({
-            "client_id": CLIENT_ID,
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-        }))
+        .json(&RefreshRequest {
+            client_id: CLIENT_ID,
+            grant_type: "refresh_token",
+            refresh_token,
+        })
         .send()
         .await
         .map_err(|e| RefreshError::Transient(e.to_string()))?;

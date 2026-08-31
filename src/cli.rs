@@ -250,16 +250,20 @@ async fn models(db: &Db, cfg: &Config) -> Result<()> {
         }
     };
 
+    #[derive(serde::Serialize)]
+    struct ModelRow<'a> {
+        #[serde(flatten)]
+        info: &'a crate::codex::models::ModelInfo,
+        listed: bool,
+    }
+
     let arr = models
         .iter()
-        .map(|m| {
-            let mut v = serde_json::to_value(m).unwrap_or_else(|_| serde_json::json!({}));
-            if let Some(o) = v.as_object_mut() {
-                o.insert("listed".into(), serde_json::json!(m.listed()));
-            }
-            v
+        .map(|m| ModelRow {
+            info: m,
+            listed: m.listed(),
         })
-        .collect::<Vec<serde_json::Value>>();
+        .collect::<Vec<_>>();
     println!("{}", serde_json::to_string_pretty(&arr)?);
     Ok(())
 }

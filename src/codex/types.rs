@@ -9,7 +9,7 @@ pub struct ResponsesRequest {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<ToolDef>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_choice: Option<Value>,
+    pub tool_choice: Option<ToolChoice>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parallel_tool_calls: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -90,6 +90,26 @@ pub enum ContentPart {
 pub enum SummaryPart {
     #[serde(rename = "summary_text")]
     SummaryText { text: String },
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum ToolChoice {
+    Mode(String),
+    Function {
+        #[serde(rename = "type")]
+        kind: &'static str,
+        name: String,
+    },
+}
+
+impl ToolChoice {
+    pub fn function(name: String) -> Self {
+        Self::Function {
+            kind: "function",
+            name,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -183,11 +203,20 @@ pub struct TokenDetails {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type")]
+pub enum OutputContentPart {
+    #[serde(rename = "output_text")]
+    OutputText { text: String },
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type")]
 pub enum OutputItem {
     #[serde(rename = "message")]
     Message {
         #[serde(default)]
-        content: Option<Vec<Value>>,
+        content: Option<Vec<OutputContentPart>>,
     },
     #[serde(rename = "reasoning")]
     Reasoning {

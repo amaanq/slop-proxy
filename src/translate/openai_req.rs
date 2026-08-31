@@ -1,18 +1,21 @@
 use serde::Deserialize;
 use serde_json::Value;
 
+use super::anthropic_req::empty_schema;
 use super::model_map;
-use crate::codex::types::{ContentPart, InputItem, ReasoningConfig, ResponsesRequest, ToolDef};
+use crate::codex::types::{
+    ContentPart, InputItem, ReasoningConfig, ResponsesRequest, ToolChoice, ToolDef,
+};
 use crate::config::Config;
 
 #[derive(Debug, Deserialize)]
 pub struct OpenAiRequest {
     pub model: String,
-    pub messages: Vec<Value>,
+    pub messages: Vec<OpenAiMessage>,
     #[serde(default)]
-    pub tools: Option<Vec<Value>>,
+    pub tools: Option<Vec<OpenAiToolDef>>,
     #[serde(default)]
-    pub tool_choice: Option<Value>,
+    pub tool_choice: Option<OpenAiToolChoice>,
     #[serde(default)]
     pub parallel_tool_calls: Option<bool>,
     #[serde(default)]
@@ -24,15 +27,112 @@ pub struct OpenAiRequest {
     #[serde(default)]
     pub stream: Option<bool>,
     #[serde(default)]
-    pub stream_options: Option<Value>,
+    pub stream_options: Option<StreamOptions>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StreamOptions {
+    #[serde(default)]
+    include_usage: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OpenAiMessage {
+    #[serde(default = "default_role")]
+    role: String,
+    #[serde(default)]
+    content: Option<MessageContent>,
+    #[serde(default)]
+    tool_calls: Option<Vec<OpenAiToolCall>>,
+    #[serde(default)]
+    tool_call_id: Option<String>,
+}
+
+fn default_role() -> String {
+    "user".into()
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum MessageContent {
+    Text(String),
+    Parts(Vec<MessagePart>),
+    Other(Value),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum MessagePart {
+    Text {
+        #[serde(default)]
+        text: String,
+    },
+    ImageUrl {
+        image_url: ImageUrl,
+    },
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ImageUrl {
+    url: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OpenAiToolCall {
+    id: String,
+    #[serde(default)]
+    function: FunctionBody,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct FunctionBody {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    arguments: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OpenAiToolDef {
+    #[serde(default)]
+    function: Option<FunctionDef>,
+    #[serde(flatten)]
+    flat: FunctionDef,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct FunctionDef {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    parameters: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum OpenAiToolChoice {
+    Mode(String),
+    Named {
+        #[serde(default)]
+        function: Option<NamedFunction>,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+pub struct NamedFunction {
+    #[serde(default)]
+    name: Option<String>,
 }
 
 impl OpenAiRequest {
     pub fn include_usage(&self) -> bool {
         self.stream_options
             .as_ref()
-            .and_then(|o| o.get("include_usage"))
-            .and_then(Value::as_bool)
+            .map(|o| o.include_usage)
             .unwrap_or(false)
     }
 }
@@ -47,37 +147,29 @@ pub fn to_responses(req: &OpenAiRequest, cfg: &Config) -> Result<ResponsesReques
 
     if let Some(tools) = &req.tools {
         for t in tools {
-            let f = t.get("function").unwrap_or(t);
-            let Some(name) = f.get("name").and_then(Value::as_str) else {
+            let f = t.function.as_ref().unwrap_or(&t.flat);
+            let Some(name) = &f.name else {
                 continue;
             };
             out.tools.push(ToolDef {
                 kind: "function",
-                name: name.into(),
-                description: f
-                    .get("description")
-                    .and_then(Value::as_str)
-                    .map(String::from),
+                name: name.clone(),
+                description: f.description.clone(),
                 strict: false,
-                parameters: f
-                    .get("parameters")
-                    .cloned()
-                    .unwrap_or_else(|| serde_json::json!({"type": "object", "properties": {}})),
+                parameters: f.parameters.clone().unwrap_or_else(empty_schema),
             });
         }
     }
 
     if let Some(tc) = &req.tool_choice {
         out.tool_choice = Some(match tc {
-            Value::String(s) => Value::String(s.clone()),
-            obj => serde_json::json!({
-                "type": "function",
-                "name": obj
-                    .get("function")
-                    .and_then(|f| f.get("name"))
-                    .and_then(Value::as_str)
+            OpenAiToolChoice::Mode(s) => ToolChoice::Mode(s.clone()),
+            OpenAiToolChoice::Named { function } => ToolChoice::function(
+                function
+                    .as_ref()
+                    .and_then(|f| f.name.clone())
                     .unwrap_or_default(),
-            }),
+            ),
         });
     }
     out.parallel_tool_calls = req.parallel_tool_calls;
@@ -99,13 +191,10 @@ pub fn to_responses(req: &OpenAiRequest, cfg: &Config) -> Result<ResponsesReques
     Ok(out)
 }
 
-fn convert_message(msg: &Value, out: &mut Vec<InputItem>) -> Result<(), String> {
-    let role = msg.get("role").and_then(Value::as_str).unwrap_or("user");
-    let content = msg.get("content");
-
-    match role {
+fn convert_message(msg: &OpenAiMessage, out: &mut Vec<InputItem>) -> Result<(), String> {
+    match msg.role.as_str() {
         "system" | "developer" => {
-            let text = content_text(content);
+            let text = content_text(msg.content.as_ref());
             if !text.is_empty() {
                 out.push(InputItem::Message {
                     role: "developer".into(),
@@ -114,7 +203,7 @@ fn convert_message(msg: &Value, out: &mut Vec<InputItem>) -> Result<(), String> 
             }
         }
         "user" => {
-            let parts = user_parts(content)?;
+            let parts = user_parts(msg.content.as_ref())?;
             if !parts.is_empty() {
                 out.push(InputItem::Message {
                     role: "user".into(),
@@ -123,32 +212,19 @@ fn convert_message(msg: &Value, out: &mut Vec<InputItem>) -> Result<(), String> 
             }
         }
         "assistant" => {
-            let text = content_text(content);
+            let text = content_text(msg.content.as_ref());
             if !text.is_empty() {
                 out.push(InputItem::Message {
                     role: "assistant".into(),
                     content: vec![ContentPart::OutputText { text }],
                 });
             }
-            if let Some(calls) = msg.get("tool_calls").and_then(Value::as_array) {
+            if let Some(calls) = &msg.tool_calls {
                 for call in calls {
-                    let f = call.get("function").cloned().unwrap_or_default();
                     out.push(InputItem::FunctionCall {
-                        call_id: call
-                            .get("id")
-                            .and_then(Value::as_str)
-                            .ok_or("tool_call without id")?
-                            .into(),
-                        name: f
-                            .get("name")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .into(),
-                        arguments: f
-                            .get("arguments")
-                            .and_then(Value::as_str)
-                            .unwrap_or("{}")
-                            .into(),
+                        call_id: call.id.clone(),
+                        name: call.function.name.clone(),
+                        arguments: call.function.arguments.clone().unwrap_or_else(|| "{}".into()),
                     });
                 }
             }
@@ -156,11 +232,10 @@ fn convert_message(msg: &Value, out: &mut Vec<InputItem>) -> Result<(), String> 
         "tool" => {
             out.push(InputItem::FunctionCallOutput {
                 call_id: msg
-                    .get("tool_call_id")
-                    .and_then(Value::as_str)
-                    .ok_or("tool message without tool_call_id")?
-                    .into(),
-                output: content_text(content),
+                    .tool_call_id
+                    .clone()
+                    .ok_or("tool message without tool_call_id")?,
+                output: content_text(msg.content.as_ref()),
             });
         }
         other => return Err(format!("unsupported message role {other:?}")),
@@ -168,42 +243,42 @@ fn convert_message(msg: &Value, out: &mut Vec<InputItem>) -> Result<(), String> 
     Ok(())
 }
 
-fn content_text(content: Option<&Value>) -> String {
+fn content_text(content: Option<&MessageContent>) -> String {
     match content {
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Array(parts)) => parts
+        Some(MessageContent::Text(s)) => s.clone(),
+        Some(MessageContent::Parts(parts)) => parts
             .iter()
-            .filter_map(|p| p.get("text").and_then(Value::as_str))
+            .filter_map(|p| match p {
+                MessagePart::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
             .collect::<Vec<_>>()
             .join(""),
         _ => String::new(),
     }
 }
 
-fn user_parts(content: Option<&Value>) -> Result<Vec<ContentPart>, String> {
+fn user_parts(content: Option<&MessageContent>) -> Result<Vec<ContentPart>, String> {
     match content {
-        Some(Value::String(s)) => Ok(vec![ContentPart::InputText { text: s.clone() }]),
-        Some(Value::Array(parts)) => {
+        Some(MessageContent::Text(s)) => Ok(vec![ContentPart::InputText { text: s.clone() }]),
+        Some(MessageContent::Parts(parts)) => {
             let mut out = Vec::new();
             for p in parts {
-                match p.get("type").and_then(Value::as_str).unwrap_or("") {
-                    "text" => out.push(ContentPart::InputText {
-                        text: p.get("text").and_then(Value::as_str).unwrap_or("").into(),
+                match p {
+                    MessagePart::Text { text } => out.push(ContentPart::InputText {
+                        text: text.clone(),
                     }),
-                    "image_url" => out.push(ContentPart::InputImage {
-                        image_url: p
-                            .get("image_url")
-                            .and_then(|i| i.get("url"))
-                            .and_then(Value::as_str)
-                            .ok_or("image_url part without url")?
-                            .into(),
+                    MessagePart::ImageUrl { image_url } => out.push(ContentPart::InputImage {
+                        image_url: image_url.url.clone(),
                     }),
-                    other => tracing::debug!("dropping unsupported openai part {other:?}"),
+                    MessagePart::Other => {
+                        tracing::debug!("dropping unsupported openai part");
+                    }
                 }
             }
             Ok(out)
         }
         None => Ok(Vec::new()),
-        Some(other) => Err(format!("unsupported user content: {other}")),
+        Some(MessageContent::Other(other)) => Err(format!("unsupported user content: {other}")),
     }
 }

@@ -35,7 +35,7 @@ impl AnthropicPool {
     /// account so upstream prompt caches keep hitting, and only moves while
     /// that account is cooling down.
     fn ranked(&self, session_key: &str) -> Vec<Arc<Slot>> {
-        let mut scored: Vec<(u64, Arc<Slot>)> = self
+        let mut scored = self
             .slots
             .all()
             .iter()
@@ -46,7 +46,7 @@ impl AnthropicPool {
                 let d = h.finalize();
                 (u64::from_le_bytes(d[..8].try_into().unwrap()), s.clone())
             })
-            .collect();
+            .collect::<Vec<(u64, Arc<Slot>)>>();
         scored.sort_by_key(|s| std::cmp::Reverse(s.0));
         scored.into_iter().map(|(_, s)| s).collect()
     }
@@ -122,6 +122,8 @@ impl AnthropicPool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
     use crate::config::AnthropicConfig;
 
@@ -143,14 +145,14 @@ mod tests {
             assert_eq!(pool.ranked("session-a")[0].id, first);
         }
 
-        let winners: std::collections::HashSet<i64> = (0..64)
+        let winners = (0..64)
             .map(|i| pool.ranked(&format!("session-{i}"))[0].id)
-            .collect();
+            .collect::<HashSet<i64>>();
         assert!(winners.len() > 1, "all sessions landed on one account");
 
         let order = pool.ranked("session-a");
         assert_eq!(order.len(), 4);
-        let ids: std::collections::HashSet<i64> = order.iter().map(|s| s.id).collect();
+        let ids = order.iter().map(|s| s.id).collect::<HashSet<i64>>();
         assert_eq!(ids.len(), 4);
     }
 }

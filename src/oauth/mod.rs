@@ -4,7 +4,7 @@ pub mod refresh;
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::db::Db;
 
@@ -53,6 +53,17 @@ impl TokenSet {
     }
 }
 
+#[derive(serde::Serialize)]
+struct DeviceCodeRequest<'a> {
+    client_id: &'a str,
+}
+
+#[derive(serde::Serialize)]
+struct DevicePollRequest<'a> {
+    device_auth_id: &'a str,
+    user_code: &'a str,
+}
+
 #[derive(Deserialize)]
 struct UserCodeResp {
     device_auth_id: String,
@@ -73,7 +84,9 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
 
     let resp = client
         .post(DEVICE_USERCODE_URL)
-        .json(&json!({ "client_id": CLIENT_ID }))
+        .json(&DeviceCodeRequest {
+            client_id: CLIENT_ID,
+        })
         .send()
         .await
         .context("requesting device user code")?;
@@ -160,7 +173,10 @@ async fn poll_for_code(
     loop {
         let resp = client
             .post(DEVICE_TOKEN_URL)
-            .json(&json!({ "device_auth_id": device_auth_id, "user_code": user_code }))
+            .json(&DevicePollRequest {
+                device_auth_id,
+                user_code,
+            })
             .send()
             .await
             .context("polling device token")?;
@@ -196,6 +212,8 @@ fn parse_interval(v: Option<&Value>) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
 
     #[test]

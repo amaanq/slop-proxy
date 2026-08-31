@@ -3,7 +3,7 @@ use serde_json::Value;
 
 use super::{decode_signature, model_map};
 use crate::codex::types::{
-    ContentPart, InputItem, ReasoningConfig, ResponsesRequest, SummaryPart, ToolDef,
+    ContentPart, InputItem, ReasoningConfig, ResponsesRequest, SummaryPart, ToolChoice, ToolDef,
 };
 use crate::config::Config;
 
@@ -14,13 +14,13 @@ pub struct AnthropicRequest {
     pub max_tokens: Option<u64>,
     pub messages: Vec<AnthMessage>,
     #[serde(default)]
-    pub system: Option<Value>,
+    pub system: Option<SystemPrompt>,
     #[serde(default)]
-    pub tools: Option<Vec<Value>>,
+    pub tools: Option<Vec<AnthToolDef>>,
     #[serde(default)]
-    pub tool_choice: Option<Value>,
+    pub tool_choice: Option<AnthToolChoice>,
     #[serde(default)]
-    pub thinking: Option<Value>,
+    pub thinking: Option<ThinkingConfig>,
     #[serde(default)]
     pub stream: Option<bool>,
 }
@@ -28,18 +28,143 @@ pub struct AnthropicRequest {
 #[derive(Debug, Deserialize)]
 pub struct AnthMessage {
     pub role: String,
-    pub content: Value,
+    pub content: MessageContent,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum MessageContent {
+    Text(String),
+    Blocks(Vec<ContentBlock>),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentBlock {
+    Text {
+        #[serde(default)]
+        text: String,
+    },
+    Image {
+        source: ImageSource,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        #[serde(default)]
+        input: Value,
+    },
+    ToolResult {
+        tool_use_id: String,
+        #[serde(default)]
+        content: Option<ToolResultContent>,
+        #[serde(default)]
+        is_error: Option<bool>,
+    },
+    Thinking {
+        #[serde(default)]
+        thinking: String,
+        #[serde(default)]
+        signature: Option<String>,
+    },
+    RedactedThinking {},
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ImageSource {
+    Base64 {
+        #[serde(default = "default_media_type")]
+        media_type: String,
+        #[serde(default)]
+        data: String,
+    },
+    Url {
+        #[serde(default)]
+        url: String,
+    },
+}
+
+fn default_media_type() -> String {
+    "image/png".into()
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum ToolResultContent {
+    Text(String),
+    Blocks(Vec<ToolResultBlock>),
+    Other(Value),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToolResultBlock {
+    Text {
+        #[serde(default)]
+        text: String,
+    },
+    Image {},
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum SystemPrompt {
+    Text(String),
+    Blocks(Vec<SystemBlock>),
+    Other(serde::de::IgnoredAny),
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SystemBlock {
+    #[serde(default)]
+    text: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AnthToolDef {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    input_schema: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AnthToolChoice {
+    #[serde(rename = "type", default)]
+    kind: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    disable_parallel_tool_use: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ThinkingConfig {
+    #[serde(rename = "type", default)]
+    kind: Option<String>,
+    #[serde(default)]
+    budget_tokens: Option<u64>,
 }
 
 impl AnthropicRequest {
     pub fn thinking_enabled(&self) -> bool {
         self.thinking
             .as_ref()
-            .and_then(|t| t.get("type"))
-            .and_then(Value::as_str)
+            .and_then(|t| t.kind.as_deref())
             .map(|t| t == "enabled" || t == "adaptive")
             .unwrap_or(false)
     }
+}
+
+pub fn empty_schema() -> Value {
+    serde_json::json!({"type": "object", "properties": {}})
 }
 
 pub fn to_responses(req: &AnthropicRequest, cfg: &Config) -> Result<ResponsesRequest, String> {
@@ -62,37 +187,27 @@ pub fn to_responses(req: &AnthropicRequest, cfg: &Config) -> Result<ResponsesReq
 
     if let Some(tools) = &req.tools {
         for t in tools {
-            let Some(name) = t.get("name").and_then(Value::as_str) else {
+            let Some(name) = &t.name else {
                 continue;
             };
             out.tools.push(ToolDef {
                 kind: "function",
-                name: name.into(),
-                description: t
-                    .get("description")
-                    .and_then(Value::as_str)
-                    .map(String::from),
+                name: name.clone(),
+                description: t.description.clone(),
                 strict: false,
-                parameters: t
-                    .get("input_schema")
-                    .cloned()
-                    .unwrap_or_else(|| serde_json::json!({"type": "object", "properties": {}})),
+                parameters: t.input_schema.clone().unwrap_or_else(empty_schema),
             });
         }
     }
 
     if let Some(tc) = &req.tool_choice {
-        let kind = tc.get("type").and_then(Value::as_str).unwrap_or("auto");
-        out.tool_choice = Some(match kind {
-            "any" => Value::String("required".into()),
-            "tool" => serde_json::json!({
-                "type": "function",
-                "name": tc.get("name").and_then(Value::as_str).unwrap_or_default(),
-            }),
-            "none" => Value::String("none".into()),
-            _ => Value::String("auto".into()),
+        out.tool_choice = Some(match tc.kind.as_deref().unwrap_or("auto") {
+            "any" => ToolChoice::Mode("required".into()),
+            "tool" => ToolChoice::function(tc.name.clone().unwrap_or_default()),
+            "none" => ToolChoice::Mode("none".into()),
+            _ => ToolChoice::Mode("auto".into()),
         });
-        if tc.get("disable_parallel_tool_use").and_then(Value::as_bool) == Some(true) {
+        if tc.disable_parallel_tool_use == Some(true) {
             out.parallel_tool_calls = Some(false);
         }
     }
@@ -104,7 +219,7 @@ pub fn to_responses(req: &AnthropicRequest, cfg: &Config) -> Result<ResponsesReq
             if !req.thinking_enabled() {
                 return Some("low".to_string());
             }
-            t.get("budget_tokens").and_then(Value::as_u64).map(|b| {
+            t.budget_tokens.map(|b| {
                 if b < 4096 {
                     "low".to_string()
                 } else if b < 16384 {
@@ -128,15 +243,15 @@ pub fn to_responses(req: &AnthropicRequest, cfg: &Config) -> Result<ResponsesReq
     Ok(out)
 }
 
-fn system_text(system: &Value) -> String {
+fn system_text(system: &SystemPrompt) -> String {
     match system {
-        Value::String(s) => s.clone(),
-        Value::Array(blocks) => blocks
+        SystemPrompt::Text(s) => s.clone(),
+        SystemPrompt::Blocks(blocks) => blocks
             .iter()
-            .filter_map(|b| b.get("text").and_then(Value::as_str))
+            .filter_map(|b| b.text.as_deref())
             .collect::<Vec<_>>()
             .join("\n\n"),
-        _ => String::new(),
+        SystemPrompt::Other(_) => String::new(),
     }
 }
 
@@ -144,10 +259,13 @@ fn convert_message(msg: &AnthMessage, out: &mut Vec<InputItem>) -> Result<(), St
     let assistant = msg.role == "assistant";
     let role = if assistant { "assistant" } else { "user" };
 
+    let text_block;
     let blocks = match &msg.content {
-        Value::String(s) => vec![serde_json::json!({"type": "text", "text": s})],
-        Value::Array(a) => a.clone(),
-        other => return Err(format!("unsupported message content: {other}")),
+        MessageContent::Text(s) => {
+            text_block = [ContentBlock::Text { text: s.clone() }];
+            &text_block[..]
+        }
+        MessageContent::Blocks(b) => b.as_slice(),
     };
 
     let mut parts = Vec::<ContentPart>::new();
@@ -161,73 +279,52 @@ fn convert_message(msg: &AnthMessage, out: &mut Vec<InputItem>) -> Result<(), St
     };
 
     for block in blocks {
-        match block.get("type").and_then(Value::as_str).unwrap_or("") {
-            "text" => {
-                let text = block
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
+        match block {
+            ContentBlock::Text { text } => {
+                let text = text.clone();
                 parts.push(if assistant {
                     ContentPart::OutputText { text }
                 } else {
                     ContentPart::InputText { text }
                 });
             }
-            "image" => {
-                let source = block.get("source").cloned().unwrap_or_default();
-                let url = match source.get("type").and_then(Value::as_str) {
-                    Some("base64") => format!(
-                        "data:{};base64,{}",
-                        source
-                            .get("media_type")
-                            .and_then(Value::as_str)
-                            .unwrap_or("image/png"),
-                        source.get("data").and_then(Value::as_str).unwrap_or("")
-                    ),
-                    Some("url") => source
-                        .get("url")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string(),
-                    _ => return Err("unsupported image source".into()),
+            ContentBlock::Image { source } => {
+                let url = match source {
+                    ImageSource::Base64 { media_type, data } => {
+                        format!("data:{media_type};base64,{data}")
+                    }
+                    ImageSource::Url { url } => url.clone(),
                 };
                 parts.push(ContentPart::InputImage { image_url: url });
             }
-            "tool_use" => {
+            ContentBlock::ToolUse { id, name, input } => {
                 flush(&mut parts, out);
-                let id = block
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .ok_or("tool_use block without id")?;
-                let name = block
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .ok_or("tool_use block without name")?;
-                let input = block.get("input").cloned().unwrap_or(Value::Null);
                 out.push(InputItem::FunctionCall {
-                    call_id: id.into(),
-                    name: name.into(),
-                    arguments: serde_json::to_string(&input).unwrap_or_else(|_| "{}".into()),
+                    call_id: id.clone(),
+                    name: name.clone(),
+                    arguments: serde_json::to_string(input).unwrap_or_else(|_| "{}".into()),
                 });
             }
-            "tool_result" => {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
                 flush(&mut parts, out);
-                let call_id = block
-                    .get("tool_use_id")
-                    .and_then(Value::as_str)
-                    .ok_or("tool_result block without tool_use_id")?;
-                let mut output = tool_result_text(block.get("content"));
-                if block.get("is_error").and_then(Value::as_bool) == Some(true) {
+                let mut output = tool_result_text(content.as_ref());
+                if *is_error == Some(true) {
                     output = format!("[tool error] {output}");
                 }
                 out.push(InputItem::FunctionCallOutput {
-                    call_id: call_id.into(),
+                    call_id: tool_use_id.clone(),
                     output,
                 });
             }
-            "thinking" => {
-                let Some(sig) = block.get("signature").and_then(Value::as_str) else {
+            ContentBlock::Thinking {
+                thinking,
+                signature,
+            } => {
+                let Some(sig) = signature else {
                     continue;
                 };
                 let (id, ec) = decode_signature(sig);
@@ -235,20 +332,21 @@ fn convert_message(msg: &AnthMessage, out: &mut Vec<InputItem>) -> Result<(), St
                     continue;
                 }
                 flush(&mut parts, out);
-                let text = block.get("thinking").and_then(Value::as_str).unwrap_or("");
                 out.push(InputItem::Reasoning {
                     id,
-                    summary: if text.is_empty() {
+                    summary: if thinking.is_empty() {
                         vec![]
                     } else {
-                        vec![SummaryPart::SummaryText { text: text.into() }]
+                        vec![SummaryPart::SummaryText {
+                            text: thinking.clone(),
+                        }]
                     },
                     encrypted_content: ec,
                 });
             }
-            "redacted_thinking" => {}
-            other => {
-                tracing::debug!("dropping unsupported anthropic block type {other:?}");
+            ContentBlock::RedactedThinking {} => {}
+            ContentBlock::Other => {
+                tracing::debug!("dropping unsupported anthropic block");
             }
         }
     }
@@ -256,19 +354,19 @@ fn convert_message(msg: &AnthMessage, out: &mut Vec<InputItem>) -> Result<(), St
     Ok(())
 }
 
-fn tool_result_text(content: Option<&Value>) -> String {
+fn tool_result_text(content: Option<&ToolResultContent>) -> String {
     match content {
         None => String::new(),
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Array(blocks)) => blocks
+        Some(ToolResultContent::Text(s)) => s.clone(),
+        Some(ToolResultContent::Blocks(blocks)) => blocks
             .iter()
-            .filter_map(|b| match b.get("type").and_then(Value::as_str) {
-                Some("text") => b.get("text").and_then(Value::as_str).map(String::from),
-                Some("image") => Some("[image omitted]".into()),
-                _ => None,
+            .filter_map(|b| match b {
+                ToolResultBlock::Text { text } => Some(text.clone()),
+                ToolResultBlock::Image {} => Some("[image omitted]".into()),
+                ToolResultBlock::Other => None,
             })
             .collect::<Vec<_>>()
             .join("\n"),
-        Some(other) => other.to_string(),
+        Some(ToolResultContent::Other(other)) => other.to_string(),
     }
 }

@@ -1,8 +1,48 @@
-use anyhow::{bail, Result};
-use serde_json::json;
+use anyhow::{Result, bail};
+use serde::Serialize;
 
-use crate::db::usage::{UsageAgg, UsageDim};
 use crate::db::Db;
+use crate::db::usage::{UsageAgg, UsageDim};
+
+#[derive(Serialize)]
+struct Tokens {
+    requests: i64,
+    errors: i64,
+    input_tokens: i64,
+    output_tokens: i64,
+    cache_read_tokens: i64,
+    reasoning_tokens: i64,
+}
+
+impl From<&UsageAgg> for Tokens {
+    fn from(a: &UsageAgg) -> Self {
+        Self {
+            requests: a.requests,
+            errors: a.errors,
+            input_tokens: a.input_tokens,
+            output_tokens: a.output_tokens,
+            cache_read_tokens: a.cache_read_tokens,
+            reasoning_tokens: a.reasoning_tokens,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct KeyedTokens {
+    name: String,
+    #[serde(flatten)]
+    tokens: Tokens,
+}
+
+#[derive(Serialize)]
+struct Report {
+    since: Option<String>,
+    until: Option<String>,
+    totals: Tokens,
+    by_user: Vec<KeyedTokens>,
+    by_account: Vec<KeyedTokens>,
+    by_model: Vec<KeyedTokens>,
+}
 
 pub async fn run(db: &Db, since: Option<String>, until: Option<String>) -> Result<()> {
     let now = chrono::Utc::now().timestamp();
@@ -20,36 +60,24 @@ pub async fn run(db: &Db, since: Option<String>, until: Option<String>) -> Resul
     let by_account = db.usage_by(UsageDim::Account, since_ts, until_ts).await?;
     let by_model = db.usage_by(UsageDim::Model, since_ts, until_ts).await?;
 
-    let fmt = |a: &UsageAgg| {
-        json!({
-            "requests": a.requests,
-            "errors": a.errors,
-            "input_tokens": a.input_tokens,
-            "output_tokens": a.output_tokens,
-            "cache_read_tokens": a.cache_read_tokens,
-            "reasoning_tokens": a.reasoning_tokens,
-        })
-    };
     let keyed = |rows: &[UsageAgg]| {
         rows.iter()
-            .map(|a| {
-                let mut v = fmt(a);
-                v["name"] = json!(a.key);
-                v
+            .map(|a| KeyedTokens {
+                name: a.key.clone(),
+                tokens: a.into(),
             })
-            .collect::<Vec<_>>()
+            .collect()
     };
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&json!({
-            "since": chrono::DateTime::from_timestamp(since_ts, 0).map(|d| d.to_rfc3339()),
-            "until": chrono::DateTime::from_timestamp(until_ts, 0).map(|d| d.to_rfc3339()),
-            "totals": fmt(&totals),
-            "by_user": keyed(&by_user),
-            "by_account": keyed(&by_account),
-            "by_model": keyed(&by_model),
-        }))?
-    );
+    let stamp = |ts| chrono::DateTime::from_timestamp(ts, 0).map(|d| d.to_rfc3339());
+    let report = Report {
+        since: stamp(since_ts),
+        until: stamp(until_ts),
+        totals: (&totals).into(),
+        by_user: keyed(&by_user),
+        by_account: keyed(&by_account),
+        by_model: keyed(&by_model),
+    };
+    println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
 }
 
@@ -58,15 +86,16 @@ fn parse_time(s: &str, now: i64) -> Result<i64> {
         return Ok(dt.timestamp());
     }
     if let Some(rest) = s.strip_suffix(['h', 'd', 'm', 'w'])
-        && let Ok(n) = rest.parse::<i64>() {
-            let secs = match s.chars().last().unwrap() {
-                'm' => n * 60,
-                'h' => n * 3600,
-                'd' => n * 86400,
-                'w' => n * 7 * 86400,
-                _ => unreachable!(),
-            };
-            return Ok(now - secs);
-        }
+        && let Ok(n) = rest.parse::<i64>()
+    {
+        let secs = match s.chars().last().unwrap() {
+            'm' => n * 60,
+            'h' => n * 3600,
+            'd' => n * 86400,
+            'w' => n * 7 * 86400,
+            _ => unreachable!(),
+        };
+        return Ok(now - secs);
+    }
     bail!("cannot parse time {s:?}; use RFC3339 or 30m/24h/7d/2w");
 }

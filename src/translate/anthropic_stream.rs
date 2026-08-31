@@ -1,6 +1,7 @@
-use serde_json::{json, Value};
+use serde::Serialize;
+use serde_json::Value;
 
-use super::{encode_signature, Aggregated, Block, StopKind, UsageCapture};
+use super::{Aggregated, Block, StopKind, UsageCapture, encode_signature};
 use crate::codex::types::{OutputItem, ResponsesEvent, Usage};
 
 pub struct AnthropicStream {
@@ -24,6 +25,126 @@ enum OpenBlock {
 }
 
 pub type OutEvent = (&'static str, Value);
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum AnthEvent {
+    MessageStart {
+        message: MessageStart,
+    },
+    Ping,
+    ContentBlockStart {
+        index: usize,
+        content_block: ContentBlockStart,
+    },
+    ContentBlockDelta {
+        index: usize,
+        delta: BlockDelta,
+    },
+    ContentBlockStop {
+        index: usize,
+    },
+    MessageDelta {
+        delta: StopDelta,
+        usage: AnthUsage,
+    },
+    MessageStop,
+    Error {
+        error: ErrorBody,
+    },
+}
+
+impl AnthEvent {
+    fn out(self) -> OutEvent {
+        let name = match &self {
+            AnthEvent::MessageStart { .. } => "message_start",
+            AnthEvent::Ping => "ping",
+            AnthEvent::ContentBlockStart { .. } => "content_block_start",
+            AnthEvent::ContentBlockDelta { .. } => "content_block_delta",
+            AnthEvent::ContentBlockStop { .. } => "content_block_stop",
+            AnthEvent::MessageDelta { .. } => "message_delta",
+            AnthEvent::MessageStop => "message_stop",
+            AnthEvent::Error { .. } => "error",
+        };
+        (name, serde_json::to_value(self).expect("event serializes"))
+    }
+}
+
+#[derive(Serialize)]
+struct MessageStart {
+    id: String,
+    #[serde(rename = "type")]
+    kind: &'static str,
+    role: &'static str,
+    model: String,
+    content: [(); 0],
+    stop_reason: Option<String>,
+    stop_sequence: Option<String>,
+    usage: AnthUsage,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ContentBlockStart {
+    ToolUse {
+        id: String,
+        name: String,
+        input: EmptyObject,
+    },
+    Thinking {
+        thinking: &'static str,
+    },
+    Text {
+        text: &'static str,
+    },
+}
+
+#[derive(Serialize)]
+struct EmptyObject {}
+
+#[derive(Serialize)]
+#[serde(tag = "type")]
+enum BlockDelta {
+    #[serde(rename = "thinking_delta")]
+    Thinking { thinking: String },
+    #[serde(rename = "text_delta")]
+    Text { text: String },
+    #[serde(rename = "input_json_delta")]
+    InputJson { partial_json: String },
+    #[serde(rename = "signature_delta")]
+    Signature { signature: String },
+}
+
+#[derive(Serialize)]
+struct StopDelta {
+    stop_reason: &'static str,
+    stop_sequence: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ErrorBody {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    message: String,
+}
+
+#[derive(Serialize)]
+struct AnthUsage {
+    input_tokens: i64,
+    output_tokens: i64,
+    cache_read_input_tokens: i64,
+    cache_creation_input_tokens: i64,
+}
+
+fn anthropic_usage(usage: &Usage) -> AnthUsage {
+    let cached = usage.input_tokens_details.cached_tokens;
+    AnthUsage {
+        input_tokens: (usage.input_tokens - cached).max(0),
+        output_tokens: usage.output_tokens,
+        cache_read_input_tokens: cached,
+        cache_creation_input_tokens: 0,
+    }
+}
 
 impl AnthropicStream {
     pub fn new(
@@ -53,28 +174,27 @@ impl AnthropicStream {
                 let id = response
                     .id
                     .unwrap_or_else(|| format!("msg_{}", uuid::Uuid::new_v4().simple()));
-                out.push((
-                    "message_start",
-                    json!({
-                        "type": "message_start",
-                        "message": {
-                            "id": id,
-                            "type": "message",
-                            "role": "assistant",
-                            "model": self.model,
-                            "content": [],
-                            "stop_reason": null,
-                            "stop_sequence": null,
-                            "usage": {
-                                "input_tokens": self.est_input_tokens,
-                                "output_tokens": 1,
-                                "cache_creation_input_tokens": 0,
-                                "cache_read_input_tokens": 0
-                            }
-                        }
-                    }),
-                ));
-                out.push(("ping", json!({"type": "ping"})));
+                out.push(
+                    AnthEvent::MessageStart {
+                        message: MessageStart {
+                            id,
+                            kind: "message",
+                            role: "assistant",
+                            model: self.model.clone(),
+                            content: [],
+                            stop_reason: None,
+                            stop_sequence: None,
+                            usage: AnthUsage {
+                                input_tokens: self.est_input_tokens,
+                                output_tokens: 1,
+                                cache_read_input_tokens: 0,
+                                cache_creation_input_tokens: 0,
+                            },
+                        },
+                    }
+                    .out(),
+                );
+                out.push(AnthEvent::Ping.out());
             }
             ResponsesEvent::OutputItemAdded { item } => match item {
                 OutputItem::Reasoning { .. } if self.emit_thinking => {
@@ -88,14 +208,17 @@ impl AnthropicStream {
                     self.open = Some(OpenBlock::Tool);
                     self.saw_tool = true;
                     self.tool_args_seen = false;
-                    out.push((
-                        "content_block_start",
-                        json!({
-                            "type": "content_block_start",
-                            "index": index,
-                            "content_block": {"type": "tool_use", "id": call_id, "name": name, "input": {}}
-                        }),
-                    ));
+                    out.push(
+                        AnthEvent::ContentBlockStart {
+                            index,
+                            content_block: ContentBlockStart::ToolUse {
+                                id: call_id,
+                                name,
+                                input: EmptyObject {},
+                            },
+                        }
+                        .out(),
+                    );
                 }
                 _ => {}
             },
@@ -104,7 +227,9 @@ impl AnthropicStream {
                     && self.open == Some(OpenBlock::Thinking)
                     && self.thinking_text_seen
                 {
-                    out.push(self.delta(json!({"type": "thinking_delta", "thinking": "\n\n"})));
+                    out.push(self.delta(BlockDelta::Thinking {
+                        thinking: "\n\n".into(),
+                    }));
                 }
             }
             ResponsesEvent::ReasoningSummaryTextDelta { delta }
@@ -115,7 +240,7 @@ impl AnthropicStream {
                         self.open_block(&mut out, OpenBlock::Thinking);
                     }
                     self.thinking_text_seen = true;
-                    out.push(self.delta(json!({"type": "thinking_delta", "thinking": delta})));
+                    out.push(self.delta(BlockDelta::Thinking { thinking: delta }));
                 }
             }
             ResponsesEvent::OutputTextDelta { delta } => {
@@ -123,14 +248,14 @@ impl AnthropicStream {
                     self.close_open(&mut out);
                     self.open_block(&mut out, OpenBlock::Text);
                 }
-                out.push(self.delta(json!({"type": "text_delta", "text": delta})));
+                out.push(self.delta(BlockDelta::Text { text: delta }));
             }
             ResponsesEvent::FunctionCallArgumentsDelta { delta } => {
                 if self.open == Some(OpenBlock::Tool) {
                     self.tool_args_seen = true;
-                    out.push(
-                        self.delta(json!({"type": "input_json_delta", "partial_json": delta})),
-                    );
+                    out.push(self.delta(BlockDelta::InputJson {
+                        partial_json: delta,
+                    }));
                 }
             }
             ResponsesEvent::OutputItemDone { item } => match item {
@@ -141,10 +266,9 @@ impl AnthropicStream {
                 } => {
                     if self.open == Some(OpenBlock::Thinking) {
                         if let Some(ec) = encrypted_content {
-                            out.push(self.delta(json!({
-                                "type": "signature_delta",
-                                "signature": encode_signature(id.as_deref(), &ec)
-                            })));
+                            out.push(self.delta(BlockDelta::Signature {
+                                signature: encode_signature(id.as_deref(), &ec),
+                            }));
                         }
                         self.close_open(&mut out);
                     }
@@ -152,11 +276,12 @@ impl AnthropicStream {
                 OutputItem::FunctionCall { arguments, .. } => {
                     if self.open == Some(OpenBlock::Tool) {
                         if !self.tool_args_seen
-                            && let Some(args) = arguments.filter(|a| !a.is_empty()) {
-                                out.push(self.delta(
-                                    json!({"type": "input_json_delta", "partial_json": args}),
-                                ));
-                            }
+                            && let Some(args) = arguments.filter(|a| !a.is_empty())
+                        {
+                            out.push(self.delta(BlockDelta::InputJson {
+                                partial_json: args,
+                            }));
+                        }
                         self.close_open(&mut out);
                     }
                 }
@@ -189,10 +314,15 @@ impl AnthropicStream {
                 } else {
                     "api_error"
                 };
-                out.push((
-                    "error",
-                    json!({"type": "error", "error": {"type": err_type, "message": msg}}),
-                ));
+                out.push(
+                    AnthEvent::Error {
+                        error: ErrorBody {
+                            kind: err_type,
+                            message: msg,
+                        },
+                    }
+                    .out(),
+                );
                 self.capture.fail("upstream_failed");
                 self.done = true;
             }
@@ -207,28 +337,32 @@ impl AnthropicStream {
         }
         self.done = true;
         self.capture.fail("midstream");
-        vec![(
-            "error",
-            json!({
-                "type": "error",
-                "error": {"type": "overloaded_error", "message": "upstream stream ended unexpectedly"}
-            }),
-        )]
+        vec![
+            AnthEvent::Error {
+                error: ErrorBody {
+                    kind: "overloaded_error",
+                    message: "upstream stream ended unexpectedly".into(),
+                },
+            }
+            .out(),
+        ]
     }
 
-    fn finish(&mut self, out: &mut Vec<OutEvent>, usage: Option<Usage>, stop_reason: &str) {
+    fn finish(&mut self, out: &mut Vec<OutEvent>, usage: Option<Usage>, stop_reason: &'static str) {
         self.close_open(out);
         let usage = usage.unwrap_or_default();
         self.capture.record(&usage);
-        out.push((
-            "message_delta",
-            json!({
-                "type": "message_delta",
-                "delta": {"stop_reason": stop_reason, "stop_sequence": null},
-                "usage": anthropic_usage(&usage)
-            }),
-        ));
-        out.push(("message_stop", json!({"type": "message_stop"})));
+        out.push(
+            AnthEvent::MessageDelta {
+                delta: StopDelta {
+                    stop_reason,
+                    stop_sequence: None,
+                },
+                usage: anthropic_usage(&usage),
+            }
+            .out(),
+        );
+        out.push(AnthEvent::MessageStop.out());
         self.done = true;
     }
 
@@ -238,47 +372,60 @@ impl AnthropicStream {
         let content_block = match kind {
             OpenBlock::Thinking => {
                 self.thinking_text_seen = false;
-                json!({"type": "thinking", "thinking": ""})
+                ContentBlockStart::Thinking { thinking: "" }
             }
-            OpenBlock::Text => json!({"type": "text", "text": ""}),
+            OpenBlock::Text => ContentBlockStart::Text { text: "" },
             OpenBlock::Tool => unreachable!("tool blocks open in OutputItemAdded"),
         };
         self.open = Some(kind);
-        out.push((
-            "content_block_start",
-            json!({"type": "content_block_start", "index": index, "content_block": content_block}),
-        ));
+        out.push(
+            AnthEvent::ContentBlockStart {
+                index,
+                content_block,
+            }
+            .out(),
+        );
     }
 
     fn close_open(&mut self, out: &mut Vec<OutEvent>) {
         if self.open.take().is_some() {
-            out.push((
-                "content_block_stop",
-                json!({"type": "content_block_stop", "index": self.next_index - 1}),
-            ));
+            out.push(
+                AnthEvent::ContentBlockStop {
+                    index: self.next_index - 1,
+                }
+                .out(),
+            );
         }
     }
 
-    fn delta(&self, delta: Value) -> OutEvent {
-        (
-            "content_block_delta",
-            json!({
-                "type": "content_block_delta",
-                "index": self.next_index - 1,
-                "delta": delta
-            }),
-        )
+    fn delta(&self, delta: BlockDelta) -> OutEvent {
+        AnthEvent::ContentBlockDelta {
+            index: self.next_index - 1,
+            delta,
+        }
+        .out()
     }
 }
 
-fn anthropic_usage(usage: &Usage) -> Value {
-    let cached = usage.input_tokens_details.cached_tokens;
-    json!({
-        "input_tokens": (usage.input_tokens - cached).max(0),
-        "output_tokens": usage.output_tokens,
-        "cache_read_input_tokens": cached,
-        "cache_creation_input_tokens": 0
-    })
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum RenderedBlock {
+    Thinking { thinking: String, signature: String },
+    Text { text: String },
+    ToolUse { id: String, name: String, input: Value },
+}
+
+#[derive(Serialize)]
+struct RenderedMessage {
+    id: String,
+    #[serde(rename = "type")]
+    kind: &'static str,
+    role: &'static str,
+    model: String,
+    content: Vec<RenderedBlock>,
+    stop_reason: &'static str,
+    stop_sequence: Option<String>,
+    usage: AnthUsage,
 }
 
 pub fn render_aggregated(agg: &Aggregated, model: &str, emit_thinking: bool) -> Value {
@@ -287,21 +434,25 @@ pub fn render_aggregated(agg: &Aggregated, model: &str, emit_thinking: bool) -> 
         match block {
             Block::Thinking { text, signature } => {
                 if emit_thinking {
-                    content.push(json!({
-                        "type": "thinking",
-                        "thinking": text,
-                        "signature": signature.clone().unwrap_or_default()
-                    }));
+                    content.push(RenderedBlock::Thinking {
+                        thinking: text.clone(),
+                        signature: signature.clone().unwrap_or_default(),
+                    });
                 }
             }
-            Block::Text { text } => content.push(json!({"type": "text", "text": text})),
+            Block::Text { text } => content.push(RenderedBlock::Text { text: text.clone() }),
             Block::ToolCall {
                 id,
                 name,
                 arguments,
             } => {
-                let input = serde_json::from_str(arguments).unwrap_or_else(|_| json!({}));
-                content.push(json!({"type": "tool_use", "id": id, "name": name, "input": input}));
+                let input = serde_json::from_str(arguments)
+                    .unwrap_or_else(|_| Value::Object(serde_json::Map::new()));
+                content.push(RenderedBlock::ToolUse {
+                    id: id.clone(),
+                    name: name.clone(),
+                    input,
+                });
             }
         }
     }
@@ -310,14 +461,15 @@ pub fn render_aggregated(agg: &Aggregated, model: &str, emit_thinking: bool) -> 
         StopKind::MaxTokens => "max_tokens",
         _ => "end_turn",
     };
-    json!({
-        "id": agg.id,
-        "type": "message",
-        "role": "assistant",
-        "model": model,
-        "content": content,
-        "stop_reason": stop_reason,
-        "stop_sequence": null,
-        "usage": anthropic_usage(&agg.usage)
+    serde_json::to_value(RenderedMessage {
+        id: agg.id.clone(),
+        kind: "message",
+        role: "assistant",
+        model: model.to_string(),
+        content,
+        stop_reason,
+        stop_sequence: None,
+        usage: anthropic_usage(&agg.usage),
     })
+    .expect("message serializes")
 }

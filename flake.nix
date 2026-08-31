@@ -16,19 +16,29 @@
         nixpkgs.lib.genAttrs nixpkgs.lib.platforms.linux (
           system: fn system nixpkgs.legacyPackages.${system}
         );
+
+      hasWild = plat: plat.isLinux && (plat.isx86_64 || plat.isAarch64);
     in
     {
       devShells = forEachSystem (
         system: pkgs: {
           default = pkgs.mkShell {
-            buildInputs = with pkgs; [
-              cargo
-              rustc
-              rustfmt
-              clippy
-              rust-analyzer
-              sqlite
-            ];
+            nativeBuildInputs =
+              with pkgs;
+              [
+                cargo
+                rustc
+                rustfmt
+                clippy
+                rust-analyzer
+                pkg-config
+              ]
+              ++ nixpkgs.lib.optionals (hasWild pkgs.stdenv.hostPlatform) [
+                pkgs.wild
+                pkgs.clang
+              ];
+
+            buildInputs = [ pkgs.sqlite ];
           };
         }
       );
@@ -40,6 +50,21 @@
             version = "0.1.0";
             src = self;
             cargoLock.lockFile = ./Cargo.lock;
+
+            nativeBuildInputs = [
+              pkgs.pkg-config
+            ]
+            ++ nixpkgs.lib.optionals (hasWild pkgs.stdenv.hostPlatform) [
+              pkgs.wild
+              pkgs.clang
+            ];
+
+            buildInputs = [ pkgs.sqlite ];
+
+            env = nixpkgs.lib.optionalAttrs (hasWild pkgs.stdenv.hostPlatform) {
+              RUSTFLAGS = "-Clinker=${pkgs.clang}/bin/clang -Clink-arg=--ld-path=wild";
+            };
+
             meta = {
               description = "Anthropic/OpenAI API proxy backed by Codex subscription accounts";
               mainProgram = "slop-proxy";

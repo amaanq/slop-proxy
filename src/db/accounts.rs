@@ -53,15 +53,14 @@ impl Db {
     ) -> Result<i64> {
         let conn = self.0.lock().await;
         conn.execute(
-            "INSERT INTO accounts (provider, provider_account_id, email, label, plan_type, access_token, refresh_token, id_token, access_expires_at, last_refresh_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, unixepoch())
+            "INSERT INTO accounts (provider, provider_account_id, email, label, plan_type, access_token, refresh_token, access_expires_at, last_refresh_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, unixepoch())
              ON CONFLICT(provider, provider_account_id) DO UPDATE SET
                email = excluded.email,
                label = COALESCE(excluded.label, label),
                plan_type = excluded.plan_type,
                access_token = excluded.access_token,
                refresh_token = excluded.refresh_token,
-               id_token = excluded.id_token,
                access_expires_at = excluded.access_expires_at,
                last_refresh_at = unixepoch(),
                status = 'active',
@@ -76,7 +75,6 @@ impl Db {
                 plan_type,
                 tokens.access_token,
                 tokens.refresh_token,
-                tokens.id_token,
                 tokens.expires_at,
             ],
         )?;
@@ -118,16 +116,10 @@ impl Db {
         let conn = self.0.lock().await;
         conn.execute(
             "UPDATE accounts SET access_token = ?2, refresh_token = ?3,
-               id_token = COALESCE(?4, id_token), access_expires_at = ?5,
+               access_expires_at = ?4,
                last_refresh_at = unixepoch(), updated_at = unixepoch()
              WHERE id = ?1",
-            params![
-                id,
-                tokens.access_token,
-                tokens.refresh_token,
-                tokens.id_token,
-                tokens.expires_at
-            ],
+            params![id, tokens.access_token, tokens.refresh_token, tokens.expires_at],
         )?;
         Ok(())
     }

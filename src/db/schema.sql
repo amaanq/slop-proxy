@@ -7,7 +7,6 @@ CREATE TABLE IF NOT EXISTS accounts (
   plan_type           TEXT,
   access_token        TEXT    NOT NULL,
   refresh_token       TEXT    NOT NULL,
-  id_token            TEXT,
   access_expires_at   INTEGER,
   last_refresh_at     INTEGER,
   status              TEXT    NOT NULL DEFAULT 'active',

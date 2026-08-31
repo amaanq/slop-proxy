@@ -1,6 +1,6 @@
+use axum::Json;
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use serde::Serialize;
 
 use crate::pool::PoolError;
@@ -97,6 +97,7 @@ pub fn pool_error_response(dialect: Dialect, err: PoolError) -> Response {
 }
 
 pub fn translation_error(dialect: Dialect, msg: &str) -> Response {
+    tracing::warn!("rejected a {dialect:?} request: {msg}");
     error_response(dialect, 400, "invalid_request_error", msg)
 }
 

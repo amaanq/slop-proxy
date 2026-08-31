@@ -13,6 +13,7 @@ pub const AUTHORIZE_URL: &str = "https://claude.ai/oauth/authorize";
 pub const TOKEN_URL: &str = "https://console.anthropic.com/v1/oauth/token";
 pub const REDIRECT_URI: &str = "https://console.anthropic.com/oauth/code/callback";
 pub const SCOPES: &str = "org:create_api_key user:profile user:inference";
+pub const PROFILE_URL: &str = "https://api.anthropic.com/api/oauth/profile";
 
 #[derive(Deserialize)]
 struct TokenResponse {
@@ -114,6 +115,7 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
         .and_then(|a| a.uuid.clone())
         .ok_or_else(|| eyre!("token response has no account uuid"))?;
     let email = account.and_then(|a| a.email_address.clone());
+    let plan = subscription_tier(&parsed.access_token).await;
     let tokens = parsed
         .into_token_set(None)
         .ok_or_else(|| eyre!("no refresh_token in token response"))?;
@@ -124,7 +126,7 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
             &account_id,
             email.as_deref(),
             label.as_deref(),
-            None,
+            plan.as_deref(),
             &tokens,
         )
         .await?;
@@ -134,6 +136,31 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
         email.as_deref().unwrap_or("unknown email")
     );
     Ok(())
+}
+
+/// The subscription tier lives on the profile rather than the token
+/// response, and distinguishes a 5x plan from a 20x one.
+async fn subscription_tier(access_token: &str) -> Option<String> {
+    #[derive(Deserialize)]
+    struct Profile {
+        organization: Option<Org>,
+    }
+    #[derive(Deserialize)]
+    struct Org {
+        rate_limit_tier: Option<String>,
+    }
+    super::http()
+        .get(PROFILE_URL)
+        .bearer_auth(access_token)
+        .header("anthropic-beta", "oauth-2025-04-20")
+        .send()
+        .await
+        .ok()?
+        .json::<Profile>()
+        .await
+        .ok()?
+        .organization?
+        .rate_limit_tier
 }
 
 pub async fn refresh(refresh_token: &str) -> Result<TokenSet, RefreshError> {

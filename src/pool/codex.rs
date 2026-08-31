@@ -127,17 +127,20 @@ impl CodexPool {
         }
     }
 
+    /// Accounts matching the token's trusted preference are tried first, so
+    /// ordinary traffic spends the untrusted accounts and only spills onto
+    /// the scarce trusted ones when nothing else is available.
     async fn next_available(&self, prefer_trusted: bool) -> Option<Arc<Slot>> {
-        let slots = self.slots.list().await;
-        if prefer_trusted {
-            let trusted: Vec<_> = slots.iter().filter(|s| s.trusted).cloned().collect();
-            if let Some(slot) = self.claim_round_robin(&trusted).await {
-                return Some(slot);
-            }
-            let rest: Vec<_> = slots.iter().filter(|s| !s.trusted).cloned().collect();
-            return self.claim_round_robin(&rest).await;
+        let (preferred, rest): (Vec<_>, Vec<_>) = self
+            .slots
+            .list()
+            .await
+            .into_iter()
+            .partition(|s| s.trusted == prefer_trusted);
+        if let Some(slot) = self.claim_round_robin(&preferred).await {
+            return Some(slot);
         }
-        self.claim_round_robin(&slots).await
+        self.claim_round_robin(&rest).await
     }
 
     async fn claim_round_robin(&self, slots: &[Arc<Slot>]) -> Option<Arc<Slot>> {

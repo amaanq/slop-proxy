@@ -418,3 +418,51 @@ async fn pool_reload_picks_up_new_logins() {
     pool.reload().await.unwrap();
     assert_eq!(pool.len().await, 1);
 }
+
+#[tokio::test]
+async fn token_request_limit_enforced() {
+    let (base, db) = spawn_proxy().await;
+    let id = db.create_token("marc", "sp-marc", "sp-marc").await.unwrap();
+    db.set_token_limits(
+        &id.to_string(),
+        &crate::db::tokens::TokenLimits {
+            requests: Some(1),
+            tokens: None,
+            window_seconds: 3600,
+            slowdown_ms: 0,
+        },
+    )
+    .await
+    .unwrap();
+
+    let body = serde_json::json!({
+        "model": "gpt-5-codex",
+        "messages": [{"role": "user", "content": "hi"}]
+    });
+    let client = reqwest::Client::new();
+    let first = client
+        .post(format!("{base}/v1/chat/completions"))
+        .bearer_auth("sp-marc")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status(), 200);
+    assert_eq!(
+        first
+            .headers()
+            .get("x-ratelimit-remaining-requests")
+            .unwrap(),
+        "0"
+    );
+
+    let second = client
+        .post(format!("{base}/v1/chat/completions"))
+        .bearer_auth("sp-marc")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second.status(), 429);
+    assert!(second.headers().contains_key("retry-after"));
+}

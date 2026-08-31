@@ -13,6 +13,7 @@ use super::auth::AuthInfo;
 use super::error::{Dialect, pool_error_response, pool_error_status, translation_error};
 use super::{AppState, LogGuard, cache_key, log_error, log_usage};
 use crate::codex::sse::{EventStream, event_stream};
+use crate::codex::types::Usage;
 use crate::db::usage::UsageRecord;
 use crate::translate::openai_req::{self, OpenAiRequest};
 use crate::translate::openai_stream::{OpenAiStream, render_aggregated};
@@ -42,6 +43,7 @@ pub async fn chat_completions(
     upstream_req.prompt_cache_key = Some(cache_key(&auth.user, &upstream_req));
 
     let record = UsageRecord {
+        meter_id: Some(auth.meter_id),
         token_id: Some(auth.token_id),
         user: auth.user.clone(),
         dialect: "openai",
@@ -124,13 +126,13 @@ fn stream_response(upstream: EventStream, translator: OpenAiStream, guard: LogGu
             match st.upstream.next().await {
                 Some(ev) => {
                     for chunk in st.translator.handle(ev) {
-                        st.queue.push_back(Event::default().data(chunk.to_string()));
+                        st.queue.push_back(Event::default().data(chunk));
                     }
                 }
                 None => {
                     st.finished = true;
                     for chunk in st.translator.finalize() {
-                        st.queue.push_back(Event::default().data(chunk.to_string()));
+                        st.queue.push_back(Event::default().data(chunk));
                     }
                 }
             }
@@ -265,6 +267,7 @@ pub async fn responses_passthrough(
     };
 
     let record = UsageRecord {
+        meter_id: Some(auth.meter_id),
         token_id: Some(auth.token_id),
         user: auth.user.clone(),
         dialect: "responses",
@@ -300,24 +303,18 @@ pub async fn responses_passthrough(
         let mut final_response = Option::<Value>::None;
         while let Some(ev) = raw_events.next().await {
             let Ok(ev) = ev else { break };
-            let Ok(v) = serde_json::from_str::<Value>(&ev.data) else {
-                continue;
+            let terminal = match serde_json::from_str::<TerminalEvent>(&ev.data) {
+                Ok(TerminalEvent::Completed(p))
+                | Ok(TerminalEvent::Incomplete(p))
+                | Ok(TerminalEvent::Failed(p)) => p,
+                _ => continue,
             };
-            match v.get("type").and_then(Value::as_str) {
-                Some("response.completed")
-                | Some("response.incomplete")
-                | Some("response.failed") => {
-                    if let Some(r) = v.get("response") {
-                        if let Some(u) = r.get("usage")
-                            && let Ok(u) = serde_json::from_value(u.clone())
-                        {
-                            capture.record(&u);
-                        }
-                        final_response = Some(r.clone());
-                    }
-                }
-                _ => {}
+            if let Ok(env) = serde_json::from_str::<UsageEnvelope>(&ev.data)
+                && let Some(usage) = env.response.usage
+            {
+                capture.record(&usage);
             }
+            final_response = Some(terminal.response);
         }
         let snap = capture.snapshot();
         record.input_tokens = snap.input_tokens;
@@ -337,6 +334,37 @@ pub async fn responses_passthrough(
     }
 }
 
+/// The stream's terminal events; `response` stays raw because it is handed
+/// back to the client verbatim.
+#[derive(serde::Deserialize)]
+#[serde(tag = "type")]
+enum TerminalEvent {
+    #[serde(rename = "response.completed")]
+    Completed(TerminalPayload),
+    #[serde(rename = "response.incomplete")]
+    Incomplete(TerminalPayload),
+    #[serde(rename = "response.failed")]
+    Failed(TerminalPayload),
+    #[serde(other)]
+    Other,
+}
+
+#[derive(serde::Deserialize)]
+struct TerminalPayload {
+    response: Value,
+}
+
+#[derive(serde::Deserialize)]
+struct UsageEnvelope {
+    response: ResponseUsage,
+}
+
+#[derive(serde::Deserialize)]
+struct ResponseUsage {
+    #[serde(default)]
+    usage: Option<Usage>,
+}
+
 fn relay_stream(resp: reqwest::Response, guard: LogGuard, capture: UsageCapture) -> Response {
     let stream = resp.bytes_stream().eventsource().filter_map(move |ev| {
         let capture = capture.clone();
@@ -345,11 +373,10 @@ fn relay_stream(resp: reqwest::Response, guard: LogGuard, capture: UsageCapture)
                 Ok(ev) => {
                     if (ev.event == "response.completed"
                         || ev.data.contains("\"response.completed\""))
-                        && let Ok(v) = serde_json::from_str::<Value>(&ev.data)
-                        && let Some(usage) = v.get("response").and_then(|r| r.get("usage"))
-                        && let Ok(u) = serde_json::from_value(usage.clone())
+                        && let Ok(env) = serde_json::from_str::<UsageEnvelope>(&ev.data)
+                        && let Some(usage) = env.response.usage
                     {
-                        capture.record(&u);
+                        capture.record(&usage);
                     }
                     let mut out = Event::default().data(ev.data);
                     if !ev.event.is_empty() && ev.event != "message" {

@@ -322,6 +322,16 @@ impl Slots {
     }
 }
 
+/// Rendezvous score for a session against a slot. Ordering by it keeps a
+/// conversation on one account, which is what lets an upstream prompt cache
+/// keep hitting instead of paying for the whole prefix again.
+pub(crate) fn rendezvous_score(session: &str, id: i64) -> u64 {
+    let mut h = hmac_sha256::Hash::new();
+    h.update(session.as_bytes());
+    h.update(id.to_le_bytes());
+    u64::from_le_bytes(h.finalize()[..8].try_into().unwrap())
+}
+
 fn display_for(a: &crate::db::accounts::Account) -> String {
     a.label
         .clone()
@@ -386,26 +396,27 @@ fn slot_from_account(a: crate::db::accounts::Account) -> Slot {
 pub(crate) fn test_slots(db: Db, provider: Provider, ids: &[(i64, bool)]) -> Slots {
     Slots {
         provider,
-        slots: RwLock::new(ids
-            .iter()
-            .map(|&(id, trusted)| {
-                Arc::new(Slot {
-                    id,
-                    provider_account_id: format!("acct-{id}"),
-                    display: format!("a{id}"),
-                    trusted,
-                    plan: None,
-                    state: Mutex::new(SlotState {
-                        access_token: "at".into(),
-                        refresh_token: "rt".into(),
-                        expires_at: None,
-                        status: Status::Active,
-                        consecutive_fails: 0,
-                        usage: None,
-                    }),
+        slots: RwLock::new(
+            ids.iter()
+                .map(|&(id, trusted)| {
+                    Arc::new(Slot {
+                        id,
+                        provider_account_id: format!("acct-{id}"),
+                        display: format!("a{id}"),
+                        trusted,
+                        plan: None,
+                        state: Mutex::new(SlotState {
+                            access_token: "at".into(),
+                            refresh_token: "rt".into(),
+                            expires_at: None,
+                            status: Status::Active,
+                            consecutive_fails: 0,
+                            usage: None,
+                        }),
+                    })
                 })
-            })
-            .collect()),
+                .collect(),
+        ),
         db,
     }
 }

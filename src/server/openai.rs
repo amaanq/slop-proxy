@@ -77,7 +77,12 @@ pub async fn chat_completions(
             return translation_error(DIALECT, &format!("serializing request: {e}"));
         }
     };
-    let (account_id, resp) = match state.codex.execute(&req_value, auth.prefer_trusted).await {
+    let session_key = upstream_req.prompt_cache_key.clone().unwrap_or_default();
+    let (account_id, resp) = match state
+        .codex
+        .execute(&req_value, auth.prefer_trusted, &session_key)
+        .await
+    {
         Ok(r) => r,
         Err(e) => {
             log_error(&state.db, record, pool_error_status(&e), "pool");
@@ -304,7 +309,17 @@ pub async fn responses_passthrough(
         ..Default::default()
     };
 
-    let (account_id, resp) = match state.codex.execute(&body, auth.prefer_trusted).await {
+    // Codex sends its own prompt_cache_key, which is stable per conversation.
+    let session_key = body
+        .pointer("/prompt_cache_key")
+        .and_then(Value::as_str)
+        .unwrap_or(&auth.user)
+        .to_string();
+    let (account_id, resp) = match state
+        .codex
+        .execute(&body, auth.prefer_trusted, &session_key)
+        .await
+    {
         Ok(r) => r,
         Err(e) => {
             log_error(&state.db, record, pool_error_status(&e), "pool");

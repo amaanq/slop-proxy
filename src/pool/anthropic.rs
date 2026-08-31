@@ -82,11 +82,8 @@ impl AnthropicPool {
         let mut scored = Vec::new();
         for slot in self.slots.list().await {
             let strained = self.slots.is_strained(&slot, self.soft_limit).await;
-            let mut h = hmac_sha256::Hash::new();
-            h.update(session_key.as_bytes());
-            h.update(slot.id.to_le_bytes());
-            let d = h.finalize();
-            scored.push((u64::from_le_bytes(d[..8].try_into().unwrap()), strained, slot));
+            let score = super::rendezvous_score(session_key, slot.id);
+            scored.push((score, strained, slot));
         }
         // Strain outranks the trust preference: an account with capacity left
         // beats a preferred one that is nearly spent, since the preference is
@@ -202,10 +199,7 @@ mod tests {
         for i in 0..64 {
             winners.insert(pool.ranked(&format!("session-{i}"), false).await[0].id);
         }
-        assert!(
-            winners.len() > 1,
-            "all sessions landed on one account"
-        );
+        assert!(winners.len() > 1, "all sessions landed on one account");
 
         let order = pool.ranked("session-a", false).await;
         assert_eq!(order.len(), 4);
@@ -284,7 +278,10 @@ mod tests {
             !order[0].trusted,
             "a spent trusted account was preferred over an idle untrusted one"
         );
-        assert!(order[2].trusted && order[3].trusted, "spent accounts should sort last");
+        assert!(
+            order[2].trusted && order[3].trusted,
+            "spent accounts should sort last"
+        );
     }
 
     #[tokio::test]
@@ -294,7 +291,10 @@ mod tests {
         for i in 0..16 {
             let order = pool.ranked(&format!("session-{i}"), true).await;
             let heads = [order[0].id, order[1].id];
-            assert!(heads.contains(&2) && heads.contains(&4), "untrusted ranked first");
+            assert!(
+                heads.contains(&2) && heads.contains(&4),
+                "untrusted ranked first"
+            );
 
             let plain = pool.ranked(&format!("session-{i}"), false).await;
             let plain_heads = [plain[0].id, plain[1].id];
@@ -312,6 +312,9 @@ mod tests {
             .map(|s| s.id)
             .collect::<Vec<_>>();
         let preferred_trusted = preferred[..2].iter().map(|s| s.id).collect::<Vec<_>>();
-        assert_eq!(plain_trusted, preferred_trusted, "stickiness broken within trusted group");
+        assert_eq!(
+            plain_trusted, preferred_trusted,
+            "stickiness broken within trusted group"
+        );
     }
 }

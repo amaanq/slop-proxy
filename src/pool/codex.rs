@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::Value;
 
@@ -10,10 +9,9 @@ use crate::db::Db;
 use crate::provider::Provider;
 use crate::upstream::SendError;
 
-/// Round-robin pool over codex accounts, owning the backend client.
+/// Session-sticky pool over codex accounts, owning the backend client.
 pub struct CodexPool {
     slots: Slots,
-    cursor: AtomicUsize,
     client: CodexClient,
     soft_limit: f64,
 }
@@ -23,7 +21,6 @@ impl CodexPool {
         Ok(Self {
             soft_limit: client.soft_utilization_limit(),
             slots: Slots::load(db, Provider::Codex).await?,
-            cursor: AtomicUsize::new(0),
             client,
         })
     }
@@ -91,7 +88,7 @@ impl CodexPool {
     /// first, since gated models are absent from an untrusted account's
     /// catalog.
     pub async fn any_active_credentials(&self) -> Option<(String, String)> {
-        let slot = self.next_available(true).await?;
+        let slot = self.next_available(true, "").await?;
         let access = self.slots.fresh_token(&slot, false).await.ok()?;
         Some((access, slot.provider_account_id.clone()))
     }
@@ -124,6 +121,7 @@ impl CodexPool {
         &self,
         req: &Value,
         prefer_trusted: bool,
+        session_key: &str,
     ) -> Result<(i64, reqwest::Response), PoolError> {
         let attempts = self.slots.len().await.min(3);
         if attempts == 0 {
@@ -132,14 +130,18 @@ impl CodexPool {
         let mut last_err = Option::<SendError>::None;
 
         for _ in 0..attempts {
-            let Some(slot) = self.next_available(prefer_trusted).await else {
+            let Some(slot) = self.next_available(prefer_trusted, session_key).await else {
                 break;
             };
             let Ok(creds) = self.slots.fresh_token(&slot, false).await else {
                 continue;
             };
 
-            match self.client.send(&creds, &slot.provider_account_id, req).await {
+            match self
+                .client
+                .send(&creds, &slot.provider_account_id, req)
+                .await
+            {
                 Ok(resp) => {
                     self.slots.mark_ok(&slot).await;
                     if let Some(usage) = usage_from_headers(resp.headers()) {
@@ -150,7 +152,11 @@ impl CodexPool {
                 Err(SendError::Auth(body)) => {
                     tracing::warn!("account {} got 401, forcing refresh", slot.display);
                     if let Ok(creds) = self.slots.fresh_token(&slot, true).await {
-                        match self.client.send(&creds, &slot.provider_account_id, req).await {
+                        match self
+                            .client
+                            .send(&creds, &slot.provider_account_id, req)
+                            .await
+                        {
                             Ok(resp) => {
                                 self.slots.mark_ok(&slot).await;
                                 if let Some(usage) = usage_from_headers(resp.headers()) {
@@ -193,8 +199,10 @@ impl CodexPool {
 
     /// Candidates are tried with capacity ahead of preference, so an account
     /// with room left beats a preferred one that is nearly spent, and only
-    /// then does the token's trusted preference break the tie.
-    async fn next_available(&self, prefer_trusted: bool) -> Option<Arc<Slot>> {
+    /// then does the token's trusted preference break the tie. Within a group
+    /// a session sticks to one account, since a prompt cache lives on the
+    /// account that built it and scattering re-bills the whole prefix.
+    async fn next_available(&self, prefer_trusted: bool, session_key: &str) -> Option<Arc<Slot>> {
         let mut fresh = Vec::new();
         let mut strained = Vec::new();
         for slot in self.slots.list().await {
@@ -205,11 +213,10 @@ impl CodexPool {
             }
         }
         for group in [fresh, strained] {
-            let (preferred, rest): (Vec<_>, Vec<_>) = group
-                .into_iter()
-                .partition(|s| s.trusted == prefer_trusted);
+            let (preferred, rest): (Vec<_>, Vec<_>) =
+                group.into_iter().partition(|s| s.trusted == prefer_trusted);
             for candidates in [preferred, rest] {
-                if let Some(slot) = self.claim_round_robin(&candidates).await {
+                if let Some(slot) = self.claim_ranked(candidates, session_key).await {
                     return Some(slot);
                 }
             }
@@ -217,14 +224,13 @@ impl CodexPool {
         None
     }
 
-    async fn claim_round_robin(&self, slots: &[Arc<Slot>]) -> Option<Arc<Slot>> {
-        let n = slots.len();
-        if n == 0 {
-            return None;
-        }
-        for _ in 0..n {
-            let i = self.cursor.fetch_add(1, Ordering::Relaxed) % n;
-            let slot = &slots[i];
+    async fn claim_ranked(
+        &self,
+        mut slots: Vec<Arc<Slot>>,
+        session_key: &str,
+    ) -> Option<Arc<Slot>> {
+        slots.sort_by_key(|s| std::cmp::Reverse(super::rendezvous_score(session_key, s.id)));
+        for slot in &slots {
             if self.slots.try_claim(slot).await {
                 return Some(slot.clone());
             }

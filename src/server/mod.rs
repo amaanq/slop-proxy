@@ -10,11 +10,10 @@ mod tests;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
 use axum::middleware;
 use axum::routing::{get, post};
 use axum::Router;
-use sha2::{Digest, Sha256};
+use eyre::{Result, WrapErr};
 
 use crate::anthropic::client::AnthropicClient;
 use crate::codex::client::CodexClient;
@@ -94,7 +93,7 @@ pub async fn serve(db: Db, cfg: Config, bind: &str) -> Result<()> {
         let mstate = state.clone();
         let listener = tokio::net::TcpListener::bind(&mbind)
             .await
-            .with_context(|| format!("binding metrics listener {mbind}"))?;
+            .wrap_err_with(|| format!("binding metrics listener {mbind}"))?;
         tracing::info!("metrics on http://{mbind}/metrics");
         tokio::spawn(async move {
             let app = Router::new()
@@ -109,7 +108,7 @@ pub async fn serve(db: Db, cfg: Config, bind: &str) -> Result<()> {
 
     let listener = tokio::net::TcpListener::bind(bind)
         .await
-        .with_context(|| format!("binding {bind}"))?;
+        .wrap_err_with(|| format!("binding {bind}"))?;
     tracing::info!("listening on http://{bind}");
     axum::serve(listener, app)
         .with_graceful_shutdown(async {
@@ -191,7 +190,7 @@ pub fn log_usage(db: &Db, record: UsageRecord) {
 
 /// Stable per-conversation cache key so upstream prompt caching can kick in.
 pub fn cache_key(user: &str, req: &crate::codex::types::ResponsesRequest) -> String {
-    let mut hasher = Sha256::new();
+    let mut hasher = hmac_sha256::Hash::new();
     hasher.update(user.as_bytes());
     hasher.update(&req.instructions);
     if let Some(first) = req.input.first() {

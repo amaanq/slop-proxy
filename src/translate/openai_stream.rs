@@ -122,7 +122,7 @@ impl OpenAiStream {
         Self {
             model,
             id: format!("chatcmpl-{}", uuid::Uuid::new_v4().simple()),
-            created: chrono::Utc::now().timestamp(),
+            created: crate::clock::unix_now(),
             include_usage,
             tool_index: -1,
             tool_open: false,
@@ -395,7 +395,7 @@ pub fn render_aggregated(agg: &Aggregated, model: &str) -> Value {
     to_value(RenderedCompletion {
         id: format!("chatcmpl-{}", agg.id),
         object: "chat.completion",
-        created: chrono::Utc::now().timestamp(),
+        created: crate::clock::unix_now(),
         model: model.to_string(),
         choices: vec![RenderedChoice {
             index: 0,

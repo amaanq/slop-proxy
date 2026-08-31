@@ -1,4 +1,4 @@
-use anyhow::Result;
+use eyre::Result;
 use rusqlite::{Row, params};
 
 use super::Db;

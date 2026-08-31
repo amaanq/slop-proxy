@@ -4,7 +4,6 @@ use axum::response::Response;
 use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 use super::auth::AuthInfo;
 use super::error::{Dialect, error_response, pool_error_response, pool_error_status};
@@ -37,12 +36,23 @@ impl Peek {
         if let Some(uid) = &self.user_id {
             return uid.clone();
         }
-        let mut h = Sha256::new();
-        h.update(auth.user.as_bytes());
+        struct HashWriter(hmac_sha256::Hash);
+        impl std::io::Write for HashWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.update(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut h = HashWriter(hmac_sha256::Hash::new());
+        h.0.update(auth.user.as_bytes());
         if let Some(system) = body.get("system") {
             let _ = serde_json::to_writer(&mut h, system);
         }
-        let d = h.finalize();
+        let d = h.0.finalize();
         format!("sys-{:016x}", u64::from_le_bytes(d[..8].try_into().unwrap()))
     }
 }

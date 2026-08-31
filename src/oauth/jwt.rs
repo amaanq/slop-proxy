@@ -1,5 +1,4 @@
-use anyhow::{Context, Result};
-use base64::Engine;
+use eyre::{Result, WrapErr, eyre};
 use serde_json::Value;
 
 pub struct IdTokenInfo {
@@ -10,10 +9,10 @@ pub struct IdTokenInfo {
 
 /// Decodes a JWT payload without signature verification.
 pub fn payload(token: &str) -> Result<Value> {
-    let part = token.split('.').nth(1).context("not a JWT")?;
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(part.trim_end_matches('='))
-        .context("JWT payload is not base64url")?;
+    let part = token.split('.').nth(1).ok_or_else(|| eyre!("not a JWT"))?;
+    let bytes = data_encoding::BASE64URL_NOPAD
+        .decode(part.trim_end_matches('=').as_bytes())
+        .wrap_err("JWT payload is not base64url")?;
     Ok(serde_json::from_slice(&bytes)?)
 }
 

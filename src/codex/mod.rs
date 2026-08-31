@@ -3,7 +3,7 @@ pub mod models;
 pub mod sse;
 pub mod types;
 
-use anyhow::{Context, Result, anyhow, bail};
+use eyre::{Result, bail, eyre};
 use futures_util::StreamExt;
 
 use crate::config::Config;
@@ -17,14 +17,14 @@ pub async fn debug_models(db: &Db, cfg: &Config) -> Result<()> {
     let (access, account_id) = pool
         .any_active_credentials()
         .await
-        .context("no usable account; run `slop-proxy login`")?;
+        .ok_or_else(|| eyre!("no usable account; run `slop-proxy login`"))?;
 
     println!("GET {}", pool.client().models_url());
     let (status, body) = pool
         .client()
         .models_raw(&access, &account_id)
         .await
-        .map_err(|e| anyhow!(e))?;
+        .map_err(|e| eyre!(e))?;
     println!("status: {status}\n");
     match serde_json::from_str::<serde_json::Value>(&body) {
         Ok(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap_or(body)),
@@ -43,24 +43,24 @@ pub async fn debug_ping(
     let account = accounts
         .iter()
         .find(|a| a.provider == Provider::Codex && a.status != "disabled")
-        .context("no usable account; run `slop-proxy login`")?
+        .ok_or_else(|| eyre!("no usable account; run `slop-proxy login`"))?
         .clone();
 
-    let now = chrono::Utc::now().timestamp();
+    let now = crate::clock::unix_now();
     let account = if account.access_expires_at.unwrap_or(0) < now + 60 {
         println!("refreshing access token for account {}...", account.id);
         let tokens = crate::oauth::refresh::refresh(&account.refresh_token).await?;
         db.update_account_tokens(account.id, &tokens).await?;
         db.find_account(&account.id.to_string())
             .await?
-            .context("account vanished")?
+            .ok_or_else(|| eyre!("account vanished"))?
     } else {
         account
     };
 
     let model = model
         .or_else(|| Some(cfg.models.default.clone()).filter(|m| !m.is_empty()))
-        .context("pass --model (no default configured); see `slop-proxy models`")?;
+        .ok_or_else(|| eyre!("pass --model (no default configured); see `slop-proxy models`"))?;
     let mut req = types::ResponsesRequest::new(model.clone(), cfg.codex.instructions());
     req.input.push(types::InputItem::Message {
         role: "user".into(),

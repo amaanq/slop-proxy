@@ -63,7 +63,7 @@ fn fresh_tokens() -> TokenSet {
         access_token: "at".into(),
         refresh_token: "rt".into(),
         id_token: None,
-        expires_at: Some(chrono::Utc::now().timestamp() + 3600),
+        expires_at: Some(crate::clock::unix_now() + 3600),
     }
 }
 

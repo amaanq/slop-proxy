@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use eyre::{Result, bail, eyre};
 use pound::Parse;
 
 use crate::config::Config;
@@ -165,7 +165,7 @@ async fn accounts_list(db: &Db) -> Result<()> {
     }
 
     let accounts = db.list_accounts().await?;
-    let now = chrono::Utc::now().timestamp();
+    let now = crate::clock::unix_now();
     let rows = accounts
         .iter()
         .map(|a| AccountRow {
@@ -272,7 +272,7 @@ async fn debug_refresh(db: &Db, account: &str) -> Result<()> {
     let acc = db
         .find_account(account)
         .await?
-        .context("no account matched")?;
+        .ok_or_else(|| eyre!("no account matched"))?;
     let tokens = crate::oauth::refresh::refresh(&acc.refresh_token).await?;
     db.update_account_tokens(acc.id, &tokens).await?;
     println!(

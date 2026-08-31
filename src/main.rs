@@ -1,5 +1,6 @@
 mod anthropic;
 mod cli;
+mod clock;
 mod codex;
 mod config;
 mod db;
@@ -11,11 +12,12 @@ mod stats;
 mod translate;
 mod upstream;
 
-use anyhow::Result;
+use eyre::Result;
 use pound::Parse;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    color_eyre::install()?;
     let args = cli::Cli::parse();
 
     tracing_subscriber::fmt()

@@ -7,7 +7,7 @@ pub mod openai_stream;
 
 use std::sync::{Arc, Mutex};
 
-use base64::Engine;
+use data_encoding::BASE64URL_NOPAD;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 
@@ -28,11 +28,11 @@ pub fn encode_signature(id: Option<&str>, encrypted_content: &str) -> String {
         ec: Some(encrypted_content.to_string()),
     };
     let payload = serde_json::to_string(&payload).unwrap_or_default();
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload)
+    BASE64URL_NOPAD.encode(payload.as_bytes())
 }
 
 pub fn decode_signature(sig: &str) -> (Option<String>, Option<String>) {
-    if let Ok(bytes) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(sig)
+    if let Ok(bytes) = BASE64URL_NOPAD.decode(sig.as_bytes())
         && let Ok(p) = serde_json::from_slice::<SignaturePayload>(&bytes)
         && p.ec.is_some()
     {

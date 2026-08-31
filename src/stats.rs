@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use eyre::{Result, bail};
 use serde::Serialize;
 
 use crate::db::Db;
@@ -45,7 +45,7 @@ struct Report {
 }
 
 pub async fn run(db: &Db, since: Option<String>, until: Option<String>) -> Result<()> {
-    let now = chrono::Utc::now().timestamp();
+    let now = crate::clock::unix_now();
     let since_ts = match &since {
         Some(s) => parse_time(s, now)?,
         None => 0,
@@ -68,7 +68,7 @@ pub async fn run(db: &Db, since: Option<String>, until: Option<String>) -> Resul
             })
             .collect()
     };
-    let stamp = |ts| chrono::DateTime::from_timestamp(ts, 0).map(|d| d.to_rfc3339());
+    let stamp = |ts| jiff::Timestamp::from_second(ts).ok().map(|t| t.to_string());
     let report = Report {
         since: stamp(since_ts),
         until: stamp(until_ts),
@@ -82,8 +82,8 @@ pub async fn run(db: &Db, since: Option<String>, until: Option<String>) -> Resul
 }
 
 fn parse_time(s: &str, now: i64) -> Result<i64> {
-    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
-        return Ok(dt.timestamp());
+    if let Ok(ts) = s.parse::<jiff::Timestamp>() {
+        return Ok(ts.as_second());
     }
     if let Some(rest) = s.strip_suffix(['h', 'd', 'm', 'w'])
         && let Ok(n) = rest.parse::<i64>()

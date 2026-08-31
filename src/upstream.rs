@@ -26,9 +26,9 @@ pub fn retry_after_secs(headers: &HeaderMap, reset_headers: &[&str]) -> Option<i
         return Some(v);
     }
     let reset = reset_headers.iter().find_map(|h| get(h))?;
-    let now = chrono::Utc::now().timestamp();
-    if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(reset) {
-        return Some((ts.timestamp() - now).max(1));
+    let now = crate::clock::unix_now();
+    if let Ok(ts) = reset.parse::<jiff::Timestamp>() {
+        return Some((ts.as_second() - now).max(1));
     }
     let secs = reset.parse::<f64>().ok()? as i64;
     // Reset headers have been observed both as an absolute epoch and as

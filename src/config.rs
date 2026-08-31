@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use eyre::{Result, WrapErr};
 use serde::Deserialize;
 
 use crate::cli::Cli;
@@ -148,9 +148,9 @@ impl Config {
 
         let file = if config_path.exists() {
             let raw = std::fs::read_to_string(&config_path)
-                .with_context(|| format!("reading {}", config_path.display()))?;
+                .wrap_err_with(|| format!("reading {}", config_path.display()))?;
             toml::from_str::<FileConfig>(&raw)
-                .with_context(|| format!("parsing {}", config_path.display()))?
+                .wrap_err_with(|| format!("parsing {}", config_path.display()))?
         } else {
             FileConfig::default()
         };

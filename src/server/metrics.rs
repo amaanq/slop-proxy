@@ -106,7 +106,9 @@ fn render_accounts(out: &mut String, accounts: &[AccountSnapshot]) {
     for a in accounts {
         let Some(usage) = &a.usage else { continue };
         for w in &usage.windows {
-            let Some(resets_at) = w.resets_at else { continue };
+            let Some(resets_at) = w.resets_at else {
+                continue;
+            };
             line(
                 out,
                 "slop_account_window_reset_seconds",
@@ -170,12 +172,13 @@ fn render_usage(out: &mut String, rows: &[crate::db::usage::MetricsRow]) {
         for r in rows {
             let _ = writeln!(
                 out,
-                "slop_tokens_total{{user={},account={},provider={},requested_model={},model={},dialect={},kind=\"{kind}\"}} {}",
+                "slop_tokens_total{{user={},account={},provider={},requested_model={},model={},effort={},dialect={},kind=\"{kind}\"}} {}",
                 quote(&r.user),
                 quote(&r.account),
                 quote(&r.provider),
                 quote(&r.requested_model),
                 quote(&r.model),
+                quote(&r.effort),
                 quote(&r.dialect),
                 get(r),
             );
@@ -225,12 +228,13 @@ fn line(out: &mut String, name: &str, a: &AccountSnapshot, extra: &[(&str, &str)
 fn usage_line(out: &mut String, name: &str, r: &crate::db::usage::MetricsRow, value: f64) {
     let _ = writeln!(
         out,
-        "{name}{{user={},account={},provider={},requested_model={},model={},dialect={}}} {value}",
+        "{name}{{user={},account={},provider={},requested_model={},model={},effort={},dialect={}}} {value}",
         quote(&r.user),
         quote(&r.account),
         quote(&r.provider),
         quote(&r.requested_model),
         quote(&r.model),
+        quote(&r.effort),
         quote(&r.dialect),
     );
 }

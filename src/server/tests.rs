@@ -398,11 +398,15 @@ async fn metrics_render_accounts_and_usage() {
         models: Arc::new(super::ModelCache::new()),
     };
     let resp = super::metrics::metrics(axum::extract::State(state)).await;
-    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
     let text = String::from_utf8(bytes.to_vec()).unwrap();
 
-    assert!(text.contains("slop_account_status{provider=\"codex\",account=\"test@example.com\"} 0"));
-    assert!(text.contains("slop_requests_total{user=\"alice\",account=\"test@example.com\",provider=\"codex\",requested_model=\"gpt-5-codex\",model=\"gpt-5-codex\",dialect=\"openai\"} 1"));
+    assert!(
+        text.contains("slop_account_status{provider=\"codex\",account=\"test@example.com\"} 0")
+    );
+    assert!(text.contains("slop_requests_total{user=\"alice\",account=\"test@example.com\",provider=\"codex\",requested_model=\"gpt-5-codex\",model=\"gpt-5-codex\",effort=\"medium\",dialect=\"openai\"} 1"));
     assert!(text.contains("kind=\"input\"} 80"));
     assert!(text.contains("kind=\"cache_read\"} 20"));
 }
@@ -416,9 +420,16 @@ async fn pool_reload_picks_up_new_logins() {
         .unwrap();
     assert_eq!(pool.len().await, 0);
 
-    db.upsert_account(Provider::Codex, "acct-r1", None, None, None, &fresh_tokens())
-        .await
-        .unwrap();
+    db.upsert_account(
+        Provider::Codex,
+        "acct-r1",
+        None,
+        None,
+        None,
+        &fresh_tokens(),
+    )
+    .await
+    .unwrap();
     pool.reload().await.unwrap();
     assert_eq!(pool.len().await, 1);
 }

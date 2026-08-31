@@ -14,6 +14,7 @@ pub struct UsageRecord {
     pub dialect: &'static str,
     pub requested_model: String,
     pub upstream_model: String,
+    pub effort: String,
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub cache_read_tokens: i64,
@@ -82,9 +83,9 @@ impl Db {
         let mut conn = self.0.lock().await;
         let tx = conn.transaction()?;
         tx.execute(
-            "INSERT INTO usage_log (token_id, user, account_id, dialect, requested_model, upstream_model,
+            "INSERT INTO usage_log (token_id, user, account_id, dialect, requested_model, upstream_model, effort,
                input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, status, error_kind, duration_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 r.token_id,
                 r.user,
@@ -92,6 +93,7 @@ impl Db {
                 r.dialect,
                 r.requested_model,
                 r.upstream_model,
+                r.effort,
                 r.input_tokens,
                 r.output_tokens,
                 r.cache_read_tokens,
@@ -297,6 +299,7 @@ pub struct MetricsRow {
     pub provider: String,
     pub requested_model: String,
     pub model: String,
+    pub effort: String,
     pub dialect: String,
     pub requests: i64,
     pub errors: i64,
@@ -319,13 +322,14 @@ impl Db {
                               FROM accounts a WHERE a.id = u.account_id), 'none') AS account,
                     COALESCE((SELECT a.provider
                               FROM accounts a WHERE a.id = u.account_id), 'none') AS provider,
-                    u.requested_model, u.upstream_model, u.dialect, COUNT(*),
+                    u.requested_model, u.upstream_model, u.effort, u.dialect, COUNT(*),
                     SUM(u.status >= 400 OR u.error_kind IS NOT NULL),
                     COALESCE(SUM(u.input_tokens),0), COALESCE(SUM(u.output_tokens),0),
                     COALESCE(SUM(u.cache_read_tokens),0), COALESCE(SUM(u.cache_write_tokens),0),
                     COALESCE(SUM(u.reasoning_tokens),0), COALESCE(SUM(u.duration_ms),0)
              FROM usage_log u
-             GROUP BY u.user, account, provider, u.requested_model, u.upstream_model, u.dialect",
+             GROUP BY u.user, account, provider, u.requested_model, u.upstream_model,
+                      u.effort, u.dialect",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok(MetricsRow {
@@ -334,15 +338,16 @@ impl Db {
                 provider: r.get(2)?,
                 requested_model: r.get(3)?,
                 model: r.get(4)?,
-                dialect: r.get(5)?,
-                requests: r.get(6)?,
-                errors: r.get::<_, Option<i64>>(7)?.unwrap_or(0),
-                input_tokens: r.get(8)?,
-                output_tokens: r.get(9)?,
-                cache_read_tokens: r.get(10)?,
-                cache_write_tokens: r.get(11)?,
-                reasoning_tokens: r.get(12)?,
-                duration_ms: r.get(13)?,
+                effort: r.get(5)?,
+                dialect: r.get(6)?,
+                requests: r.get(7)?,
+                errors: r.get::<_, Option<i64>>(8)?.unwrap_or(0),
+                input_tokens: r.get(9)?,
+                output_tokens: r.get(10)?,
+                cache_read_tokens: r.get(11)?,
+                cache_write_tokens: r.get(12)?,
+                reasoning_tokens: r.get(13)?,
+                duration_ms: r.get(14)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)

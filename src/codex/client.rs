@@ -59,21 +59,26 @@ impl CodexClient {
         access_token: &str,
         chatgpt_account_id: &str,
         req: &Value,
+        session_id: &str,
     ) -> Result<reqwest::Response, SendError> {
-        match self.send_once(access_token, chatgpt_account_id, req).await {
+        match self
+            .send_once(access_token, chatgpt_account_id, req, session_id)
+            .await
+        {
             Err(SendError::BadRequest(body))
                 if body.contains("max_output_tokens") && req.get("max_output_tokens").is_some() =>
             {
                 tracing::debug!("upstream rejected max_output_tokens; retrying without it");
                 let mut retry = req.clone();
                 retry.as_object_mut().map(|o| o.remove("max_output_tokens"));
-                self.send_once(access_token, chatgpt_account_id, &retry)
+                self.send_once(access_token, chatgpt_account_id, &retry, session_id)
                     .await
             }
             // Cloudflare occasionally 403s fresh headless clients; the cookie
             // jar picks up clearance on the first response, so retry once.
             Err(SendError::Upstream { status: 403, .. }) => {
-                self.send_once(access_token, chatgpt_account_id, req).await
+                self.send_once(access_token, chatgpt_account_id, req, session_id)
+                    .await
             }
             other => other,
         }
@@ -160,8 +165,8 @@ impl CodexClient {
         access_token: &str,
         chatgpt_account_id: &str,
         req: &Value,
+        session_id: &str,
     ) -> Result<reqwest::Response, SendError> {
-        let session_id = uuid::Uuid::new_v4().to_string();
         let resp = self
             .http
             .post(format!(
@@ -172,7 +177,7 @@ impl CodexClient {
             .header("chatgpt-account-id", chatgpt_account_id)
             .header("OpenAI-Beta", "responses=experimental")
             .header("originator", self.cfg.originator.clone())
-            .header("session_id", session_id.clone())
+            .header("session_id", session_id)
             .header("session-id", session_id)
             .header("Accept", "text/event-stream")
             .json(req)

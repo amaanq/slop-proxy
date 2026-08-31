@@ -56,6 +56,21 @@ CREATE TABLE usage_log (
 CREATE INDEX idx_usage_ts ON usage_log(ts);
 CREATE INDEX idx_usage_user_ts ON usage_log(user, ts);
 CREATE INDEX idx_usage_account_ts ON usage_log(account_id, ts);
+"#,
+r#"
+ALTER TABLE api_tokens ADD COLUMN request_limit INTEGER;
+ALTER TABLE api_tokens ADD COLUMN token_limit INTEGER;
+ALTER TABLE api_tokens ADD COLUMN window_seconds INTEGER NOT NULL DEFAULT 3600;
+ALTER TABLE api_tokens ADD COLUMN slowdown_ms INTEGER NOT NULL DEFAULT 0;
+
+CREATE TABLE api_meter (
+  id INTEGER PRIMARY KEY,
+  token_id INTEGER NOT NULL REFERENCES api_tokens(id),
+  ts_ms INTEGER NOT NULL,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX idx_api_meter_token_ts ON api_meter(token_id, ts_ms);
 "#];
 
 impl Db {

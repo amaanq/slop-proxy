@@ -36,6 +36,7 @@ pub async fn messages(
     let est_input = count_tokens::estimate(&upstream_req);
 
     let record = UsageRecord {
+        meter_id: Some(auth.meter_id),
         token_id: Some(auth.token_id),
         user: auth.user.clone(),
         dialect: "anthropic",

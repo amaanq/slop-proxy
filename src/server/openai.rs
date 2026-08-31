@@ -37,6 +37,7 @@ pub async fn chat_completions(
     upstream_req.prompt_cache_key = Some(cache_key(&auth.user, &upstream_req));
 
     let record = UsageRecord {
+        meter_id: Some(auth.meter_id),
         token_id: Some(auth.token_id),
         user: auth.user.clone(),
         dialect: "openai",
@@ -225,6 +226,7 @@ pub async fn responses_passthrough(
     }
 
     let record = UsageRecord {
+        meter_id: Some(auth.meter_id),
         token_id: Some(auth.token_id),
         user: auth.user.clone(),
         dialect: "responses",

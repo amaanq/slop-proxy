@@ -87,11 +87,36 @@ pub enum TokenCommand {
     Create {
         #[arg(long)]
         user: String,
+        /// Maximum requests in each rolling window
+        #[arg(long)]
+        requests: Option<i64>,
+        /// Maximum input plus output tokens in each rolling window
+        #[arg(long)]
+        tokens: Option<i64>,
+        #[arg(long, default_value_t = 3600)]
+        window_seconds: i64,
+        /// Delay every admitted request by this many milliseconds
+        #[arg(long, default_value_t = 0)]
+        slowdown_ms: i64,
     },
     /// List issued tokens
     List,
     /// Revoke a token by id or prefix
     Revoke { token: String },
+    /// Replace limits for a token id or prefix; omitted limits are unlimited
+    Limits {
+        token: String,
+        #[arg(long)]
+        requests: Option<i64>,
+        #[arg(long)]
+        tokens: Option<i64>,
+        #[arg(long, default_value_t = 3600)]
+        window_seconds: i64,
+        #[arg(long, default_value_t = 0)]
+        slowdown_ms: i64,
+    },
+    /// Show metered usage for a token's current rolling window
+    Usage { token: String },
 }
 
 #[derive(Subcommand)]
@@ -119,9 +144,29 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
             AccountsCommand::Remove { account } => accounts_remove(&db, &account).await,
         },
         Command::Token { command } => match command {
-            TokenCommand::Create { user } => token_create(&db, &user).await,
+            TokenCommand::Create {
+                user,
+                requests,
+                tokens,
+                window_seconds,
+                slowdown_ms,
+            } => {
+                let limits = token_limits(requests, tokens, window_seconds, slowdown_ms)?;
+                token_create(&db, &user, &limits).await
+            }
             TokenCommand::List => token_list(&db).await,
             TokenCommand::Revoke { token } => token_revoke(&db, &token).await,
+            TokenCommand::Limits {
+                token,
+                requests,
+                tokens,
+                window_seconds,
+                slowdown_ms,
+            } => {
+                let limits = token_limits(requests, tokens, window_seconds, slowdown_ms)?;
+                token_set_limits(&db, &token, &limits).await
+            }
+            TokenCommand::Usage { token } => token_usage(&db, &token).await,
         },
         Command::Serve { bind } => {
             let bind = bind.unwrap_or_else(|| cfg.bind.clone());
@@ -185,9 +230,10 @@ async fn accounts_remove(db: &Db, account: &str) -> Result<()> {
     Ok(())
 }
 
-async fn token_create(db: &Db, user: &str) -> Result<()> {
+async fn token_create(db: &Db, user: &str, limits: &crate::db::tokens::TokenLimits) -> Result<()> {
     let (raw, prefix) = crate::db::tokens::generate();
-    db.create_token(user, &raw, &prefix).await?;
+    let id = db.create_token(user, &raw, &prefix).await?;
+    db.set_token_limits(&id.to_string(), limits).await?;
     println!("token for {user}: {raw}");
     println!("(shown once; only a hash is stored)");
     Ok(())
@@ -202,6 +248,10 @@ async fn token_list(db: &Db) -> Result<()> {
         created_at: i64,
         revoked: bool,
         revoked_at: Option<i64>,
+        request_limit: Option<i64>,
+        token_limit: Option<i64>,
+        window_seconds: i64,
+        slowdown_ms: i64,
     }
 
     let tokens = db.list_tokens().await?;
@@ -214,9 +264,60 @@ async fn token_list(db: &Db) -> Result<()> {
             created_at: t.created_at,
             revoked: t.revoked_at.is_some(),
             revoked_at: t.revoked_at,
+            request_limit: t.limits.requests,
+            token_limit: t.limits.tokens,
+            window_seconds: t.limits.window_seconds,
+            slowdown_ms: t.limits.slowdown_ms,
         })
         .collect();
     println!("{}", serde_json::to_string_pretty(&rows)?);
+    Ok(())
+}
+
+fn token_limits(
+    requests: Option<i64>,
+    tokens: Option<i64>,
+    window_seconds: i64,
+    slowdown_ms: i64,
+) -> Result<crate::db::tokens::TokenLimits> {
+    if requests.is_some_and(|v| v <= 0) {
+        bail!("--requests must be greater than zero");
+    }
+    if tokens.is_some_and(|v| v <= 0) {
+        bail!("--tokens must be greater than zero");
+    }
+    if window_seconds <= 0 {
+        bail!("--window-seconds must be greater than zero");
+    }
+    if slowdown_ms < 0 {
+        bail!("--slowdown-ms cannot be negative");
+    }
+    Ok(crate::db::tokens::TokenLimits {
+        requests,
+        tokens,
+        window_seconds,
+        slowdown_ms,
+    })
+}
+
+async fn token_set_limits(
+    db: &Db,
+    token: &str,
+    limits: &crate::db::tokens::TokenLimits,
+) -> Result<()> {
+    if db.set_token_limits(token, limits).await? == 0 {
+        bail!("no token matched {token:?}");
+    }
+    println!("updated limits for {token}");
+    Ok(())
+}
+
+async fn token_usage(db: &Db, token: &str) -> Result<()> {
+    let usage = db
+        .token_meter(token)
+        .await?
+        .with_context(|| format!("no token matched {token:?}"))?;
+    println!("{}", serde_json::to_string_pretty(&usage)?);
     Ok(())
 }
 

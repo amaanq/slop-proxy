@@ -86,21 +86,20 @@ impl AnthropicPool {
     async fn ranked(&self, session_key: &str, prefer_trusted: bool) -> Vec<Arc<Slot>> {
         let mut scored = Vec::new();
         for slot in self.slots.list().await {
-            let strained = self
-                .slots
-                .usage_of(&slot)
-                .await
-                .is_some_and(|u| u.locked || u.peak() >= self.soft_limit);
+            let strained = self.slots.is_strained(&slot, self.soft_limit).await;
             let mut h = hmac_sha256::Hash::new();
             h.update(session_key.as_bytes());
             h.update(slot.id.to_le_bytes());
             let d = h.finalize();
             scored.push((u64::from_le_bytes(d[..8].try_into().unwrap()), strained, slot));
         }
+        // Strain outranks the trust preference: an account with capacity left
+        // beats a preferred one that is nearly spent, since the preference is
+        // about reserving scarce capacity rather than guaranteeing it.
         scored.sort_by_key(|(score, strained, slot)| {
             (
-                std::cmp::Reverse(slot.trusted == prefer_trusted),
                 *strained,
+                std::cmp::Reverse(slot.trusted == prefer_trusted),
                 std::cmp::Reverse(*score),
             )
         });
@@ -261,6 +260,36 @@ mod tests {
             .await;
         let after = pool.ranked(key, false).await;
         assert_ne!(after[0].id, fresh.id, "locked account still ranked first");
+    }
+
+    #[tokio::test]
+    async fn capacity_outranks_the_trust_preference() {
+        let pool = test_pool(&[(1, true), (2, true), (3, false), (4, false)]).await;
+        // Both trusted accounts are nearly spent while the untrusted ones are idle.
+        for slot in pool.slots.list().await {
+            if slot.trusted {
+                pool.slots
+                    .note_usage(
+                        &slot,
+                        AccountUsage {
+                            windows: vec![UsageWindow {
+                                name: "5h".into(),
+                                utilization: 0.95,
+                                resets_at: None,
+                            }],
+                            locked: false,
+                            observed_at: 0,
+                        },
+                    )
+                    .await;
+            }
+        }
+        let order = pool.ranked("session-a", true).await;
+        assert!(
+            !order[0].trusted,
+            "a spent trusted account was preferred over an idle untrusted one"
+        );
+        assert!(order[2].trusted && order[3].trusted, "spent accounts should sort last");
     }
 
     #[tokio::test]

@@ -105,6 +105,10 @@ impl CodexClient {
         resp.json().await.map_err(|e| e.to_string())
     }
 
+    pub fn soft_utilization_limit(&self) -> f64 {
+        self.cfg.soft_utilization_limit
+    }
+
     pub fn models_url(&self) -> String {
         format!(
             "{}/models?client_version={}",

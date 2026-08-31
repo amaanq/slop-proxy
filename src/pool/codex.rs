@@ -15,11 +15,13 @@ pub struct CodexPool {
     slots: Slots,
     cursor: AtomicUsize,
     client: CodexClient,
+    soft_limit: f64,
 }
 
 impl CodexPool {
     pub async fn load(db: Db, client: CodexClient) -> eyre::Result<Self> {
         Ok(Self {
+            soft_limit: client.soft_utilization_limit(),
             slots: Slots::load(db, Provider::Codex).await?,
             cursor: AtomicUsize::new(0),
             client,
@@ -172,20 +174,30 @@ impl CodexPool {
         }
     }
 
-    /// Accounts matching the token's trusted preference are tried first, so
-    /// ordinary traffic spends the untrusted accounts and only spills onto
-    /// the scarce trusted ones when nothing else is available.
+    /// Candidates are tried with capacity ahead of preference, so an account
+    /// with room left beats a preferred one that is nearly spent, and only
+    /// then does the token's trusted preference break the tie.
     async fn next_available(&self, prefer_trusted: bool) -> Option<Arc<Slot>> {
-        let (preferred, rest): (Vec<_>, Vec<_>) = self
-            .slots
-            .list()
-            .await
-            .into_iter()
-            .partition(|s| s.trusted == prefer_trusted);
-        if let Some(slot) = self.claim_round_robin(&preferred).await {
-            return Some(slot);
+        let mut fresh = Vec::new();
+        let mut strained = Vec::new();
+        for slot in self.slots.list().await {
+            if self.slots.is_strained(&slot, self.soft_limit).await {
+                strained.push(slot);
+            } else {
+                fresh.push(slot);
+            }
         }
-        self.claim_round_robin(&rest).await
+        for group in [fresh, strained] {
+            let (preferred, rest): (Vec<_>, Vec<_>) = group
+                .into_iter()
+                .partition(|s| s.trusted == prefer_trusted);
+            for candidates in [preferred, rest] {
+                if let Some(slot) = self.claim_round_robin(&candidates).await {
+                    return Some(slot);
+                }
+            }
+        }
+        None
     }
 
     async fn claim_round_robin(&self, slots: &[Arc<Slot>]) -> Option<Arc<Slot>> {

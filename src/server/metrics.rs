@@ -114,6 +114,22 @@ fn render_accounts(out: &mut String, accounts: &[AccountSnapshot]) {
     }
     gauge_header(
         out,
+        "slop_account_usage_age_seconds",
+        "Age of the quota sample. Codex only reports quota on a served \
+         response, so an idle account's figures stop advancing",
+    );
+    for a in accounts {
+        let Some(usage) = &a.usage else { continue };
+        line(
+            out,
+            "slop_account_usage_age_seconds",
+            a,
+            &[],
+            (now - usage.observed_at).max(0) as f64,
+        );
+    }
+    gauge_header(
+        out,
         "slop_account_locked",
         "1 when the provider has locked the account out until a window resets",
     );

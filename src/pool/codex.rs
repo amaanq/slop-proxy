@@ -188,6 +188,7 @@ fn usage_from_headers(headers: &reqwest::header::HeaderMap) -> Option<AccountUsa
     (!windows.is_empty()).then_some(AccountUsage {
         windows,
         locked: false,
+        observed_at: 0,
     })
 }
 

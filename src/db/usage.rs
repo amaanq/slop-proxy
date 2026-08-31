@@ -17,6 +17,7 @@ pub struct UsageRecord {
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub cache_read_tokens: i64,
+    pub cache_write_tokens: i64,
     pub reasoning_tokens: i64,
     pub status: i64,
     pub error_kind: Option<String>,
@@ -31,6 +32,7 @@ pub struct UsageAgg {
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub cache_read_tokens: i64,
+    pub cache_write_tokens: i64,
     pub reasoning_tokens: i64,
 }
 
@@ -73,8 +75,8 @@ impl Db {
         let tx = conn.transaction()?;
         tx.execute(
             "INSERT INTO usage_log (token_id, user, account_id, dialect, requested_model, upstream_model,
-               input_tokens, output_tokens, cache_read_tokens, reasoning_tokens, status, error_kind, duration_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+               input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, status, error_kind, duration_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 r.token_id,
                 r.user,
@@ -85,6 +87,7 @@ impl Db {
                 r.input_tokens,
                 r.output_tokens,
                 r.cache_read_tokens,
+                r.cache_write_tokens,
                 r.reasoning_tokens,
                 r.status,
                 r.error_kind,
@@ -209,7 +212,8 @@ impl Db {
         let conn = self.0.lock().await;
         let agg = conn.query_row(
             "SELECT COUNT(*), SUM(status >= 400), COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
-                    COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(reasoning_tokens),0)
+                    COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(cache_write_tokens),0),
+                    COALESCE(SUM(reasoning_tokens),0)
              FROM usage_log WHERE ts >= ?1 AND ts < ?2",
             params![since, until],
             |r| {
@@ -220,7 +224,8 @@ impl Db {
                     input_tokens: r.get(2)?,
                     output_tokens: r.get(3)?,
                     cache_read_tokens: r.get(4)?,
-                    reasoning_tokens: r.get(5)?,
+                    cache_write_tokens: r.get(5)?,
+                    reasoning_tokens: r.get(6)?,
                 })
             },
         )?;
@@ -238,7 +243,8 @@ impl Db {
         let conn = self.0.lock().await;
         let sql = format!(
             "SELECT {key_expr} AS k, COUNT(*), SUM(u.status >= 400), COALESCE(SUM(u.input_tokens),0),
-                    COALESCE(SUM(u.output_tokens),0), COALESCE(SUM(u.cache_read_tokens),0), COALESCE(SUM(u.reasoning_tokens),0)
+                    COALESCE(SUM(u.output_tokens),0), COALESCE(SUM(u.cache_read_tokens),0),
+                    COALESCE(SUM(u.cache_write_tokens),0), COALESCE(SUM(u.reasoning_tokens),0)
              FROM usage_log u WHERE u.ts >= ?1 AND u.ts < ?2
              GROUP BY k ORDER BY SUM(u.input_tokens) + SUM(u.output_tokens) DESC"
         );
@@ -251,7 +257,8 @@ impl Db {
                 input_tokens: r.get(3)?,
                 output_tokens: r.get(4)?,
                 cache_read_tokens: r.get(5)?,
-                reasoning_tokens: r.get(6)?,
+                cache_write_tokens: r.get(6)?,
+                reasoning_tokens: r.get(7)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -275,6 +282,7 @@ pub enum UsageDim {
 pub struct MetricsRow {
     pub user: String,
     pub account: String,
+    pub provider: String,
     pub model: String,
     pub dialect: String,
     pub requests: i64,
@@ -282,6 +290,7 @@ pub struct MetricsRow {
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub cache_read_tokens: i64,
+    pub cache_write_tokens: i64,
     pub reasoning_tokens: i64,
 }
 
@@ -294,23 +303,28 @@ impl Db {
             "SELECT u.user,
                     COALESCE((SELECT COALESCE(a.label, a.email, 'account#' || a.id)
                               FROM accounts a WHERE a.id = u.account_id), 'none') AS account,
+                    COALESCE((SELECT a.provider
+                              FROM accounts a WHERE a.id = u.account_id), 'none') AS provider,
                     u.upstream_model, u.dialect, COUNT(*), SUM(u.status >= 400),
                     COALESCE(SUM(u.input_tokens),0), COALESCE(SUM(u.output_tokens),0),
-                    COALESCE(SUM(u.cache_read_tokens),0), COALESCE(SUM(u.reasoning_tokens),0)
-             FROM usage_log u GROUP BY u.user, account, u.upstream_model, u.dialect",
+                    COALESCE(SUM(u.cache_read_tokens),0), COALESCE(SUM(u.cache_write_tokens),0),
+                    COALESCE(SUM(u.reasoning_tokens),0)
+             FROM usage_log u GROUP BY u.user, account, provider, u.upstream_model, u.dialect",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok(MetricsRow {
                 user: r.get(0)?,
                 account: r.get(1)?,
-                model: r.get(2)?,
-                dialect: r.get(3)?,
-                requests: r.get(4)?,
-                errors: r.get::<_, Option<i64>>(5)?.unwrap_or(0),
-                input_tokens: r.get(6)?,
-                output_tokens: r.get(7)?,
-                cache_read_tokens: r.get(8)?,
-                reasoning_tokens: r.get(9)?,
+                provider: r.get(2)?,
+                model: r.get(3)?,
+                dialect: r.get(4)?,
+                requests: r.get(5)?,
+                errors: r.get::<_, Option<i64>>(6)?.unwrap_or(0),
+                input_tokens: r.get(7)?,
+                output_tokens: r.get(8)?,
+                cache_read_tokens: r.get(9)?,
+                cache_write_tokens: r.get(10)?,
+                reasoning_tokens: r.get(11)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)

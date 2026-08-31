@@ -189,7 +189,9 @@ async fn anthropic_streaming_end_to_end() {
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     let totals = db.usage_totals(0, i64::MAX).await.unwrap();
     assert_eq!(totals.requests, 1);
-    assert_eq!(totals.input_tokens, 100);
+    // 100 prompt tokens of which 20 were cached, so 80 are freshly billed.
+    assert_eq!(totals.input_tokens, 80);
+    assert_eq!(totals.cache_read_tokens, 20);
     assert_eq!(totals.output_tokens, 25);
     assert_eq!(totals.reasoning_tokens, 5);
 }
@@ -234,7 +236,7 @@ async fn openai_non_streaming_end_to_end() {
         .await
         .unwrap();
     assert_eq!(by_user[0].key, "alice");
-    assert_eq!(by_user[0].input_tokens, 100);
+    assert_eq!(by_user[0].input_tokens, 80);
 }
 
 #[tokio::test]
@@ -400,8 +402,9 @@ async fn metrics_render_accounts_and_usage() {
     let text = String::from_utf8(bytes.to_vec()).unwrap();
 
     assert!(text.contains("slop_account_status{provider=\"codex\",account=\"test@example.com\"} 0"));
-    assert!(text.contains("slop_requests_total{user=\"alice\",account=\"test@example.com\",model=\"gpt-5-codex\",dialect=\"openai\"} 1"));
-    assert!(text.contains("kind=\"input\"} 100"));
+    assert!(text.contains("slop_requests_total{user=\"alice\",account=\"test@example.com\",provider=\"codex\",model=\"gpt-5-codex\",dialect=\"openai\"} 1"));
+    assert!(text.contains("kind=\"input\"} 80"));
+    assert!(text.contains("kind=\"cache_read\"} 20"));
 }
 
 #[tokio::test]

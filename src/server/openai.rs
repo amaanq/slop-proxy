@@ -11,7 +11,7 @@ use serde_json::Value;
 
 use super::auth::AuthInfo;
 use super::error::{Dialect, pool_error_response, pool_error_status, translation_error};
-use super::{AppState, LogGuard, cache_key, log_error, log_usage};
+use super::{AppState, LogGuard, cache_key, log_error, log_rejected, log_usage};
 use crate::codex::sse::{EventStream, event_stream};
 use crate::codex::types::Usage;
 use crate::db::usage::UsageRecord;
@@ -33,9 +33,13 @@ pub async fn chat_completions(
 ) -> Response {
     let req = match serde_json::from_value::<OpenAiRequest>(body) {
         Ok(r) => r,
-        Err(e) => return translation_error(DIALECT, &format!("invalid request: {e}")),
+        Err(e) => {
+            log_rejected(&state.db, &auth, "openai", "unknown");
+            return translation_error(DIALECT, &format!("invalid request: {e}"));
+        }
     };
     if state.cfg.models.routes_to_anthropic(&req.model) {
+        log_rejected(&state.db, &auth, "openai", &req.model);
         return translation_error(
             DIALECT,
             "this model is relayed to Anthropic and only available on /v1/messages",
@@ -43,7 +47,10 @@ pub async fn chat_completions(
     }
     let mut upstream_req = match openai_req::to_responses(&req, &state.cfg) {
         Ok(r) => r,
-        Err(e) => return translation_error(DIALECT, &e),
+        Err(e) => {
+            log_rejected(&state.db, &auth, "openai", &req.model);
+            return translation_error(DIALECT, &e);
+        }
     };
     upstream_req.prompt_cache_key = Some(cache_key(&auth.user, &upstream_req));
 
@@ -60,7 +67,10 @@ pub async fn chat_completions(
 
     let req_value = match serde_json::to_value(&upstream_req) {
         Ok(v) => v,
-        Err(e) => return translation_error(DIALECT, &format!("serializing request: {e}")),
+        Err(e) => {
+            log_error(&state.db, record, 400, "invalid_request");
+            return translation_error(DIALECT, &format!("serializing request: {e}"));
+        }
     };
     let (account_id, resp) = match state.codex.execute(&req_value, auth.prefer_trusted).await {
         Ok(r) => r,

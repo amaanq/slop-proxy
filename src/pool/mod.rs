@@ -35,6 +35,7 @@ struct SlotState {
     expires_at: Option<i64>,
     status: Status,
     consecutive_fails: u32,
+    utilization: Vec<(String, f64)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -42,6 +43,16 @@ enum Status {
     Active,
     Cooldown { until: i64 },
     Disabled,
+}
+
+/// Point-in-time view of one account for the metrics endpoint.
+pub struct AccountSnapshot {
+    pub provider: Provider,
+    pub display: String,
+    pub status: u8,
+    pub cooldown_seconds: i64,
+    pub consecutive_fails: u32,
+    pub utilization: Vec<(String, f64)>,
 }
 
 /// The per-account state machine shared by both backend pools: cooldown
@@ -82,6 +93,7 @@ impl Slots {
                         expires_at: a.access_expires_at,
                         status,
                         consecutive_fails: 0,
+                        utilization: Vec::new(),
                     }),
                 })
             })
@@ -121,6 +133,35 @@ impl Slots {
 
     pub async fn mark_ok(&self, slot: &Arc<Slot>) {
         slot.state.lock().await.consecutive_fails = 0;
+    }
+
+    pub async fn note_utilization(&self, slot: &Arc<Slot>, utilization: Vec<(String, f64)>) {
+        if !utilization.is_empty() {
+            slot.state.lock().await.utilization = utilization;
+        }
+    }
+
+    pub async fn snapshot(&self) -> Vec<AccountSnapshot> {
+        let now = chrono::Utc::now().timestamp();
+        let mut out = Vec::with_capacity(self.slots.len());
+        for slot in &self.slots {
+            let st = slot.state.lock().await;
+            let (status, cooldown_seconds) = match st.status {
+                Status::Active => (0, 0),
+                Status::Cooldown { until } if until > now => (1, until - now),
+                Status::Cooldown { .. } => (0, 0),
+                Status::Disabled => (2, 0),
+            };
+            out.push(AccountSnapshot {
+                provider: self.provider,
+                display: slot.display.clone(),
+                status,
+                cooldown_seconds,
+                consecutive_fails: st.consecutive_fails,
+                utilization: st.utilization.clone(),
+            });
+        }
+        out
     }
 
     /// Refresh serialization matters: refresh tokens rotate, so two tasks
@@ -234,6 +275,7 @@ pub(crate) fn test_slots(db: Db, provider: Provider, ids: &[i64]) -> Slots {
                         expires_at: None,
                         status: Status::Active,
                         consecutive_fails: 0,
+                        utilization: Vec::new(),
                     }),
                 })
             })

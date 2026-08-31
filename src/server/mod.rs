@@ -1,6 +1,7 @@
 pub mod anthropic;
 pub mod auth;
 pub mod error;
+pub mod metrics;
 pub mod openai;
 pub mod relay;
 #[cfg(test)]
@@ -89,6 +90,21 @@ pub async fn serve(db: Db, cfg: Config, bind: &str) -> Result<()> {
         cfg: Arc::new(cfg),
         models: Arc::new(ModelCache::new()),
     };
+    if let Some(mbind) = state.cfg.metrics_bind.clone() {
+        let mstate = state.clone();
+        let listener = tokio::net::TcpListener::bind(&mbind)
+            .await
+            .with_context(|| format!("binding metrics listener {mbind}"))?;
+        tracing::info!("metrics on http://{mbind}/metrics");
+        tokio::spawn(async move {
+            let app = Router::new()
+                .route("/metrics", get(metrics::metrics))
+                .with_state(mstate);
+            if let Err(e) = axum::serve(listener, app).await {
+                tracing::error!("metrics listener failed: {e}");
+            }
+        });
+    }
     let app = router(state);
 
     let listener = tokio::net::TcpListener::bind(bind)

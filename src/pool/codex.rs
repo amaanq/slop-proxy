@@ -38,6 +38,10 @@ impl CodexPool {
         &self.client
     }
 
+    pub async fn snapshot(&self) -> Vec<super::AccountSnapshot> {
+        self.slots.snapshot().await
+    }
+
     /// Fresh (access_token, account_id) for any active account, for
     /// non-completion calls like the models listing.
     pub async fn any_active_credentials(&self) -> Option<(String, String)> {

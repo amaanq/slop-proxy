@@ -158,10 +158,15 @@ pub async fn count_tokens(
         Ok(r) => r,
         Err(e) => return translation_error(DIALECT, &format!("invalid request: {e}")),
     };
+    #[derive(serde::Serialize)]
+    struct TokenCount {
+        input_tokens: i64,
+    }
+
     match anthropic_req::to_responses(&req, &state.cfg) {
-        Ok(upstream_req) => Json(serde_json::json!({
-            "input_tokens": count_tokens::estimate(&upstream_req)
-        }))
+        Ok(upstream_req) => Json(TokenCount {
+            input_tokens: count_tokens::estimate(&upstream_req),
+        })
         .into_response(),
         Err(e) => translation_error(DIALECT, &e),
     }

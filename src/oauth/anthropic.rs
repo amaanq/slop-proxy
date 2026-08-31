@@ -3,7 +3,6 @@ use base64::Engine;
 use rand::RngCore;
 use reqwest::Url;
 use serde::Deserialize;
-use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use super::TokenSet;
@@ -83,16 +82,26 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
         .split_once('#')
         .unwrap_or((pasted, verifier.as_str()));
 
+    #[derive(serde::Serialize)]
+    struct ExchangeRequest<'a> {
+        grant_type: &'a str,
+        code: &'a str,
+        state: &'a str,
+        client_id: &'a str,
+        redirect_uri: &'a str,
+        code_verifier: &'a str,
+    }
+
     let resp = super::http()
         .post(TOKEN_URL)
-        .json(&json!({
-            "grant_type": "authorization_code",
-            "code": code,
-            "state": state,
-            "client_id": CLIENT_ID,
-            "redirect_uri": REDIRECT_URI,
-            "code_verifier": verifier,
-        }))
+        .json(&ExchangeRequest {
+            grant_type: "authorization_code",
+            code,
+            state,
+            client_id: CLIENT_ID,
+            redirect_uri: REDIRECT_URI,
+            code_verifier: &verifier,
+        })
         .send()
         .await
         .context("token exchange request failed")?;
@@ -134,13 +143,20 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
 }
 
 pub async fn refresh(refresh_token: &str) -> Result<TokenSet, RefreshError> {
+    #[derive(serde::Serialize)]
+    struct RefreshRequest<'a> {
+        grant_type: &'a str,
+        refresh_token: &'a str,
+        client_id: &'a str,
+    }
+
     let resp = super::http()
         .post(TOKEN_URL)
-        .json(&json!({
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-            "client_id": CLIENT_ID,
-        }))
+        .json(&RefreshRequest {
+            grant_type: "refresh_token",
+            refresh_token,
+            client_id: CLIENT_ID,
+        })
         .send()
         .await
         .map_err(|e| RefreshError::Transient(e.to_string()))?;

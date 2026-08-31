@@ -7,7 +7,7 @@ use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use super::auth::AuthInfo;
 use super::error::{Dialect, pool_error_response, pool_error_status, translation_error};
@@ -158,40 +158,57 @@ pub async fn models(State(state): State<AppState>) -> Response {
         },
     };
 
+    #[derive(serde::Serialize)]
+    struct ModelEntry {
+        id: String,
+        object: &'static str,
+        created: i64,
+        owned_by: &'static str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        context_window: Option<i64>,
+    }
+
+    #[derive(serde::Serialize)]
+    struct ModelList {
+        object: &'static str,
+        data: Vec<ModelEntry>,
+    }
+
     let data = match live {
         Some(models) => models
             .iter()
             .filter(|m| m.listed())
-            .map(|m| {
-                json!({
-                    "id": m.slug,
-                    "object": "model",
-                    "created": created,
-                    "owned_by": "openai",
-                    "context_window": m.context_window
-                })
+            .map(|m| ModelEntry {
+                id: m.slug.clone(),
+                object: "model",
+                created,
+                owned_by: "openai",
+                context_window: m.context_window,
             })
-            .collect::<Vec<Value>>(),
+            .collect(),
         None => {
             let mut ids = state.cfg.models.known.clone();
             let default = &state.cfg.models.default;
             if !default.is_empty() && !ids.contains(default) {
                 ids.push(default.clone());
             }
-            ids.iter()
-                .map(|id| {
-                    json!({
-                        "id": id,
-                        "object": "model",
-                        "created": created,
-                        "owned_by": "slop-proxy"
-                    })
+            ids.into_iter()
+                .map(|id| ModelEntry {
+                    id,
+                    object: "model",
+                    created,
+                    owned_by: "slop-proxy",
+                    context_window: None,
                 })
-                .collect::<Vec<Value>>()
+                .collect()
         }
     };
 
-    Json(json!({ "object": "list", "data": data })).into_response()
+    Json(ModelList {
+        object: "list",
+        data,
+    })
+    .into_response()
 }
 
 pub async fn responses_passthrough(
@@ -254,7 +271,7 @@ pub async fn responses_passthrough(
         // Upstream only streams; recover the final response object from the
         // terminal event for non-streaming clients.
         let mut raw_events = resp.bytes_stream().eventsource();
-        let mut final_response: Option<Value> = None;
+        let mut final_response = Option::<Value>::None;
         while let Some(ev) = raw_events.next().await {
             let Ok(ev) = ev else { break };
             let Ok(v) = serde_json::from_str::<Value>(&ev.data) else {
@@ -266,9 +283,10 @@ pub async fn responses_passthrough(
                 | Some("response.failed") => {
                     if let Some(r) = v.get("response") {
                         if let Some(u) = r.get("usage")
-                            && let Ok(u) = serde_json::from_value(u.clone()) {
-                                capture.record(&u);
-                            }
+                            && let Ok(u) = serde_json::from_value(u.clone())
+                        {
+                            capture.record(&u);
+                        }
                         final_response = Some(r.clone());
                     }
                 }
@@ -302,10 +320,11 @@ fn relay_stream(resp: reqwest::Response, guard: LogGuard, capture: UsageCapture)
                     if (ev.event == "response.completed"
                         || ev.data.contains("\"response.completed\""))
                         && let Ok(v) = serde_json::from_str::<Value>(&ev.data)
-                            && let Some(usage) = v.get("response").and_then(|r| r.get("usage"))
-                                && let Ok(u) = serde_json::from_value(usage.clone()) {
-                                    capture.record(&u);
-                                }
+                        && let Some(usage) = v.get("response").and_then(|r| r.get("usage"))
+                        && let Ok(u) = serde_json::from_value(usage.clone())
+                    {
+                        capture.record(&u);
+                    }
                     let mut out = Event::default().data(ev.data);
                     if !ev.event.is_empty() && ev.event != "message" {
                         out = out.event(ev.event);

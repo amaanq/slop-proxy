@@ -1,7 +1,7 @@
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use serde_json::json;
+use serde::Serialize;
 
 use crate::pool::PoolError;
 
@@ -11,18 +11,52 @@ pub enum Dialect {
     OpenAi,
 }
 
+#[derive(Serialize)]
+struct ErrorDetail<'a> {
+    #[serde(rename = "type")]
+    err_type: &'a str,
+    message: &'a str,
+}
+
+#[derive(Serialize)]
+struct AnthropicErrorBody<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    error: ErrorDetail<'a>,
+}
+
+#[derive(Serialize)]
+struct OpenAiErrorDetail<'a> {
+    #[serde(flatten)]
+    detail: ErrorDetail<'a>,
+    code: Option<&'a str>,
+    param: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct OpenAiErrorBody<'a> {
+    error: OpenAiErrorDetail<'a>,
+}
+
 pub fn error_response(dialect: Dialect, status: u16, err_type: &str, message: &str) -> Response {
     let status = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let detail = ErrorDetail { err_type, message };
     let body = match dialect {
-        Dialect::Anthropic => json!({
-            "type": "error",
-            "error": {"type": err_type, "message": message}
-        }),
-        Dialect::OpenAi => json!({
-            "error": {"type": err_type, "message": message, "code": null, "param": null}
-        }),
+        Dialect::Anthropic => Json(AnthropicErrorBody {
+            kind: "error",
+            error: detail,
+        })
+        .into_response(),
+        Dialect::OpenAi => Json(OpenAiErrorBody {
+            error: OpenAiErrorDetail {
+                detail,
+                code: None,
+                param: None,
+            },
+        })
+        .into_response(),
     };
-    (status, Json(body)).into_response()
+    (status, body).into_response()
 }
 
 pub fn pool_error_response(dialect: Dialect, err: PoolError) -> Response {

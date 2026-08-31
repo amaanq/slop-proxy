@@ -9,27 +9,35 @@ use std::sync::{Arc, Mutex};
 
 use base64::Engine;
 use futures_util::StreamExt;
-use serde_json::json;
+use serde::{Deserialize, Serialize};
 
 use crate::codex::sse::EventStream;
-use crate::codex::types::{OutputItem, ResponsesEvent, SummaryPart, Usage};
+use crate::codex::types::{OutputContentPart, OutputItem, ResponsesEvent, SummaryPart, Usage};
+
+#[derive(Serialize, Deserialize)]
+struct SignaturePayload {
+    id: Option<String>,
+    ec: Option<String>,
+}
 
 /// Anthropic thinking-block signatures are opaque round-tripped strings, so we
 /// smuggle the Responses reasoning item id + encrypted_content through them.
 pub fn encode_signature(id: Option<&str>, encrypted_content: &str) -> String {
-    let payload = json!({ "id": id, "ec": encrypted_content }).to_string();
+    let payload = SignaturePayload {
+        id: id.map(String::from),
+        ec: Some(encrypted_content.to_string()),
+    };
+    let payload = serde_json::to_string(&payload).unwrap_or_default();
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload)
 }
 
 pub fn decode_signature(sig: &str) -> (Option<String>, Option<String>) {
     if let Ok(bytes) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(sig)
-        && let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-            let id = v.get("id").and_then(|x| x.as_str()).map(String::from);
-            let ec = v.get("ec").and_then(|x| x.as_str()).map(String::from);
-            if ec.is_some() {
-                return (id, ec);
-            }
-        }
+        && let Ok(p) = serde_json::from_slice::<SignaturePayload>(&bytes)
+        && p.ec.is_some()
+    {
+        return (p.id, p.ec);
+    }
     (None, Some(sig.to_string()))
 }
 
@@ -125,10 +133,9 @@ pub async fn aggregate(mut stream: EventStream, capture: &UsageCapture) -> Aggre
                     let text = content
                         .unwrap_or_default()
                         .iter()
-                        .filter_map(|p| {
-                            (p.get("type")?.as_str()? == "output_text")
-                                .then(|| p.get("text")?.as_str().map(String::from))
-                                .flatten()
+                        .filter_map(|p| match p {
+                            OutputContentPart::OutputText { text } => Some(text.as_str()),
+                            OutputContentPart::Other => None,
                         })
                         .collect::<Vec<_>>()
                         .join("");

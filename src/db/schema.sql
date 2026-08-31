@@ -18,13 +18,26 @@ CREATE TABLE IF NOT EXISTS accounts (
 );
 
 CREATE TABLE IF NOT EXISTS api_tokens (
-  id           INTEGER PRIMARY KEY,
-  user         TEXT    NOT NULL,
-  token_hash   BLOB    NOT NULL UNIQUE,
-  token_prefix TEXT    NOT NULL,
-  created_at   INTEGER NOT NULL DEFAULT (unixepoch()),
-  revoked_at   INTEGER
+  id             INTEGER PRIMARY KEY,
+  user           TEXT    NOT NULL,
+  token_hash     BLOB    NOT NULL UNIQUE,
+  token_prefix   TEXT    NOT NULL,
+  request_limit  INTEGER,
+  token_limit    INTEGER,
+  window_seconds INTEGER NOT NULL DEFAULT 3600,
+  slowdown_ms    INTEGER NOT NULL DEFAULT 0,
+  created_at     INTEGER NOT NULL DEFAULT (unixepoch()),
+  revoked_at     INTEGER
 );
+
+CREATE TABLE IF NOT EXISTS api_meter (
+  id            INTEGER PRIMARY KEY,
+  token_id      INTEGER NOT NULL REFERENCES api_tokens(id),
+  ts_ms         INTEGER NOT NULL,
+  input_tokens  INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_api_meter_token_ts ON api_meter(token_id, ts_ms);
 
 CREATE TABLE IF NOT EXISTS usage_log (
   id                INTEGER PRIMARY KEY,

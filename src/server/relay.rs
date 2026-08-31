@@ -106,6 +106,7 @@ pub async fn messages(
     peek: Peek,
 ) -> Response {
     let record = UsageRecord {
+        meter_id: Some(auth.meter_id),
         token_id: Some(auth.token_id),
         user: auth.user.clone(),
         dialect: "anthropic",

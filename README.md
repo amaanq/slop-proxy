@@ -51,3 +51,24 @@ Point a client at it with the issued token:
 ANTHROPIC_BASE_URL=http://[::1]:8484 ANTHROPIC_API_KEY=sp-... claude
 OPENAI_BASE_URL=http://[::1]:8484/v1 OPENAI_API_KEY=sp-...
 ```
+
+## Per-token limits and metering
+
+Each issued token can carry rolling-window limits. Omitted request or token
+limits are unlimited. Token usage counts input plus output tokens as settled
+after each request.
+
+```sh
+# 60 requests and 100k tokens per hour, each admitted request delayed 250ms
+slop-proxy token create --user alice \
+  --requests 60 --tokens 100000 --window-seconds 3600 --slowdown-ms 250
+
+slop-proxy token limits 1 --requests 120 --window-seconds 3600
+slop-proxy token usage 1
+```
+
+Admissions persist before upstream dispatch, so concurrent requests cannot
+race past the request limit. A request that takes the token total over its
+limit completes, and later requests get `429` until usage rolls out of the
+window. Responses carry `x-ratelimit-*` headers, and limit errors include
+`retry-after`.

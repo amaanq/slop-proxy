@@ -49,7 +49,7 @@ impl CodexPool {
     /// Fresh (access_token, account_id) for any active account, for
     /// non-completion calls like the models listing.
     pub async fn any_active_credentials(&self) -> Option<(String, String)> {
-        let slot = self.next_available().await?;
+        let slot = self.next_available(false).await?;
         let access = self.slots.fresh_token(&slot, false).await.ok()?;
         Some((access, slot.provider_account_id.clone()))
     }
@@ -62,7 +62,11 @@ impl CodexPool {
         self.client.list_models(&access, &account_id).await
     }
 
-    pub async fn execute(&self, req: &Value) -> Result<(i64, reqwest::Response), PoolError> {
+    pub async fn execute(
+        &self,
+        req: &Value,
+        prefer_trusted: bool,
+    ) -> Result<(i64, reqwest::Response), PoolError> {
         let attempts = self.slots.len().await.min(3);
         if attempts == 0 {
             return Err(PoolError::NoAccounts(Provider::Codex));
@@ -70,7 +74,7 @@ impl CodexPool {
         let mut last_err = Option::<SendError>::None;
 
         for _ in 0..attempts {
-            let Some(slot) = self.next_available().await else {
+            let Some(slot) = self.next_available(prefer_trusted).await else {
                 break;
             };
             let Ok(creds) = self.slots.fresh_token(&slot, false).await else {
@@ -123,8 +127,20 @@ impl CodexPool {
         }
     }
 
-    async fn next_available(&self) -> Option<Arc<Slot>> {
+    async fn next_available(&self, prefer_trusted: bool) -> Option<Arc<Slot>> {
         let slots = self.slots.list().await;
+        if prefer_trusted {
+            let trusted: Vec<_> = slots.iter().filter(|s| s.trusted).cloned().collect();
+            if let Some(slot) = self.claim_round_robin(&trusted).await {
+                return Some(slot);
+            }
+            let rest: Vec<_> = slots.iter().filter(|s| !s.trusted).cloned().collect();
+            return self.claim_round_robin(&rest).await;
+        }
+        self.claim_round_robin(&slots).await
+    }
+
+    async fn claim_round_robin(&self, slots: &[Arc<Slot>]) -> Option<Arc<Slot>> {
         let n = slots.len();
         if n == 0 {
             return None;

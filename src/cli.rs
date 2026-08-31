@@ -79,6 +79,12 @@ pub enum AccountsCommand {
     List,
     /// Remove an account by id or email
     Remove { account: String },
+    /// Mark an account as trusted, or clear the flag with --off
+    Trust {
+        account: String,
+        #[pound(long)]
+        off: bool,
+    },
 }
 
 #[derive(Parse)]
@@ -98,6 +104,9 @@ pub enum TokenCommand {
         /// Delay every admitted request by this many milliseconds
         #[pound(long, default = "0")]
         slowdown_ms: i64,
+        /// Serve this token from trusted accounts when any are available
+        #[pound(long)]
+        prefer_trusted: bool,
     },
     /// List issued tokens
     List,
@@ -114,6 +123,8 @@ pub enum TokenCommand {
         window_seconds: i64,
         #[pound(long, default = "0")]
         slowdown_ms: i64,
+        #[pound(long)]
+        prefer_trusted: bool,
     },
     /// Show metered usage for a token's current rolling window
     Usage { token: String },
@@ -145,6 +156,7 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
         Command::Accounts { command } => match command {
             AccountsCommand::List => accounts_list(&db).await,
             AccountsCommand::Remove { account } => accounts_remove(&db, &account).await,
+            AccountsCommand::Trust { account, off } => accounts_trust(&db, &account, !off).await,
         },
         Command::Token { command } => match command {
             TokenCommand::Create {
@@ -153,8 +165,10 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
                 tokens,
                 window_seconds,
                 slowdown_ms,
+                prefer_trusted,
             } => {
-                let limits = token_limits(requests, tokens, window_seconds, slowdown_ms)?;
+                let limits =
+                    token_limits(requests, tokens, window_seconds, slowdown_ms, prefer_trusted)?;
                 token_create(&db, &user, &limits).await
             }
             TokenCommand::List => token_list(&db).await,
@@ -165,8 +179,10 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
                 tokens,
                 window_seconds,
                 slowdown_ms,
+                prefer_trusted,
             } => {
-                let limits = token_limits(requests, tokens, window_seconds, slowdown_ms)?;
+                let limits =
+                    token_limits(requests, tokens, window_seconds, slowdown_ms, prefer_trusted)?;
                 token_set_limits(&db, &token, &limits).await
             }
             TokenCommand::Usage { token } => token_usage(&db, &token).await,
@@ -193,6 +209,7 @@ async fn accounts_list(db: &Db) -> Result<()> {
     struct AccountRow<'a> {
         id: i64,
         provider: &'a str,
+        trusted: bool,
         email: Option<&'a str>,
         plan_type: Option<&'a str>,
         status: &'a str,
@@ -208,6 +225,7 @@ async fn accounts_list(db: &Db) -> Result<()> {
         .map(|a| AccountRow {
             id: a.id,
             provider: a.provider.as_str(),
+            trusted: a.trusted,
             email: a.email.as_deref(),
             plan_type: a.plan_type.as_deref(),
             status: &a.status,
@@ -219,6 +237,17 @@ async fn accounts_list(db: &Db) -> Result<()> {
         })
         .collect::<Vec<AccountRow>>();
     println!("{}", serde_json::to_string_pretty(&rows)?);
+    Ok(())
+}
+
+async fn accounts_trust(db: &Db, account: &str, trusted: bool) -> Result<()> {
+    if db.set_account_trusted(account, trusted).await? == 0 {
+        bail!("no account matched {account:?}");
+    }
+    println!(
+        "account {account} is now {}",
+        if trusted { "trusted" } else { "untrusted" }
+    );
     Ok(())
 }
 
@@ -245,6 +274,7 @@ fn token_limits(
     tokens: Option<i64>,
     window_seconds: i64,
     slowdown_ms: i64,
+    prefer_trusted: bool,
 ) -> Result<crate::db::tokens::TokenLimits> {
     if requests.is_some_and(|v| v <= 0) {
         bail!("--requests must be greater than zero");
@@ -263,6 +293,7 @@ fn token_limits(
         tokens,
         window_seconds,
         slowdown_ms,
+        prefer_trusted,
     })
 }
 

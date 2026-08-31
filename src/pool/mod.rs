@@ -26,6 +26,7 @@ pub(crate) struct Slot {
     pub id: i64,
     pub provider_account_id: String,
     pub display: String,
+    pub trusted: bool,
     state: Mutex<SlotState>,
 }
 
@@ -284,6 +285,7 @@ fn slot_from_account(a: crate::db::accounts::Account) -> Slot {
     Slot {
         id: a.id,
         provider_account_id: a.provider_account_id,
+        trusted: a.trusted,
         display: a
             .label
             .or(a.email)
@@ -300,16 +302,17 @@ fn slot_from_account(a: crate::db::accounts::Account) -> Slot {
 }
 
 #[cfg(test)]
-pub(crate) fn test_slots(db: Db, provider: Provider, ids: &[i64]) -> Slots {
+pub(crate) fn test_slots(db: Db, provider: Provider, ids: &[(i64, bool)]) -> Slots {
     Slots {
         provider,
         slots: RwLock::new(ids
             .iter()
-            .map(|&id| {
+            .map(|&(id, trusted)| {
                 Arc::new(Slot {
                     id,
                     provider_account_id: format!("acct-{id}"),
                     display: format!("a{id}"),
+                    trusted,
                     state: Mutex::new(SlotState {
                         access_token: "at".into(),
                         refresh_token: "rt".into(),

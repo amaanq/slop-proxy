@@ -120,7 +120,7 @@ pub async fn messages(
     let key = peek.session_key(&body, &auth);
     let (account_id, resp) = match state
         .anthropic
-        .execute("/v1/messages", &body, &hdrs, &key)
+        .execute("/v1/messages", &body, &hdrs, &key, auth.prefer_trusted)
         .await
     {
         Ok(r) => r,
@@ -190,7 +190,7 @@ pub async fn count_tokens(
     let key = peek.session_key(&body, &auth);
     let resp = match state
         .anthropic
-        .execute("/v1/messages/count_tokens", &body, &hdrs, &key)
+        .execute("/v1/messages/count_tokens", &body, &hdrs, &key, auth.prefer_trusted)
         .await
     {
         Ok((_, r)) => r,

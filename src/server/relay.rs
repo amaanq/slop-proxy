@@ -18,6 +18,7 @@ const DIALECT: Dialect = Dialect::Anthropic;
 /// verbatim regardless.
 pub struct Peek {
     pub model: String,
+    pub effort: String,
     user_id: Option<String>,
 }
 
@@ -26,6 +27,12 @@ impl Peek {
         let get = |ptr: &str| body.pointer(ptr).and_then(Value::as_str).map(String::from);
         Self {
             model: get("/model").unwrap_or_default(),
+            // Claude Code sends `effort` only when it is choosing the level
+            // itself; with adaptive thinking on, `thinking.type` is what
+            // carries the same signal.
+            effort: get("/effort")
+                .or_else(|| get("/thinking/type"))
+                .unwrap_or_default(),
             user_id: get("/metadata/user_id"),
         }
     }
@@ -53,7 +60,10 @@ impl Peek {
             let _ = serde_json::to_writer(&mut h, system);
         }
         let d = h.0.finalize();
-        format!("sys-{:016x}", u64::from_le_bytes(d[..8].try_into().unwrap()))
+        format!(
+            "sys-{:016x}",
+            u64::from_le_bytes(d[..8].try_into().unwrap())
+        )
     }
 }
 
@@ -74,8 +84,12 @@ struct RelayUsage {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum RelayEvent {
-    MessageStart { message: MessageEnvelope },
-    MessageDelta { usage: Option<RelayUsage> },
+    MessageStart {
+        message: MessageEnvelope,
+    },
+    MessageDelta {
+        usage: Option<RelayUsage>,
+    },
     MessageStop,
     Error,
     #[serde(other)]
@@ -116,6 +130,7 @@ pub async fn messages(
         dialect: "anthropic",
         requested_model: peek.model.clone(),
         upstream_model: peek.model.clone(),
+        effort: peek.effort.clone(),
         status: 200,
         ..Default::default()
     };
@@ -195,7 +210,13 @@ pub async fn count_tokens(
     let key = peek.session_key(&body, &auth);
     let resp = match state
         .anthropic
-        .execute("/v1/messages/count_tokens", &body, &hdrs, &key, auth.prefer_trusted)
+        .execute(
+            "/v1/messages/count_tokens",
+            &body,
+            &hdrs,
+            &key,
+            auth.prefer_trusted,
+        )
         .await
     {
         Ok((_, r)) => r,

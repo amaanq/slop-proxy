@@ -61,6 +61,11 @@ pub async fn chat_completions(
         dialect: "openai",
         requested_model: req.model.clone(),
         upstream_model: upstream_req.model.clone(),
+        effort: upstream_req
+            .reasoning
+            .as_ref()
+            .map(|r| r.effort.clone())
+            .unwrap_or_default(),
         status: 200,
         ..Default::default()
     };
@@ -290,6 +295,11 @@ pub async fn responses_passthrough(
         dialect: "responses",
         requested_model,
         upstream_model: resolved.model,
+        effort: req
+            .reasoning
+            .as_ref()
+            .and_then(|r| r.effort.clone())
+            .unwrap_or_default(),
         status: 200,
         ..Default::default()
     };

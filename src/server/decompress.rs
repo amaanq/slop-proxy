@@ -6,8 +6,9 @@ use axum::response::Response;
 
 /// Codex zstd-encodes request bodies whenever it talks to the built-in
 /// `openai` provider, and a turn's context is mostly repeated text, so the
-/// wire form runs about a third of the JSON.
-const MAX_BODY: usize = 64 * 1024 * 1024;
+/// wire form runs about a third of the JSON. Agent turns carrying a 200k
+/// token context land well past axum's 2MB default either way.
+pub const MAX_BODY: usize = 64 * 1024 * 1024;
 
 pub async fn zstd_requests(req: Request, next: Next) -> Response {
     let encoded = req

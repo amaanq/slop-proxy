@@ -218,6 +218,7 @@ pub fn router(state: AppState) -> Router {
         .route("/config/codex/config.toml", get(clientcfg::codex_config))
         .route("/v1/responses", post(openai::responses_passthrough))
         .layer(middleware::from_fn(decompress::zstd_requests))
+        .layer(axum::extract::DefaultBodyLimit::max(decompress::MAX_BODY))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_token,

@@ -335,7 +335,8 @@ async fn anthropic_relay_passthrough() {
     let resp = reqwest::Client::new()
         .post(format!("{base}/v1/messages"))
         .header("x-api-key", "sp-test")
-        .header("anthropic-beta", "context-1m-2025-08-07")
+        .header("anthropic-beta", "claude-code-20250219,context-1m-2025-08-07")
+        .header("user-agent", "claude-cli/2.1.252 (external, cli)")
         .json(&body)
         .send()
         .await

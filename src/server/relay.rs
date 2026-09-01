@@ -116,6 +116,27 @@ fn relay_headers(headers: &HeaderMap) -> RelayHeaders {
     }
 }
 
+/// The beta and the user agent Claude Code sends on every call. A request
+/// missing either is some other client wearing an Anthropic API shape.
+fn is_claude_code(headers: &HeaderMap) -> bool {
+    let has = |name: &str, want: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.contains(want))
+    };
+    has("anthropic-beta", "claude-code-") && has("user-agent", "claude-cli/")
+}
+
+fn not_claude_code() -> Response {
+    error_response(
+        DIALECT,
+        403,
+        "permission_error",
+        "this proxy serves Anthropic subscriptions, which only cover Claude Code",
+    )
+}
+
 pub async fn messages(
     state: AppState,
     auth: AuthInfo,
@@ -134,6 +155,11 @@ pub async fn messages(
         status: 200,
         ..Default::default()
     };
+
+    if state.cfg.anthropic.require_claude_code && !is_claude_code(&headers) {
+        log_error(&state.db, record, 403, "not_claude_code");
+        return not_claude_code();
+    }
 
     let hdrs = relay_headers(&headers);
     let key = peek.session_key(&body, &auth);
@@ -206,6 +232,10 @@ pub async fn count_tokens(
     body: Value,
     peek: Peek,
 ) -> Response {
+    if state.cfg.anthropic.require_claude_code && !is_claude_code(&headers) {
+        return not_claude_code();
+    }
+
     let hdrs = relay_headers(&headers);
     let key = peek.session_key(&body, &auth);
     let resp = match state
@@ -306,5 +336,54 @@ fn apply_event(capture: &UsageCapture, ev: RelayEvent) {
             }
         }
         RelayEvent::Other => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::HeaderMap;
+
+    fn headers(pairs: &[(&'static str, &str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(
+                axum::http::HeaderName::from_static(k),
+                v.parse().unwrap(),
+            );
+        }
+        h
+    }
+
+    /// Captured from Claude Code 2.1.252.
+    #[test]
+    fn a_real_claude_code_request_passes() {
+        assert!(super::is_claude_code(&headers(&[
+            (
+                "anthropic-beta",
+                "claude-code-20250219,interleaved-thinking-2025-05-14,context-management-2025-06-27"
+            ),
+            ("user-agent", "claude-cli/2.1.252 (external, cli)"),
+        ])));
+        assert!(super::is_claude_code(&headers(&[
+            ("anthropic-beta", "claude-code-20250219"),
+            ("user-agent", "claude-cli/2.1.252 (external, sdk-cli)"),
+        ])));
+    }
+
+    #[test]
+    fn another_harness_is_refused() {
+        assert!(!super::is_claude_code(&headers(&[])));
+        assert!(!super::is_claude_code(&headers(&[(
+            "user-agent",
+            "claude-cli/2.1.252 (external, cli)"
+        )])));
+        assert!(!super::is_claude_code(&headers(&[(
+            "anthropic-beta",
+            "claude-code-20250219"
+        )])));
+        assert!(!super::is_claude_code(&headers(&[
+            ("anthropic-beta", "oauth-2025-04-20"),
+            ("user-agent", "python-httpx/0.27"),
+        ])));
     }
 }

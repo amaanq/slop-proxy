@@ -44,6 +44,10 @@ struct SlotState {
 #[derive(Debug, Default, Clone)]
 pub struct AccountUsage {
     pub windows: Vec<UsageWindow>,
+    /// Sub-limits for individual models. Held apart from `windows` because
+    /// each is measured against its own allowance, so mixing them in would
+    /// make `peak` report strain the account does not have.
+    pub model_windows: Vec<ModelWindow>,
     /// The provider has stopped serving this account until a window resets,
     /// which is a harder signal than a high fraction.
     pub locked: bool,
@@ -51,6 +55,13 @@ pub struct AccountUsage {
     /// response, so an idle account's figures go stale and a dashboard needs
     /// to know that rather than trusting them.
     pub observed_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModelWindow {
+    pub model: String,
+    pub window: String,
+    pub utilization: f64,
 }
 
 #[derive(Debug, Clone)]

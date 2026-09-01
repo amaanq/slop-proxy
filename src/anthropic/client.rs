@@ -29,12 +29,49 @@ impl Window {
     }
 }
 
+/// A model with a quota of its own, carved out of the account's weekly
+/// allowance. The API names the model inside `scope` rather than in the key,
+/// unlike the codenamed top-level fields, so this survives a model rename.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct Limit {
+    #[serde(default)]
+    pub group: String,
+    #[serde(default)]
+    pub percent: f64,
+    #[serde(default)]
+    pub scope: Option<Scope>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct Scope {
+    #[serde(default)]
+    pub model: Option<ScopedModel>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ScopedModel {
+    #[serde(default)]
+    pub display_name: Option<String>,
+}
+
+impl Limit {
+    fn window_name(&self) -> &'static str {
+        match self.group.as_str() {
+            "session" => "5h",
+            _ => "7d",
+        }
+    }
+
+}
+
 #[derive(Debug, Default, Clone, serde::Deserialize)]
 pub struct Usage {
     #[serde(default)]
     pub five_hour: Option<Window>,
     #[serde(default)]
     pub seven_day: Option<Window>,
+    #[serde(default)]
+    pub limits: Vec<Limit>,
 }
 
 impl Usage {
@@ -49,6 +86,15 @@ impl Usage {
         [("5h", &self.five_hour), ("7d", &self.seven_day)]
             .into_iter()
             .filter_map(|(n, w)| w.as_ref().map(|w| (n, w)))
+    }
+
+    /// Per-model sub-limits, measured against their own allowance rather than
+    /// the account's, so they are reported apart from `windows`.
+    pub fn model_windows(&self) -> impl Iterator<Item = (String, &'static str, f64)> {
+        self.limits.iter().filter_map(|l| {
+            let name = l.scope.as_ref()?.model.as_ref()?.display_name.as_deref()?;
+            Some((name.to_lowercase(), l.window_name(), l.percent / 100.0))
+        })
     }
 }
 
@@ -141,5 +187,47 @@ impl AnthropicClient {
             429 => SendError::RateLimited { retry_after, body },
             s => SendError::Upstream { status: s, body },
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Trimmed from a live `/api/oauth/usage` response.
+    const USAGE: &str = r#"{
+      "five_hour": {"utilization": 3.0, "resets_at": "2026-09-01T08:30:00.007788+00:00"},
+      "seven_day": {"utilization": 89.0, "resets_at": "2026-09-02T19:00:00.007811+00:00"},
+      "seven_day_opus": null,
+      "nimbus_quill": {"utilization": 0.0},
+      "limits": [
+        {"kind": "session", "group": "session", "percent": 3, "scope": null},
+        {"kind": "weekly_all", "group": "weekly", "percent": 89, "scope": null},
+        {"kind": "weekly_scoped", "group": "weekly", "percent": 63,
+         "scope": {"model": {"id": null, "display_name": "Fable"}, "surface": null}}
+      ]
+    }"#;
+
+    #[test]
+    fn account_windows_ignore_the_scoped_ones() {
+        let u: Usage = serde_json::from_str(USAGE).unwrap();
+        let got: Vec<_> = u.windows().map(|(n, w)| (n, w.utilization)).collect();
+        assert_eq!(got, vec![("5h", 3.0), ("7d", 89.0)]);
+    }
+
+    #[test]
+    fn a_scoped_model_is_named_from_its_scope() {
+        let u: Usage = serde_json::from_str(USAGE).unwrap();
+        let got: Vec<_> = u.model_windows().collect();
+        assert_eq!(got, vec![("fable".to_string(), "7d", 0.63)]);
+    }
+
+    /// The codenamed top-level fields come and go, so a payload without the
+    /// array must not start reporting sub-limits that are not there.
+    #[test]
+    fn a_payload_without_limits_reports_none() {
+        let u: Usage = serde_json::from_str(r#"{"seven_day": {"utilization": 10.0}}"#).unwrap();
+        assert_eq!(u.model_windows().count(), 0);
+        assert_eq!(u.windows().count(), 1);
     }
 }

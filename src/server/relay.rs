@@ -128,7 +128,20 @@ fn is_claude_code(headers: &HeaderMap) -> bool {
     has("anthropic-beta", "claude-code-") && has("user-agent", "claude-cli/")
 }
 
-fn not_claude_code() -> Response {
+/// Logs what the caller actually sent, because the payload alone cannot tell
+/// a refused harness apart from a Claude Code request missing its headers.
+fn not_claude_code(user: &str, headers: &HeaderMap) -> Response {
+    let show = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("<absent>")
+    };
+    tracing::warn!(
+        "refusing non-claude-code request from {user}: user-agent={:?} anthropic-beta={:?}",
+        show("user-agent"),
+        show("anthropic-beta"),
+    );
     error_response(
         DIALECT,
         403,
@@ -158,7 +171,7 @@ pub async fn messages(
 
     if state.cfg.anthropic.require_claude_code && !is_claude_code(&headers) {
         log_error(&state.db, record, 403, "not_claude_code");
-        return not_claude_code();
+        return not_claude_code(&auth.user, &headers);
     }
 
     let hdrs = relay_headers(&headers);
@@ -233,7 +246,7 @@ pub async fn count_tokens(
     peek: Peek,
 ) -> Response {
     if state.cfg.anthropic.require_claude_code && !is_claude_code(&headers) {
-        return not_claude_code();
+        return not_claude_code(&auth.user, &headers);
     }
 
     let hdrs = relay_headers(&headers);

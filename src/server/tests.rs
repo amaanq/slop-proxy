@@ -75,7 +75,7 @@ async fn spawn_proxy_with(models: ModelsConfig, anthropic_base: Option<String>) 
         .await
         .unwrap();
     db.upsert_account(
-        Provider::Codex,
+        Provider::OpenAi,
         "acct-1",
         Some("test@example.com"),
         None,
@@ -404,9 +404,9 @@ async fn metrics_render_accounts_and_usage() {
     let text = String::from_utf8(bytes.to_vec()).unwrap();
 
     assert!(
-        text.contains("slop_account_status{provider=\"codex\",account=\"test@example.com\"} 0")
+        text.contains("slop_account_status{provider=\"openai\",account=\"test@example.com\"} 0")
     );
-    assert!(text.contains("slop_requests_total{user=\"alice\",account=\"test@example.com\",provider=\"codex\",requested_model=\"gpt-5-codex\",model=\"gpt-5-codex\",effort=\"medium\",dialect=\"openai\"} 1"));
+    assert!(text.contains("slop_requests_total{user=\"alice\",account=\"test@example.com\",provider=\"openai\",requested_model=\"gpt-5-codex\",model=\"gpt-5-codex\",effort=\"medium\",dialect=\"chat\"} 1"));
     assert!(text.contains("kind=\"input\"} 80"));
     assert!(text.contains("kind=\"cache_read\"} 20"));
 }
@@ -421,7 +421,7 @@ async fn pool_reload_picks_up_new_logins() {
     assert_eq!(pool.len().await, 0);
 
     db.upsert_account(
-        Provider::Codex,
+        Provider::OpenAi,
         "acct-r1",
         None,
         None,

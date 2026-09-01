@@ -33,14 +33,14 @@ pub async fn messages(
     let req = match serde_json::from_value::<AnthropicRequest>(body) {
         Ok(r) => r,
         Err(e) => {
-            log_rejected(&state.db, &auth, "anthropic", &peek.model);
+            log_rejected(&state.db, &auth, "messages", &peek.model);
             return translation_error(DIALECT, &format!("invalid request: {e}"));
         }
     };
     let mut upstream_req = match anthropic_req::to_responses(&req, &state.cfg) {
         Ok(r) => r,
         Err(e) => {
-            log_rejected(&state.db, &auth, "anthropic", &req.model);
+            log_rejected(&state.db, &auth, "messages", &req.model);
             return translation_error(DIALECT, &e);
         }
     };
@@ -51,7 +51,7 @@ pub async fn messages(
         meter_id: Some(auth.meter_id),
         token_id: Some(auth.token_id),
         user: auth.user.clone(),
-        dialect: "anthropic",
+        dialect: "messages",
         requested_model: req.model.clone(),
         upstream_model: upstream_req.model.clone(),
         effort: upstream_req

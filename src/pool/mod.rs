@@ -243,7 +243,7 @@ impl Slots {
             slot.display
         );
         let refreshed = match self.provider {
-            Provider::Codex => crate::oauth::refresh::refresh(&st.refresh_token).await,
+            Provider::OpenAi => crate::oauth::refresh::refresh(&st.refresh_token).await,
             Provider::Anthropic => crate::oauth::anthropic::refresh(&st.refresh_token).await,
         };
         match refreshed {

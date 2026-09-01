@@ -42,7 +42,7 @@ pub async fn debug_ping(
     let accounts = db.list_accounts().await?;
     let account = accounts
         .iter()
-        .find(|a| a.provider == Provider::Codex && a.status != "disabled")
+        .find(|a| a.provider == Provider::OpenAi && a.status != "disabled")
         .ok_or_else(|| eyre!("no usable account; run `slop-proxy login`"))?
         .clone();
 

@@ -35,10 +35,10 @@ pub enum Command {
         label: Option<String>,
 
         /// Which backend to log in to
-        #[pound(long, default = "codex")]
+        #[pound(long, default = "openai")]
         provider: Provider,
     },
-    /// Manage stored Codex accounts
+    /// Manage stored accounts
     Accounts {
         #[pound(subcommand)]
         command: AccountsCommand,
@@ -150,7 +150,7 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
 
     match args.command {
         Command::Login { label, provider } => match provider {
-            Provider::Codex => crate::oauth::login(&db, label).await,
+            Provider::OpenAi => crate::oauth::login(&db, label).await,
             Provider::Anthropic => crate::oauth::anthropic::login(&db, label).await,
         },
         Command::Accounts { command } => match command {

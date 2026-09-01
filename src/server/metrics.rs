@@ -167,6 +167,14 @@ fn render_usage(out: &mut String, rows: &[crate::db::usage::MetricsRow]) {
             r.duration_ms as f64 / 1000.0,
         );
     }
+    counter_header(
+        out,
+        "slop_cost_usd_total",
+        "What the same traffic would have cost at the provider's list rate",
+    );
+    for r in rows {
+        usage_line(out, "slop_cost_usd_total", r, r.cost_usd);
+    }
     counter_header(out, "slop_tokens_total", "Tokens by kind");
     for (kind, get) in TOKEN_KINDS {
         for r in rows {

@@ -40,6 +40,8 @@ pub struct Limit {
     pub percent: f64,
     #[serde(default)]
     pub scope: Option<Scope>,
+    #[serde(default)]
+    pub is_active: bool,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -82,10 +84,19 @@ impl Usage {
             .any(|w| w.locked_reason.is_some())
     }
 
+    /// Max plans leave `weekly_all` inactive, and a dormant window reports a
+    /// flat zero however much the account spends.
     pub fn windows(&self) -> impl Iterator<Item = (&'static str, &Window)> {
+        let dormant: Vec<&'static str> = self
+            .limits
+            .iter()
+            .filter(|l| l.scope.is_none() && !l.is_active)
+            .map(Limit::window_name)
+            .collect();
         [("5h", &self.five_hour), ("7d", &self.seven_day)]
             .into_iter()
             .filter_map(|(n, w)| w.as_ref().map(|w| (n, w)))
+            .filter(move |(n, _)| !dormant.contains(n))
     }
 
     /// Per-model sub-limits, measured against their own allowance rather than
@@ -222,9 +233,9 @@ mod tests {
       "seven_day_opus": null,
       "nimbus_quill": {"utilization": 0.0},
       "limits": [
-        {"kind": "session", "group": "session", "percent": 3, "scope": null},
-        {"kind": "weekly_all", "group": "weekly", "percent": 89, "scope": null},
-        {"kind": "weekly_scoped", "group": "weekly", "percent": 63,
+        {"kind": "session", "group": "session", "percent": 3, "scope": null, "is_active": true},
+        {"kind": "weekly_all", "group": "weekly", "percent": 89, "scope": null, "is_active": true},
+        {"kind": "weekly_scoped", "group": "weekly", "percent": 63, "is_active": true,
          "scope": {"model": {"id": null, "display_name": "Fable"}, "surface": null}}
       ]
     }"#;
@@ -241,6 +252,23 @@ mod tests {
         let u: Usage = serde_json::from_str(USAGE).unwrap();
         let got: Vec<_> = u.model_windows().collect();
         assert_eq!(got, vec![("fable".to_string(), "7d", 0.63)]);
+    }
+
+    #[test]
+    fn a_dormant_window_is_not_reported() {
+        let u: Usage = serde_json::from_str(
+            r#"{
+              "five_hour": {"utilization": 1.0},
+              "seven_day": {"utilization": 0.0},
+              "limits": [
+                {"group": "session", "percent": 1, "is_active": true},
+                {"group": "weekly", "percent": 0, "is_active": false}
+              ]
+            }"#,
+        )
+        .unwrap();
+        let got: Vec<_> = u.windows().map(|(n, _)| n).collect();
+        assert_eq!(got, vec!["5h"]);
     }
 
     /// The codenamed top-level fields come and go, so a payload without the

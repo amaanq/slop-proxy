@@ -40,6 +40,21 @@ impl AnthropicPool {
         self.slots.snapshot().await
     }
 
+    /// The catalog body untouched, for relaying to an Anthropic client.
+    pub async fn models_raw(&self) -> Result<String, String> {
+        for slot in self.slots.list().await {
+            let Ok(token) = self.slots.fresh_token(&slot, false).await else {
+                continue;
+            };
+            match self.client.models_raw(&token).await {
+                Ok((status, body)) if status.is_success() => return Ok(body),
+                Ok((status, _)) => tracing::debug!("models for {}: {status}", slot.display),
+                Err(e) => tracing::debug!("models for {}: {e}", slot.display),
+            }
+        }
+        Err("no usable anthropic account".to_string())
+    }
+
     /// Reads each account's rolling-window consumption from the provider.
     /// This needs no inference request, so idle accounts report real numbers
     /// and a locked account is known before it rejects traffic.

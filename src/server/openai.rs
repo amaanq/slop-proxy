@@ -170,7 +170,25 @@ fn stream_response(upstream: EventStream, translator: OpenAiStream, guard: LogGu
 
 /// Codex asks with a `client_version` query and reads its context window out
 /// of the reply, so it gets the backend payload untouched.
-pub async fn models(State(state): State<AppState>, Query(q): Query<ModelsQuery>) -> Response {
+pub async fn models(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Query(q): Query<ModelsQuery>,
+) -> Response {
+    // Both harnesses ask the same path for a catalog, and each only
+    // understands its own. `anthropic-version` is required on every Anthropic
+    // API call, so its presence identifies the caller.
+    if headers.contains_key("anthropic-version") {
+        return match state.anthropic.models_raw().await {
+            Ok(body) => ([("content-type", "application/json")], body).into_response(),
+            Err(e) => super::error::error_response(
+                super::error::Dialect::Anthropic,
+                503,
+                "api_error",
+                &format!("reading the model catalog: {e}"),
+            ),
+        };
+    }
     if q.client_version.is_some() {
         return match state.catalog_raw().await {
             Some(body) => ([("content-type", "application/json")], body).into_response(),

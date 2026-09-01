@@ -5,7 +5,7 @@ use pound::Parse;
 
 use crate::config::Config;
 use crate::db::Db;
-use crate::provider::Provider;
+use crate::provider::{AuthMode, Provider};
 
 /// Anthropic/OpenAI API proxy backed by Codex subscription accounts
 #[derive(Parse)]
@@ -77,6 +77,17 @@ pub enum Command {
 pub enum AccountsCommand {
     /// List stored accounts
     List,
+    /// Store an account that authenticates with a long-lived API key
+    AddKey {
+        #[pound(long)]
+        provider: Provider,
+        #[pound(long)]
+        key: String,
+        #[pound(long)]
+        label: Option<String>,
+        #[pound(long)]
+        referer: Option<String>,
+    },
     /// Remove an account by id or email
     Remove { account: String },
     /// Mark an account as trusted, or clear the flag with --off
@@ -152,9 +163,18 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
         Command::Login { label, provider } => match provider {
             Provider::OpenAi => crate::oauth::login(&db, label).await,
             Provider::Anthropic => crate::oauth::anthropic::login(&db, label).await,
+            Provider::Gemini => Err(eyre::eyre!(
+                "google has no device-code flow here, use `accounts add-key --provider gemini`"
+            )),
         },
         Command::Accounts { command } => match command {
             AccountsCommand::List => accounts_list(&db).await,
+            AccountsCommand::AddKey {
+                provider,
+                key,
+                label,
+                referer,
+            } => accounts_add_key(&db, provider, &key, label.as_deref(), referer.as_deref()).await,
             AccountsCommand::Remove { account } => accounts_remove(&db, &account).await,
             AccountsCommand::Trust { account, off } => accounts_trust(&db, &account, !off).await,
         },
@@ -203,6 +223,47 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
     }
 }
 
+/// A key is its own identity here. Google exposes nothing to call for an
+/// account id, and hashing the key keeps re-adding the same one an update
+/// rather than a duplicate slot.
+async fn accounts_add_key(
+    db: &Db,
+    provider: Provider,
+    key: &str,
+    label: Option<&str>,
+    referer: Option<&str>,
+) -> Result<()> {
+    if referer.is_some() && provider != Provider::Gemini {
+        bail!("--referer is only supported for gemini keys");
+    }
+    let mut h = hmac_sha256::Hash::new();
+    h.update(key.as_bytes());
+    let account_id = data_encoding::HEXLOWER.encode(&h.finalize()[..8]);
+    let tokens = crate::oauth::TokenSet {
+        access_token: key.to_string(),
+        refresh_token: String::new(),
+        id_token: None,
+        expires_at: None,
+    };
+    let id = db
+        .upsert_account(
+            provider,
+            &account_id,
+            None,
+            label,
+            None,
+            &tokens,
+            AuthMode::ApiKey,
+        )
+        .await?;
+    if let Some(referer) = referer {
+        let referer = (!referer.is_empty()).then_some(referer);
+        db.set_account_http_referer(id, referer).await?;
+    }
+    println!("stored {provider} account {id} ({account_id})");
+    Ok(())
+}
+
 async fn accounts_list(db: &Db) -> Result<()> {
     // A struct keeps field order; serde_json alphabetizes json! maps.
     #[derive(serde::Serialize)]
@@ -216,6 +277,7 @@ async fn accounts_list(db: &Db) -> Result<()> {
         label: Option<&'a str>,
         cooldown_seconds_left: Option<i64>,
         disabled_reason: Option<&'a str>,
+        http_referer: Option<&'a str>,
     }
 
     let accounts = db.list_accounts().await?;
@@ -234,6 +296,7 @@ async fn accounts_list(db: &Db) -> Result<()> {
                 .then(|| a.cooldown_until.map(|c| (c - now).max(0)))
                 .flatten(),
             disabled_reason: a.disabled_reason.as_deref(),
+            http_referer: a.http_referer.as_deref(),
         })
         .collect::<Vec<AccountRow>>();
     println!("{}", serde_json::to_string_pretty(&rows)?);

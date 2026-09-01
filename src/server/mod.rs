@@ -3,6 +3,7 @@ pub mod auth;
 pub mod clientcfg;
 pub mod decompress;
 pub mod error;
+mod gemini;
 pub mod metrics;
 pub mod openai;
 pub mod relay;
@@ -18,6 +19,7 @@ use axum::routing::{get, post};
 use eyre::{Result, WrapErr};
 
 use crate::anthropic::client::AnthropicClient;
+use crate::gemini::client::GeminiClient;
 use crate::codex::client::CodexClient;
 use crate::codex::models::ModelInfo;
 use crate::config::Config;
@@ -25,6 +27,7 @@ use crate::db::Db;
 use crate::db::usage::UsageRecord;
 use crate::pool::anthropic::AnthropicPool;
 use crate::pool::codex::CodexPool;
+use crate::pool::gemini::GeminiPool;
 use crate::pricing::{Prices, Tokens};
 use crate::translate::UsageCapture;
 
@@ -33,6 +36,7 @@ pub struct AppState {
     pub db: Db,
     pub codex: Arc<CodexPool>,
     pub anthropic: Arc<AnthropicPool>,
+    pub gemini: Arc<GeminiPool>,
     pub cfg: Arc<Config>,
     pub models: Arc<ModelCache>,
     pub prices: Arc<Prices>,
@@ -116,12 +120,18 @@ pub async fn serve(db: Db, cfg: Config, bind: &str) -> Result<()> {
         tracing::info!("loaded {} anthropic account(s)", anthropic.len().await);
     }
 
+    let gemini = GeminiPool::load(db.clone(), GeminiClient::new(cfg.gemini.clone())).await?;
+    if !gemini.is_empty().await {
+        tracing::info!("loaded {} gemini account(s)", gemini.len().await);
+    }
+
     let prices = Arc::new(Prices::new(&cfg.db_path));
     prices.load().await;
     let state = AppState {
         db,
         codex: Arc::new(codex),
         anthropic: Arc::new(anthropic),
+        gemini: Arc::new(gemini),
         cfg: Arc::new(cfg),
         models: Arc::new(ModelCache::new()),
         prices,
@@ -149,6 +159,9 @@ pub async fn serve(db: Db, cfg: Config, bind: &str) -> Result<()> {
             }
             if let Err(e) = reload_state.anthropic.reload().await {
                 tracing::warn!("reloading anthropic accounts: {e}");
+            }
+            if let Err(e) = reload_state.gemini.reload().await {
+                tracing::warn!("reloading gemini accounts: {e}");
             }
             reload_state.codex.poll_usage().await;
             reload_state.anthropic.poll_usage().await;

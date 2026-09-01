@@ -14,11 +14,15 @@ use super::error::{Dialect, pool_error_response, pool_error_status, translation_
 use super::{AppState, LogGuard, cache_key, log_error, log_rejected, log_usage};
 use crate::codex::sse::{EventStream, event_stream};
 use crate::db::usage::UsageRecord;
+use crate::provider::Provider;
 use crate::translate::anthropic_req::{self, AnthropicRequest};
 use crate::translate::anthropic_stream::{AnthropicStream, render_aggregated};
 use crate::translate::{StopKind, UsageCapture, aggregate, count_tokens};
 
 const DIALECT: Dialect = Dialect::Anthropic;
+
+const GEMINI_DIALECT_HINT: &str =
+    "gemini models are served on /v1/chat/completions, not the messages API";
 
 pub async fn messages(
     State(state): State<AppState>,
@@ -27,8 +31,14 @@ pub async fn messages(
     Json(body): Json<Value>,
 ) -> Response {
     let peek = super::relay::Peek::from_body(&body);
-    if state.cfg.models.routes_to_anthropic(&peek.model) {
-        return super::relay::messages(state, auth, headers, body, peek).await;
+    match state.cfg.models.route(&peek.model) {
+        Provider::Anthropic => {
+            return super::relay::messages(state, auth, headers, body, peek).await;
+        }
+        Provider::Gemini => {
+            return translation_error(DIALECT, GEMINI_DIALECT_HINT);
+        }
+        Provider::OpenAi => {}
     }
     let req = match serde_json::from_value::<AnthropicRequest>(body) {
         Ok(r) => r,
@@ -169,8 +179,14 @@ pub async fn count_tokens(
     Json(body): Json<Value>,
 ) -> Response {
     let peek = super::relay::Peek::from_body(&body);
-    if state.cfg.models.routes_to_anthropic(&peek.model) {
-        return super::relay::count_tokens(state, auth, headers, body, peek).await;
+    match state.cfg.models.route(&peek.model) {
+        Provider::Anthropic => {
+            return super::relay::count_tokens(state, auth, headers, body, peek).await;
+        }
+        Provider::Gemini => {
+            return translation_error(DIALECT, GEMINI_DIALECT_HINT);
+        }
+        Provider::OpenAi => {}
     }
     let req = match serde_json::from_value::<AnthropicRequest>(body) {
         Ok(r) => r,

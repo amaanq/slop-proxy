@@ -6,7 +6,7 @@ use serde::Deserialize;
 use super::TokenSet;
 use super::refresh::RefreshError;
 use crate::db::Db;
-use crate::provider::Provider;
+use crate::provider::{AuthMode, Provider};
 
 pub const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 pub const AUTHORIZE_URL: &str = "https://claude.ai/oauth/authorize";
@@ -128,6 +128,7 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
             label.as_deref(),
             plan.as_deref(),
             &tokens,
+            AuthMode::OAuth,
         )
         .await?;
     println!(

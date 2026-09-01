@@ -12,7 +12,9 @@ use crate::db::Db;
 use crate::oauth::TokenSet;
 use crate::pool::anthropic::AnthropicPool;
 use crate::pool::codex::CodexPool;
-use crate::provider::Provider;
+use crate::pool::gemini::GeminiPool;
+use crate::gemini::client::GeminiClient;
+use crate::provider::{AuthMode, Provider};
 
 const MOCK_SSE: &str = concat!(
     "event: response.created\n",
@@ -81,6 +83,7 @@ async fn spawn_proxy_with(models: ModelsConfig, anthropic_base: Option<String>) 
         None,
         Some("plus"),
         &fresh_tokens(),
+        AuthMode::OAuth,
     )
     .await
     .unwrap();
@@ -92,6 +95,7 @@ async fn spawn_proxy_with(models: ModelsConfig, anthropic_base: Option<String>) 
             None,
             None,
             &fresh_tokens(),
+            AuthMode::OAuth,
         )
         .await
         .unwrap();
@@ -110,6 +114,7 @@ async fn spawn_proxy_with(models: ModelsConfig, anthropic_base: Option<String>) 
             base_url: anthropic_base.unwrap_or_default(),
             ..AnthropicConfig::default()
         },
+        gemini: Default::default(),
         models,
     };
     let codex = CodexPool::load(db.clone(), CodexClient::new(cfg.codex.clone()))
@@ -118,10 +123,14 @@ async fn spawn_proxy_with(models: ModelsConfig, anthropic_base: Option<String>) 
     let anthropic = AnthropicPool::load(db.clone(), AnthropicClient::new(cfg.anthropic.clone()))
         .await
         .unwrap();
+    let gemini_pool = GeminiPool::load(db.clone(), GeminiClient::new(cfg.gemini.clone()))
+        .await
+        .unwrap();
     let state = AppState {
         db: db.clone(),
         codex: Arc::new(codex),
         anthropic: Arc::new(anthropic),
+        gemini: Arc::new(gemini_pool),
         cfg: Arc::new(cfg),
         models: Arc::new(super::ModelCache::new()),
         prices: Arc::new(crate::pricing::Prices::new(&cfg_db_path)),
@@ -383,6 +392,7 @@ async fn metrics_render_accounts_and_usage() {
         metrics_bind: None,
         codex: CodexConfig::default(),
         anthropic: AnthropicConfig::default(),
+        gemini: Default::default(),
         models: ModelsConfig::default(),
     };
     let state = AppState {
@@ -394,6 +404,11 @@ async fn metrics_render_accounts_and_usage() {
         ),
         anthropic: Arc::new(
             AnthropicPool::load(db.clone(), AnthropicClient::new(cfg.anthropic.clone()))
+                .await
+                .unwrap(),
+        ),
+        gemini: Arc::new(
+            GeminiPool::load(db.clone(), GeminiClient::new(cfg.gemini.clone()))
                 .await
                 .unwrap(),
         ),
@@ -431,6 +446,7 @@ async fn pool_reload_picks_up_new_logins() {
         None,
         None,
         &fresh_tokens(),
+        AuthMode::OAuth,
     )
     .await
     .unwrap();

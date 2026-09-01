@@ -52,6 +52,21 @@ ANTHROPIC_BASE_URL=http://[::1]:8484 ANTHROPIC_API_KEY=sp-... claude
 OPENAI_BASE_URL=http://[::1]:8484/v1 OPENAI_API_KEY=sp-...
 ```
 
+## Gemini keys
+
+Add an unrestricted key with `accounts add-key --provider gemini`. A key
+restricted to an HTTP referrer also needs `--referer`.
+
+```sh
+slop-proxy accounts add-key \
+  --provider gemini \
+  --key "$GEMINI_API_KEY" \
+  --referer https://conceptcomix.web.app/
+```
+
+Referrer-restricted keys use Google's native Gemini surface because its
+OpenAI-compatible endpoint drops the referrer before validating the key.
+
 ## Per-token limits and metering
 
 Each issued token can carry rolling-window limits. Omitted request or token

@@ -142,8 +142,29 @@ impl AnthropicClient {
         resp.json().await.map_err(|e| e.to_string())
     }
 
+    /// The catalog exactly as the backend sends it. Relayed rather than
+    /// rebuilt so a client sees the same model ids and display names it would
+    /// talking to Anthropic directly.
+    pub async fn models_raw(&self, access_token: &str) -> Result<(reqwest::StatusCode, String), String> {
+        let resp = self
+            .http
+            .get(format!(
+                "{}/v1/models?limit=100",
+                self.cfg.base_url.trim_end_matches('/')
+            ))
+            .bearer_auth(access_token)
+            .header("anthropic-beta", OAUTH_BETA)
+            .header("anthropic-version", "2023-06-01")
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        let status = resp.status();
+        let body = resp.text().await.map_err(|e| e.to_string())?;
+        Ok((status, body))
+    }
+
     /// Statuses other than 401/429/5xx come back as `Ok` so the caller can
-    /// forward them verbatim; only failures worth retrying on another
+    /// forward them verbatim, and only failures worth retrying on another
     /// account become errors.
     pub async fn send(
         &self,

@@ -97,6 +97,7 @@ async fn spawn_proxy_with(models: ModelsConfig, anthropic_base: Option<String>) 
         .unwrap();
     }
 
+    let cfg_db_path = db_path.clone();
     let cfg = Config {
         db_path,
         bind: String::new(),
@@ -123,6 +124,7 @@ async fn spawn_proxy_with(models: ModelsConfig, anthropic_base: Option<String>) 
         anthropic: Arc::new(anthropic),
         cfg: Arc::new(cfg),
         models: Arc::new(super::ModelCache::new()),
+        prices: Arc::new(crate::pricing::Prices::new(&cfg_db_path)),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -396,6 +398,7 @@ async fn metrics_render_accounts_and_usage() {
         ),
         cfg: Arc::new(cfg),
         models: Arc::new(super::ModelCache::new()),
+        prices: Arc::new(crate::pricing::Prices::new(&std::path::PathBuf::new())),
     };
     let resp = super::metrics::metrics(axum::extract::State(state)).await;
     let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)

@@ -161,7 +161,7 @@ pub async fn messages(
 
     if streaming {
         let capture = UsageCapture::default();
-        let guard = LogGuard::new(state.db.clone(), capture.clone(), record);
+        let guard = LogGuard::new(state.db.clone(), state.prices.clone(), capture.clone(), record);
         let mut scan = SseScan::new(capture);
         let stream = resp.bytes_stream().map(move |item| {
             let _ = &guard;
@@ -192,7 +192,7 @@ pub async fn messages(
         } else {
             record.error_kind = Some("upstream_error".into());
         }
-        log_usage(&state.db, record);
+        log_usage(&state.db, &state.prices, record);
         builder
             .body(Body::from(bytes))
             .unwrap_or_else(|e| error_response(DIALECT, 502, "api_error", &e.to_string()))

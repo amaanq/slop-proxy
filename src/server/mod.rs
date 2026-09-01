@@ -24,6 +24,7 @@ use crate::db::Db;
 use crate::db::usage::UsageRecord;
 use crate::pool::anthropic::AnthropicPool;
 use crate::pool::codex::CodexPool;
+use crate::pricing::{Prices, Tokens};
 use crate::translate::UsageCapture;
 
 #[derive(Clone)]
@@ -33,6 +34,7 @@ pub struct AppState {
     pub anthropic: Arc<AnthropicPool>,
     pub cfg: Arc<Config>,
     pub models: Arc<ModelCache>,
+    pub prices: Arc<Prices>,
 }
 
 impl AppState {
@@ -113,13 +115,28 @@ pub async fn serve(db: Db, cfg: Config, bind: &str) -> Result<()> {
         tracing::info!("loaded {} anthropic account(s)", anthropic.len().await);
     }
 
+    let prices = Arc::new(Prices::new(&cfg.db_path));
+    prices.load().await;
     let state = AppState {
         db,
         codex: Arc::new(codex),
         anthropic: Arc::new(anthropic),
         cfg: Arc::new(cfg),
         models: Arc::new(ModelCache::new()),
+        prices,
     };
+    price_history(&state).await;
+    let price_state = state.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(12 * 3600));
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            if price_state.prices.refresh().await.is_ok() {
+                price_history(&price_state).await;
+            }
+        }
+    });
     let reload_state = state.clone();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(60));
@@ -166,6 +183,30 @@ pub async fn serve(db: Db, cfg: Config, bind: &str) -> Result<()> {
     Ok(())
 }
 
+/// Costs the rows that were logged before their model had a price, so a table
+/// that arrives late still bills the history behind it.
+async fn price_history(state: &AppState) {
+    let rows = match state.db.unpriced_usage().await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!("reading unpriced usage: {e}");
+            return;
+        }
+    };
+    let priced: Vec<_> = rows
+        .iter()
+        .map(|r| (r.id, state.prices.cost(&r.model, r.tokens)))
+        .filter(|(_, cost)| *cost > 0.0)
+        .collect();
+    if priced.is_empty() {
+        return;
+    }
+    match state.db.price_usage(&priced).await {
+        Ok(()) => tracing::info!("priced {} earlier request(s)", priced.len()),
+        Err(e) => tracing::warn!("pricing earlier requests: {e}"),
+    }
+}
+
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/messages", post(anthropic::messages))
@@ -182,18 +223,36 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// Reasoning tokens are a subset of the output the provider already billed,
+/// so they are deliberately absent here.
+fn billable(r: &UsageRecord) -> Tokens {
+    Tokens {
+        input: r.input_tokens,
+        output: r.output_tokens,
+        cache_read: r.cache_read_tokens,
+        cache_write: r.cache_write_tokens,
+    }
+}
+
 /// Logs the request on drop, so client disconnects mid-stream still get a row.
 pub struct LogGuard {
     db: Db,
+    prices: Arc<Prices>,
     capture: UsageCapture,
     record: UsageRecord,
     start: Instant,
 }
 
 impl LogGuard {
-    pub fn new(db: Db, capture: UsageCapture, record: UsageRecord) -> Self {
+    pub fn new(
+        db: Db,
+        prices: Arc<Prices>,
+        capture: UsageCapture,
+        record: UsageRecord,
+    ) -> Self {
         Self {
             db,
+            prices,
             capture,
             record,
             start: Instant::now(),
@@ -215,6 +274,9 @@ impl Drop for LogGuard {
             record.error_kind = Some("client_disconnect".into());
         }
         record.duration_ms = Some(self.start.elapsed().as_millis() as i64);
+        record.cost_usd = self
+            .prices
+            .cost(&record.upstream_model, billable(&record));
         let db = self.db.clone();
         tokio::spawn(async move {
             if let Err(e) = db.log_usage(&record).await {
@@ -242,13 +304,20 @@ pub fn log_rejected(db: &Db, auth: &auth::AuthInfo, dialect: &'static str, model
     );
 }
 
+/// A rejected request served no tokens, so it is written without consulting
+/// the price table.
 pub fn log_error(db: &Db, mut record: UsageRecord, status: i64, kind: &str) {
     record.status = status;
     record.error_kind = Some(kind.to_string());
-    log_usage(db, record);
+    write_usage(db, record);
 }
 
-pub fn log_usage(db: &Db, record: UsageRecord) {
+pub fn log_usage(db: &Db, prices: &Arc<Prices>, mut record: UsageRecord) {
+    record.cost_usd = prices.cost(&record.upstream_model, billable(&record));
+    write_usage(db, record);
+}
+
+fn write_usage(db: &Db, record: UsageRecord) {
     let db = db.clone();
     tokio::spawn(async move {
         if let Err(e) = db.log_usage(&record).await {

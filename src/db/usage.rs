@@ -20,6 +20,7 @@ pub struct UsageRecord {
     pub cache_read_tokens: i64,
     pub cache_write_tokens: i64,
     pub reasoning_tokens: i64,
+    pub cost_usd: f64,
     pub status: i64,
     pub error_kind: Option<String>,
     pub duration_ms: Option<i64>,
@@ -70,6 +71,13 @@ pub struct TokenMeter {
     pub reset_after_seconds: i64,
 }
 
+#[derive(Debug)]
+pub struct UnpricedRow {
+    pub id: i64,
+    pub model: String,
+    pub tokens: crate::pricing::Tokens,
+}
+
 #[derive(Debug, Clone)]
 pub struct ErrorRow {
     pub user: String,
@@ -84,8 +92,8 @@ impl Db {
         let tx = conn.transaction()?;
         tx.execute(
             "INSERT INTO usage_log (token_id, user, account_id, dialect, requested_model, upstream_model, effort,
-               input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, status, error_kind, duration_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+               input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, cost_usd, status, error_kind, duration_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 r.token_id,
                 r.user,
@@ -99,6 +107,7 @@ impl Db {
                 r.cache_read_tokens,
                 r.cache_write_tokens,
                 r.reasoning_tokens,
+                r.cost_usd,
                 r.status,
                 r.error_kind,
                 r.duration_ms,
@@ -308,6 +317,7 @@ pub struct MetricsRow {
     pub cache_read_tokens: i64,
     pub cache_write_tokens: i64,
     pub reasoning_tokens: i64,
+    pub cost_usd: f64,
     pub duration_ms: i64,
 }
 
@@ -326,7 +336,8 @@ impl Db {
                     SUM(u.status >= 400 OR u.error_kind IS NOT NULL),
                     COALESCE(SUM(u.input_tokens),0), COALESCE(SUM(u.output_tokens),0),
                     COALESCE(SUM(u.cache_read_tokens),0), COALESCE(SUM(u.cache_write_tokens),0),
-                    COALESCE(SUM(u.reasoning_tokens),0), COALESCE(SUM(u.duration_ms),0)
+                    COALESCE(SUM(u.reasoning_tokens),0), COALESCE(SUM(u.cost_usd),0),
+                    COALESCE(SUM(u.duration_ms),0)
              FROM usage_log u
              GROUP BY u.user, account, provider, u.requested_model, u.upstream_model,
                       u.effort, u.dialect",
@@ -347,10 +358,50 @@ impl Db {
                 cache_read_tokens: r.get(11)?,
                 cache_write_tokens: r.get(12)?,
                 reasoning_tokens: r.get(13)?,
-                duration_ms: r.get(14)?,
+                cost_usd: r.get(14)?,
+                duration_ms: r.get(15)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Rows that carry tokens but no cost, which is every row written before
+    /// a price table was available.
+    pub async fn unpriced_usage(&self) -> Result<Vec<UnpricedRow>> {
+        let conn = self.0.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT id, upstream_model, input_tokens, output_tokens,
+                    cache_read_tokens, cache_write_tokens
+             FROM usage_log
+             WHERE cost_usd = 0
+               AND input_tokens + output_tokens + cache_read_tokens + cache_write_tokens > 0",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(UnpricedRow {
+                id: r.get(0)?,
+                model: r.get(1)?,
+                tokens: crate::pricing::Tokens {
+                    input: r.get(2)?,
+                    output: r.get(3)?,
+                    cache_read: r.get(4)?,
+                    cache_write: r.get(5)?,
+                },
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub async fn price_usage(&self, priced: &[(i64, f64)]) -> Result<()> {
+        let mut conn = self.0.lock().await;
+        let tx = conn.transaction()?;
+        {
+            let mut stmt = tx.prepare("UPDATE usage_log SET cost_usd = ?2 WHERE id = ?1")?;
+            for (id, cost) in priced {
+                stmt.execute(params![id, cost])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     /// Failures grouped by what went wrong. Kept off MetricsRow because

@@ -6,6 +6,7 @@ mod config;
 mod db;
 mod oauth;
 mod pool;
+mod pricing;
 mod provider;
 mod server;
 mod stats;

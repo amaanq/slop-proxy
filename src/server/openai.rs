@@ -296,6 +296,9 @@ pub async fn models(
 #[derive(serde::Deserialize, serde::Serialize)]
 struct PassthroughRequest {
     model: Option<String>,
+    /// Codex sets this to `priority` for `/fast`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    service_tier: Option<String>,
     store: Option<bool>,
     stream: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -357,6 +360,7 @@ pub async fn responses_passthrough(
             .as_ref()
             .and_then(|r| r.effort.clone())
             .unwrap_or_default(),
+        service_tier: req.service_tier.clone().unwrap_or_default(),
         status: 200,
         ..Default::default()
     };
@@ -510,4 +514,31 @@ fn relay_stream(resp: reqwest::Response, guard: LogGuard, capture: UsageCapture)
     Sse::new(held)
         .keep_alive(KeepAlive::default())
         .into_response()
+}
+
+#[cfg(test)]
+mod passthrough_tests {
+    use super::*;
+
+    #[test]
+    fn the_service_tier_is_read_and_forwarded_unchanged() {
+        let body = serde_json::json!({
+            "model": "gpt-5.6-sol",
+            "service_tier": "priority",
+            "input": [],
+        });
+        let req: PassthroughRequest = serde_json::from_value(body).unwrap();
+        assert_eq!(req.service_tier.as_deref(), Some("priority"));
+        let out = serde_json::to_value(&req).unwrap();
+        assert_eq!(out["service_tier"], "priority");
+    }
+
+    #[test]
+    fn a_standard_turn_carries_no_tier() {
+        let body = serde_json::json!({"model": "gpt-5.6-sol", "input": []});
+        let req: PassthroughRequest = serde_json::from_value(body).unwrap();
+        assert_eq!(req.service_tier, None);
+        let out = serde_json::to_value(&req).unwrap();
+        assert!(out.get("service_tier").is_none());
+    }
 }

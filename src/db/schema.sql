@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS usage_log (
   requested_model   TEXT    NOT NULL,
   upstream_model    TEXT    NOT NULL,
   effort            TEXT    NOT NULL DEFAULT '',
+  service_tier      TEXT    NOT NULL DEFAULT '',
   input_tokens      INTEGER NOT NULL DEFAULT 0,
   output_tokens     INTEGER NOT NULL DEFAULT 0,
   cache_read_tokens INTEGER NOT NULL DEFAULT 0,

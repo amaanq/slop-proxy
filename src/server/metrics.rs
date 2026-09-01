@@ -256,13 +256,14 @@ fn line(out: &mut String, name: &str, a: &AccountSnapshot, extra: &[(&str, &str)
 fn usage_line(out: &mut String, name: &str, r: &crate::db::usage::MetricsRow, value: f64) {
     let _ = writeln!(
         out,
-        "{name}{{user={},account={},provider={},requested_model={},model={},effort={},dialect={}}} {value}",
+        "{name}{{user={},account={},provider={},requested_model={},model={},effort={},service_tier={},dialect={}}} {value}",
         quote(&r.user),
         quote(&r.account),
         quote(&r.provider),
         quote(&r.requested_model),
         quote(&r.model),
         quote(&r.effort),
+        quote(&r.service_tier),
         quote(&r.dialect),
     );
 }

@@ -25,16 +25,31 @@ impl Db {
         conn.pragma_update(None, "foreign_keys", "ON")?;
 
         conn.execute_batch(SCHEMA).wrap_err("creating schema")?;
-        let has_http_referer = conn
-            .prepare("PRAGMA table_info(accounts)")?
-            .query_map([], |row| row.get::<_, String>(1))?
-            .collect::<rusqlite::Result<Vec<_>>>()?
-            .iter()
-            .any(|name| name == "http_referer");
-        if !has_http_referer {
-            conn.execute("ALTER TABLE accounts ADD COLUMN http_referer TEXT", [])?;
+        // A column added to schema.sql never reaches an existing table.
+        for (table, column, ddl) in ADDED_COLUMNS {
+            add_column(&conn, table, column, ddl)?;
         }
 
         Ok(Self(Arc::new(Mutex::new(conn))))
     }
+}
+
+const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
+    ("accounts", "http_referer", "TEXT"),
+    ("accounts", "auth_mode", "TEXT NOT NULL DEFAULT 'oauth'"),
+    ("usage_log", "service_tier", "TEXT NOT NULL DEFAULT ''"),
+];
+
+fn add_column(conn: &Connection, table: &str, column: &str, ddl: &str) -> Result<()> {
+    let present = conn
+        .prepare(&format!("PRAGMA table_info({table})"))?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .iter()
+        .any(|name| name == column);
+    if !present {
+        conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {ddl}"), [])
+            .wrap_err_with(|| format!("adding {table}.{column}"))?;
+    }
+    Ok(())
 }

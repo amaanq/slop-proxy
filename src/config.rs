@@ -77,9 +77,10 @@ impl Default for CodexConfig {
 impl CodexConfig {
     pub fn instructions(&self) -> String {
         if let Some(path) = &self.instructions_file
-            && let Ok(s) = std::fs::read_to_string(path) {
-                return s;
-            }
+            && let Ok(s) = std::fs::read_to_string(path)
+        {
+            return s;
+        }
         self.instructions
             .clone()
             .unwrap_or_else(|| DEFAULT_INSTRUCTIONS.into())

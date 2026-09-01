@@ -46,7 +46,9 @@ pub async fn codex_auth(headers: HeaderMap) -> Response {
 
 /// Overriding the base url keeps `model_provider_id` as `openai`, which the
 /// resume picker filters threads by, so a custom provider would hide every
-/// existing session.
+/// existing session. The apps connector is off because it authenticates with
+/// a ChatGPT session cookie the proxy has no way to mint, and fails loudly at
+/// startup with `no_biscuit_no_service`.
 pub async fn codex_config(headers: HeaderMap) -> Response {
     let host = headers
         .get("host")
@@ -58,7 +60,10 @@ pub async fn codex_config(headers: HeaderMap) -> Response {
         .unwrap_or("https");
 
     let body = format!(
-        "openai_base_url = \"{scheme}://{host}/v1\"\n"
+        "openai_base_url = \"{scheme}://{host}/v1\"\n\
+         \n\
+         [features]\n\
+         apps = false\n"
     );
     ([("content-type", "text/plain; charset=utf-8")], body).into_response()
 }

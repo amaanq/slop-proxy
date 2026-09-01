@@ -90,8 +90,13 @@ impl AccountUsage {
     /// worth more than quota that is not, since the unspent part is lost.
     /// Being a ratio, it compares a 5h window against a 7d one directly.
     fn slack(&self, now: i64) -> Option<f64> {
+        // A window with nothing spent in it cannot be what stops the next
+        // request, but freshly reset it still scores near 1 and would drag the
+        // minimum down, hiding an older window whose quota is about to expire.
+        let touched = self.windows.iter().any(|w| w.utilization > 0.0);
         self.windows
             .iter()
+            .filter(|w| !touched || w.utilization > 0.0)
             .filter_map(|w| {
                 let resets_in = (w.resets_at? - now).max(MIN_RESET_SECS) as f64;
                 let span = window_seconds(&w.name)? as f64;
@@ -565,5 +570,59 @@ mod band_tests {
         assert_eq!(window_seconds("7d"), Some(604_800));
         assert_eq!(window_seconds("30m"), Some(1_800));
         assert_eq!(window_seconds("weekly"), None);
+    }
+}
+
+#[cfg(test)]
+mod idle_window_tests {
+    use super::*;
+
+
+    #[test]
+    fn an_idle_window_does_not_mask_expiring_quota() {
+        let now = 1_000_000;
+        let h = 3600;
+        let u = AccountUsage {
+            windows: vec![
+                UsageWindow {
+                    name: "5h".into(),
+                    utilization: 0.0,
+                    resets_at: Some(now + 3 * h + 1500),
+                },
+                UsageWindow {
+                    name: "7d".into(),
+                    utilization: 0.69,
+                    resets_at: Some(now + 6 * h + 900),
+                },
+            ],
+            model_windows: Vec::new(),
+            locked: false,
+            observed_at: 0,
+        };
+        assert_eq!(u.band(0.9, now), Band::Ample);
+    }
+
+    #[test]
+    fn a_used_window_still_binds() {
+        let now = 1_000_000;
+        let h = 3600;
+        let u = AccountUsage {
+            windows: vec![
+                UsageWindow {
+                    name: "5h".into(),
+                    utilization: 0.85,
+                    resets_at: Some(now + 4 * h),
+                },
+                UsageWindow {
+                    name: "7d".into(),
+                    utilization: 0.10,
+                    resets_at: Some(now + 100 * h),
+                },
+            ],
+            model_windows: Vec::new(),
+            locked: false,
+            observed_at: 0,
+        };
+        assert_eq!(u.band(0.9, now), Band::Behind);
     }
 }

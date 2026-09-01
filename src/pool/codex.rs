@@ -205,16 +205,13 @@ impl CodexPool {
     /// a session sticks to one account, since a prompt cache lives on the
     /// account that built it and scattering re-bills the whole prefix.
     async fn next_available(&self, prefer_trusted: bool, session_key: &str) -> Option<Arc<Slot>> {
-        let mut fresh = Vec::new();
-        let mut strained = Vec::new();
+        let mut banded = Vec::<(super::Band, Arc<Slot>)>::new();
         for slot in self.slots.list().await {
-            if self.slots.is_strained(&slot, self.soft_limit).await {
-                strained.push(slot);
-            } else {
-                fresh.push(slot);
-            }
+            banded.push((self.slots.band(&slot, self.soft_limit).await, slot));
         }
-        for group in [fresh, strained] {
+        banded.sort_by_key(|(band, _)| *band);
+        let groups = banded.chunk_by(|(a, _), (b, _)| a == b);
+        for group in groups.map(|g| g.iter().map(|(_, s)| s.clone()).collect::<Vec<_>>()) {
             let (preferred, rest): (Vec<_>, Vec<_>) =
                 group.into_iter().partition(|s| s.trusted == prefer_trusted);
             for candidates in [preferred, rest] {
@@ -279,7 +276,9 @@ fn session_uuid(session_key: &str) -> String {
     let digest = hmac_sha256::Hash::hash(session_key.as_bytes());
     let mut bytes = [0u8; 16];
     bytes.copy_from_slice(&digest[..16]);
-    uuid::Builder::from_random_bytes(bytes).into_uuid().to_string()
+    uuid::Builder::from_random_bytes(bytes)
+        .into_uuid()
+        .to_string()
 }
 
 fn window_name(minutes: i64) -> String {

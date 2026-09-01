@@ -80,6 +80,64 @@ impl AccountUsage {
             .map(|w| w.utilization)
             .fold(0.0, f64::max)
     }
+
+    /// How far ahead of a level burn the account is, as a ratio: headroom
+    /// divided by the headroom it would have if it had spent evenly since the
+    /// window opened. Above 1 it has capacity to spare, below 1 it runs out
+    /// before the window resets.
+    ///
+    /// Dividing by the time left is what makes quota that is about to reset
+    /// worth more than quota that is not, since the unspent part is lost.
+    /// Being a ratio, it compares a 5h window against a 7d one directly.
+    fn slack(&self, now: i64) -> Option<f64> {
+        self.windows
+            .iter()
+            .filter_map(|w| {
+                let resets_in = (w.resets_at? - now).max(MIN_RESET_SECS) as f64;
+                let span = window_seconds(&w.name)? as f64;
+                Some((1.0 - w.utilization).max(0.0) * span / resets_in)
+            })
+            .fold(None, |acc: Option<f64>, s| Some(acc.map_or(s, |a| a.min(s))))
+    }
+
+    /// Coarse on purpose. Sessions stay pinned to one account while it holds
+    /// its band, so a prompt cache is only given up when the account's
+    /// standing actually changes rather than on every drift in the numbers.
+    pub fn band(&self, soft_limit: f64, now: i64) -> Band {
+        if self.locked || self.peak() >= soft_limit {
+            return Band::Spent;
+        }
+        match self.slack(now) {
+            Some(s) if s >= 2.0 => Band::Ample,
+            Some(s) if s >= 1.0 => Band::Steady,
+            Some(_) => Band::Behind,
+            None => Band::Steady,
+        }
+    }
+}
+
+/// A window that has just reset reports a tiny time remaining, which would
+/// divide the headroom into a near-infinite score.
+const MIN_RESET_SECS: i64 = 300;
+
+fn window_seconds(name: &str) -> Option<i64> {
+    let (value, unit) = name.split_at(name.len().checked_sub(1)?);
+    let value: i64 = value.parse().ok()?;
+    match unit {
+        "m" => Some(value * 60),
+        "h" => Some(value * 3600),
+        "d" => Some(value * 86400),
+        _ => None,
+    }
+}
+
+/// Routing order for an account, best first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Band {
+    Ample,
+    Steady,
+    Behind,
+    Spent,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -202,15 +260,17 @@ impl Slots {
         slot.state.lock().await.usage = Some(usage);
     }
 
-    /// True when the account is near or past its limit. Routing sinks these
-    /// below their peers so sessions move before a window rejects them.
-    pub async fn is_strained(&self, slot: &Arc<Slot>, soft_limit: f64) -> bool {
+    /// Where the account sits relative to a level burn of its windows.
+    /// Accounts with no usage report yet are assumed healthy so a fresh
+    /// account is not held back before it has served anything.
+    pub async fn band(&self, slot: &Arc<Slot>, soft_limit: f64) -> Band {
+        let now = crate::clock::unix_now();
         slot.state
             .lock()
             .await
             .usage
             .as_ref()
-            .is_some_and(|u| u.locked || u.peak() >= soft_limit)
+            .map_or(Band::Steady, |u| u.band(soft_limit, now))
     }
 
     pub async fn snapshot(&self) -> Vec<AccountSnapshot> {
@@ -429,5 +489,81 @@ pub(crate) fn test_slots(db: Db, provider: Provider, ids: &[(i64, bool)]) -> Slo
                 .collect(),
         ),
         db,
+    }
+}
+
+#[cfg(test)]
+mod band_tests {
+    use super::*;
+
+    fn usage(windows: &[(&str, f64, i64)], now: i64) -> AccountUsage {
+        AccountUsage {
+            windows: windows
+                .iter()
+                .map(|(name, utilization, resets_in)| UsageWindow {
+                    name: (*name).to_string(),
+                    utilization: *utilization,
+                    resets_at: Some(now + resets_in),
+                })
+                .collect(),
+            model_windows: Vec::new(),
+            locked: false,
+            observed_at: 0,
+        }
+    }
+
+    #[test]
+    fn expiring_headroom_outranks_larger_headroom_with_time_to_spare() {
+        let now = 1_000_000;
+        let h = 3600;
+        let expiring = usage(&[("7d", 0.69, 8 * h)], now);
+        let roomy = usage(&[("7d", 0.04, 131 * h)], now);
+        assert_eq!(expiring.band(0.9, now), Band::Ample);
+        assert_eq!(roomy.band(0.9, now), Band::Steady);
+        assert!(expiring.band(0.9, now) < roomy.band(0.9, now));
+    }
+
+    #[test]
+    fn an_account_burning_faster_than_its_window_falls_behind() {
+        let now = 1_000_000;
+        let h = 3600;
+        assert_eq!(usage(&[("7d", 0.90, 37 * h)], now).band(0.9, now), Band::Spent);
+        assert_eq!(usage(&[("7d", 0.80, 37 * h)], now).band(0.9, now), Band::Behind);
+    }
+
+    /// The ratio is dimensionless, so a 5h window and a 7d one are directly
+    /// comparable and the tighter of the two decides.
+    #[test]
+    fn the_tightest_window_decides() {
+        let now = 1_000_000;
+        let h = 3600;
+        let u = usage(&[("7d", 0.10, 100 * h), ("5h", 0.85, 4 * h)], now);
+        assert_eq!(u.band(0.9, now), Band::Behind);
+    }
+
+    #[test]
+    fn a_window_about_to_reset_does_not_score_infinitely() {
+        let now = 1_000_000;
+        let u = usage(&[("7d", 0.99, 1)], now);
+        assert_eq!(u.band(0.995, now), Band::Ample);
+        assert!(u.slack(now).unwrap().is_finite());
+    }
+
+    #[test]
+    fn usage_without_a_reset_time_keeps_the_old_behaviour() {
+        let now = 1_000_000;
+        let mut u = usage(&[("7d", 0.5, 3600)], now);
+        u.windows[0].resets_at = None;
+        assert_eq!(u.band(0.9, now), Band::Steady);
+        u.windows[0].utilization = 0.95;
+        assert_eq!(u.band(0.9, now), Band::Spent);
+    }
+
+    #[test]
+    fn window_names_from_both_providers_parse() {
+        assert_eq!(window_seconds("5h"), Some(18_000));
+        assert_eq!(window_seconds("7d"), Some(604_800));
+        assert_eq!(window_seconds("30m"), Some(1_800));
+        assert_eq!(window_seconds("weekly"), None);
     }
 }

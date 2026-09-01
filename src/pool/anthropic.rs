@@ -99,21 +99,21 @@ impl AnthropicPool {
         }
     }
 
-    /// Rendezvous-hashed order: a session sticks to its highest-scoring
-    /// account so upstream prompt caches keep hitting.
+    /// Rendezvous-hashed order within a band: a session sticks to its
+    /// highest-scoring account so upstream prompt caches keep hitting.
     async fn ranked(&self, session_key: &str, prefer_trusted: bool) -> Vec<Arc<Slot>> {
         let mut scored = Vec::new();
         for slot in self.slots.list().await {
-            let strained = self.slots.is_strained(&slot, self.soft_limit).await;
+            let band = self.slots.band(&slot, self.soft_limit).await;
             let score = super::rendezvous_score(session_key, slot.id);
-            scored.push((score, strained, slot));
+            scored.push((score, band, slot));
         }
-        // Strain outranks the trust preference: an account with capacity left
+        // Band outranks the trust preference: an account with capacity left
         // beats a preferred one that is nearly spent, since the preference is
         // about reserving scarce capacity rather than guaranteeing it.
-        scored.sort_by_key(|(score, strained, slot)| {
+        scored.sort_by_key(|(score, band, slot)| {
             (
-                *strained,
+                *band,
                 std::cmp::Reverse(slot.trusted == prefer_trusted),
                 std::cmp::Reverse(*score),
             )
@@ -228,6 +228,48 @@ mod tests {
         assert_eq!(order.len(), 4);
         let ids = order.iter().map(|s| s.id).collect::<HashSet<i64>>();
         assert_eq!(ids.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn quota_that_resets_soonest_is_spent_first() {
+        let pool = test_pool(&[(1, false), (2, false), (3, false), (4, false)]).await;
+        let now = crate::clock::unix_now();
+        let hours = |h: f64| now + (h * 3600.0) as i64;
+        for (id, used, resets_in) in [
+            (1, 0.64, 47.2),
+            (2, 0.90, 37.2),
+            (3, 0.04, 131.0),
+            (4, 0.69, 8.2),
+        ] {
+            let slot = pool
+                .slots
+                .list()
+                .await
+                .into_iter()
+                .find(|s| s.id == id)
+                .unwrap();
+            pool.slots
+                .note_usage(
+                    &slot,
+                    AccountUsage {
+                        windows: vec![UsageWindow {
+                            name: "7d".into(),
+                            utilization: used,
+                            resets_at: Some(hours(resets_in)),
+                        }],
+                        model_windows: Vec::new(),
+                        locked: false,
+                        observed_at: 0,
+                    },
+                )
+                .await;
+        }
+        let order = pool.ranked("session-a", false).await;
+        assert_eq!(order[0].id, 4, "the account resetting in 8h should lead");
+        assert_eq!(
+            order[3].id, 2,
+            "the account that runs out before it resets should sort last"
+        );
     }
 
     #[tokio::test]

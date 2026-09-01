@@ -8,7 +8,7 @@ use axum::response::Response;
 /// `openai` provider, and a turn's context is mostly repeated text, so the
 /// wire form runs about a third of the JSON. Agent turns carrying a 200k
 /// token context land well past axum's 2MB default either way.
-pub const MAX_BODY: usize = 64 * 1024 * 1024;
+pub const MAX_BODY: usize = 192 * 1024 * 1024;
 
 pub async fn zstd_requests(req: Request, next: Next) -> Response {
     let encoded = req
@@ -29,13 +29,28 @@ pub async fn zstd_requests(req: Request, next: Next) -> Response {
             "request body too large",
         );
     };
-    let Some(plain) = decode(&bytes) else {
-        return super::error::error_response(
-            super::error::Dialect::OpenAi,
-            400,
-            "invalid_request_error",
-            "malformed zstd request body",
-        );
+    let plain = match decode(&bytes) {
+        Ok(plain) => plain,
+        Err(DecodeError::TooLarge) => {
+            tracing::warn!(
+                "rejecting a body that unpacks past {MAX_BODY} bytes from {} compressed",
+                bytes.len()
+            );
+            return super::error::error_response(
+                super::error::Dialect::OpenAi,
+                413,
+                "invalid_request_error",
+                "request body too large",
+            );
+        }
+        Err(DecodeError::Malformed) => {
+            return super::error::error_response(
+                super::error::Dialect::OpenAi,
+                400,
+                "invalid_request_error",
+                "malformed zstd request body",
+            );
+        }
     };
 
     parts.headers.remove(CONTENT_ENCODING);
@@ -46,15 +61,25 @@ pub async fn zstd_requests(req: Request, next: Next) -> Response {
         .await
 }
 
-fn decode(bytes: &Bytes) -> Option<Vec<u8>> {
+enum DecodeError {
+    TooLarge,
+    Malformed,
+}
+
+/// Reads one byte past the ceiling so a body that would exceed it is refused
+/// rather than truncated.
+fn decode(bytes: &Bytes) -> Result<Vec<u8>, DecodeError> {
     use std::io::Read;
     let mut out = Vec::with_capacity(bytes.len() * 4);
     ruzstd::decoding::StreamingDecoder::new(&mut &bytes[..])
-        .ok()?
-        .take(MAX_BODY as u64)
+        .map_err(|_| DecodeError::Malformed)?
+        .take(MAX_BODY as u64 + 1)
         .read_to_end(&mut out)
-        .ok()?;
-    Some(out)
+        .map_err(|_| DecodeError::Malformed)?;
+    if out.len() > MAX_BODY {
+        return Err(DecodeError::TooLarge);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -86,6 +111,31 @@ mod tests {
         assert_eq!(resp.status(), 200);
         let out = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
         assert_eq!(&out[..], b"got:{\"model\":\"m\"}");
+    }
+
+    /// A body over the ceiling has to be refused outright. Truncating it
+    /// yields half a JSON document, which surfaces as a parse error naming
+    /// the wrong cause.
+    #[test]
+    fn an_oversized_body_is_refused_rather_than_truncated() {
+        let big = vec![b'a'; super::MAX_BODY + 4096];
+        let framed = zstd_frame(&big);
+        assert!(matches!(
+            super::decode(&axum::body::Bytes::from(framed)),
+            Err(super::DecodeError::TooLarge)
+        ));
+    }
+
+    /// zstd's raw-block form, so the test needs no compressor.
+    fn zstd_frame(payload: &[u8]) -> Vec<u8> {
+        let mut out = vec![0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x00];
+        for chunk in payload.chunks(1 << 17) {
+            let last = std::ptr::eq(chunk.as_ptr_range().end, payload.as_ptr_range().end);
+            let header = ((chunk.len() as u32) << 3) | u32::from(last);
+            out.extend_from_slice(&header.to_le_bytes()[..3]);
+            out.extend_from_slice(chunk);
+        }
+        out
     }
 
     #[tokio::test]

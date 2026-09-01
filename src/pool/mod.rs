@@ -88,21 +88,17 @@ impl AccountUsage {
     ///
     /// Dividing by the time left is what makes quota that is about to reset
     /// worth more than quota that is not, since the unspent part is lost.
-    /// Being a ratio, it compares a 5h window against a 7d one directly.
+    ///
+    /// Measured on the longest window only.
     fn slack(&self, now: i64) -> Option<f64> {
-        // A window with nothing spent in it cannot be what stops the next
-        // request, but freshly reset it still scores near 1 and would drag the
-        // minimum down, hiding an older window whose quota is about to expire.
-        let touched = self.windows.iter().any(|w| w.utilization > 0.0);
-        self.windows
+        let w = self
+            .windows
             .iter()
-            .filter(|w| !touched || w.utilization > 0.0)
-            .filter_map(|w| {
-                let resets_in = (w.resets_at? - now).max(MIN_RESET_SECS) as f64;
-                let span = window_seconds(&w.name)? as f64;
-                Some((1.0 - w.utilization).max(0.0) * span / resets_in)
-            })
-            .fold(None, |acc: Option<f64>, s| Some(acc.map_or(s, |a| a.min(s))))
+            .filter(|w| w.resets_at.is_some() && window_seconds(&w.name).is_some())
+            .max_by_key(|w| window_seconds(&w.name))?;
+        let resets_in = (w.resets_at? - now).max(MIN_RESET_SECS) as f64;
+        let span = window_seconds(&w.name)? as f64;
+        Some((1.0 - w.utilization).max(0.0) * span / resets_in)
     }
 
     /// Coarse on purpose. Sessions stay pinned to one account while it holds
@@ -536,14 +532,13 @@ mod band_tests {
         assert_eq!(usage(&[("7d", 0.80, 37 * h)], now).band(0.9, now), Band::Behind);
     }
 
-    /// The ratio is dimensionless, so a 5h window and a 7d one are directly
-    /// comparable and the tighter of the two decides.
+    /// Ranking follows the weekly window, not whichever is tighter.
     #[test]
-    fn the_tightest_window_decides() {
+    fn the_longest_window_decides() {
         let now = 1_000_000;
         let h = 3600;
         let u = usage(&[("7d", 0.10, 100 * h), ("5h", 0.85, 4 * h)], now);
-        assert_eq!(u.band(0.9, now), Band::Behind);
+        assert_eq!(u.band(0.9, now), Band::Steady);
     }
 
     #[test]
@@ -579,7 +574,7 @@ mod idle_window_tests {
 
 
     #[test]
-    fn an_idle_window_does_not_mask_expiring_quota() {
+    fn a_short_window_does_not_mask_expiring_weekly_quota() {
         let now = 1_000_000;
         let h = 3600;
         let u = AccountUsage {
@@ -602,8 +597,10 @@ mod idle_window_tests {
         assert_eq!(u.band(0.9, now), Band::Ample);
     }
 
+    /// A busy 5h window no longer benches an account with weekly budget to
+    /// spare, because it rolls over in hours.
     #[test]
-    fn a_used_window_still_binds() {
+    fn a_busy_short_window_does_not_bench_a_healthy_week() {
         let now = 1_000_000;
         let h = 3600;
         let u = AccountUsage {
@@ -623,6 +620,32 @@ mod idle_window_tests {
             locked: false,
             observed_at: 0,
         };
-        assert_eq!(u.band(0.9, now), Band::Behind);
+        assert_eq!(u.band(0.9, now), Band::Steady);
+    }
+
+    /// But a short window past the soft limit is still benched, since the next
+    /// request would be refused outright.
+    #[test]
+    fn a_full_short_window_is_still_spent() {
+        let now = 1_000_000;
+        let h = 3600;
+        let u = AccountUsage {
+            windows: vec![
+                UsageWindow {
+                    name: "5h".into(),
+                    utilization: 0.95,
+                    resets_at: Some(now + 4 * h),
+                },
+                UsageWindow {
+                    name: "7d".into(),
+                    utilization: 0.10,
+                    resets_at: Some(now + 100 * h),
+                },
+            ],
+            model_windows: Vec::new(),
+            locked: false,
+            observed_at: 0,
+        };
+        assert_eq!(u.band(0.9, now), Band::Spent);
     }
 }

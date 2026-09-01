@@ -44,9 +44,9 @@ pub async fn codex_auth(headers: HeaderMap) -> Response {
     .into_response()
 }
 
-/// The provider block that puts codex in the auth mode above. `env_key` is
-/// deliberately absent: with it codex authenticates from the environment,
-/// never asks for the catalog, and is left guessing its context window.
+/// Overriding the base url keeps `model_provider_id` as `openai`, which the
+/// resume picker filters threads by, so a custom provider would hide every
+/// existing session.
 pub async fn codex_config(headers: HeaderMap) -> Response {
     let host = headers
         .get("host")
@@ -58,13 +58,7 @@ pub async fn codex_config(headers: HeaderMap) -> Response {
         .unwrap_or("https");
 
     let body = format!(
-        "model_provider = \"slop\"\n\
-         \n\
-         [model_providers.slop]\n\
-         name = \"slop\"\n\
-         base_url = \"{scheme}://{host}/v1\"\n\
-         wire_api = \"responses\"\n\
-         requires_openai_auth = true\n"
+        "openai_base_url = \"{scheme}://{host}/v1\"\n"
     );
     ([("content-type", "text/plain; charset=utf-8")], body).into_response()
 }

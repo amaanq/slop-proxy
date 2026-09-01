@@ -168,6 +168,16 @@ fn stream_response(upstream: EventStream, translator: OpenAiStream, guard: LogGu
         .into_response()
 }
 
+/// Codex opens a WebSocket to this path before falling back to HTTP, and only
+/// 426 short-circuits that.
+pub async fn responses_upgrade_required() -> Response {
+    (
+        axum::http::StatusCode::UPGRADE_REQUIRED,
+        "this proxy serves the responses API over HTTP only",
+    )
+        .into_response()
+}
+
 /// Codex asks with a `client_version` query and reads its context window out
 /// of the reply, so it gets the backend payload untouched.
 pub async fn models(
@@ -351,7 +361,12 @@ pub async fn responses_passthrough(
     if client_streams {
         return relay_stream(
             resp,
-            LogGuard::new(state.db.clone(), state.prices.clone(), capture.clone(), record),
+            LogGuard::new(
+                state.db.clone(),
+                state.prices.clone(),
+                capture.clone(),
+                record,
+            ),
             capture,
         );
     }

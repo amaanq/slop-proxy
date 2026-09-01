@@ -97,7 +97,7 @@ pub async fn chat_completions(
 
     if req.stream.unwrap_or(false) {
         let translator = OpenAiStream::new(req.model.clone(), req.include_usage(), capture.clone());
-        let guard = LogGuard::new(state.db.clone(), capture, record);
+        let guard = LogGuard::new(state.db.clone(), state.prices.clone(), capture, record);
         stream_response(events, translator, guard)
     } else {
         let agg = aggregate(events, &capture).await;
@@ -114,7 +114,7 @@ pub async fn chat_completions(
             return super::error::error_response(DIALECT, 502, "api_error", &msg);
         }
         record.error_kind = snap.error_kind;
-        log_usage(&state.db, record);
+        log_usage(&state.db, &state.prices, record);
         Json(render_aggregated(&agg, &req.model)).into_response()
     }
 }
@@ -333,7 +333,7 @@ pub async fn responses_passthrough(
     if client_streams {
         return relay_stream(
             resp,
-            LogGuard::new(state.db.clone(), capture.clone(), record),
+            LogGuard::new(state.db.clone(), state.prices.clone(), capture.clone(), record),
             capture,
         );
     }
@@ -363,7 +363,7 @@ pub async fn responses_passthrough(
         record.output_tokens = snap.output_tokens;
         record.cache_read_tokens = snap.cache_read_tokens;
         record.reasoning_tokens = snap.reasoning_tokens;
-        log_usage(&state.db, record);
+        log_usage(&state.db, &state.prices, record);
         match final_response {
             Some(v) => Json(v).into_response(),
             None => super::error::error_response(

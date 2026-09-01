@@ -93,7 +93,7 @@ pub async fn messages(
     if req.stream.unwrap_or(false) {
         let translator =
             AnthropicStream::new(req.model.clone(), est_input, emit_thinking, capture.clone());
-        let guard = LogGuard::new(state.db.clone(), capture, record);
+        let guard = LogGuard::new(state.db.clone(), state.prices.clone(), capture, record);
         stream_response(events, translator, guard)
     } else {
         let agg = aggregate(events, &capture).await;
@@ -110,7 +110,7 @@ pub async fn messages(
             return super::error::error_response(DIALECT, 502, "api_error", &msg);
         }
         record.error_kind = snap.error_kind;
-        log_usage(&state.db, record);
+        log_usage(&state.db, &state.prices, record);
         Json(render_aggregated(&agg, &req.model, emit_thinking)).into_response()
     }
 }

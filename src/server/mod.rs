@@ -1,6 +1,7 @@
 pub mod anthropic;
 pub mod auth;
 pub mod clientcfg;
+pub mod decompress;
 pub mod error;
 pub mod metrics;
 pub mod openai;
@@ -216,6 +217,7 @@ pub fn router(state: AppState) -> Router {
         .route("/config/codex/auth.json", get(clientcfg::codex_auth))
         .route("/config/codex/config.toml", get(clientcfg::codex_config))
         .route("/v1/responses", post(openai::responses_passthrough))
+        .layer(middleware::from_fn(decompress::zstd_requests))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_token,

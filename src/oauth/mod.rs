@@ -152,7 +152,7 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
 
     let db_id = db
         .upsert_account(
-            crate::provider::Provider::Codex,
+            crate::provider::Provider::OpenAi,
             &account_id,
             info.email.as_deref(),
             label.as_deref(),

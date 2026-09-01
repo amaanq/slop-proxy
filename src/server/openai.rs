@@ -34,12 +34,12 @@ pub async fn chat_completions(
     let req = match serde_json::from_value::<OpenAiRequest>(body) {
         Ok(r) => r,
         Err(e) => {
-            log_rejected(&state.db, &auth, "openai", "unknown");
+            log_rejected(&state.db, &auth, "chat", "unknown");
             return translation_error(DIALECT, &format!("invalid request: {e}"));
         }
     };
     if state.cfg.models.routes_to_anthropic(&req.model) {
-        log_rejected(&state.db, &auth, "openai", &req.model);
+        log_rejected(&state.db, &auth, "chat", &req.model);
         return translation_error(
             DIALECT,
             "this model is relayed to Anthropic and only available on /v1/messages",
@@ -48,7 +48,7 @@ pub async fn chat_completions(
     let mut upstream_req = match openai_req::to_responses(&req, &state.cfg) {
         Ok(r) => r,
         Err(e) => {
-            log_rejected(&state.db, &auth, "openai", &req.model);
+            log_rejected(&state.db, &auth, "chat", &req.model);
             return translation_error(DIALECT, &e);
         }
     };
@@ -58,7 +58,7 @@ pub async fn chat_completions(
         meter_id: Some(auth.meter_id),
         token_id: Some(auth.token_id),
         user: auth.user.clone(),
-        dialect: "openai",
+        dialect: "chat",
         requested_model: req.model.clone(),
         upstream_model: upstream_req.model.clone(),
         effort: upstream_req

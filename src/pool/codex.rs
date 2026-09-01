@@ -20,7 +20,7 @@ impl CodexPool {
     pub async fn load(db: Db, client: CodexClient) -> eyre::Result<Self> {
         Ok(Self {
             soft_limit: client.soft_utilization_limit(),
-            slots: Slots::load(db, Provider::Codex).await?,
+            slots: Slots::load(db, Provider::OpenAi).await?,
             client,
         })
     }
@@ -125,7 +125,7 @@ impl CodexPool {
     ) -> Result<(i64, reqwest::Response), PoolError> {
         let attempts = self.slots.len().await.min(3);
         if attempts == 0 {
-            return Err(PoolError::NoAccounts(Provider::Codex));
+            return Err(PoolError::NoAccounts(Provider::OpenAi));
         }
         let mut last_err = Option::<SendError>::None;
         let session_id = session_uuid(session_key);

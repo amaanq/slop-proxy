@@ -127,7 +127,7 @@ pub async fn messages(
         meter_id: Some(auth.meter_id),
         token_id: Some(auth.token_id),
         user: auth.user.clone(),
-        dialect: "anthropic",
+        dialect: "messages",
         requested_model: peek.model.clone(),
         upstream_model: peek.model.clone(),
         effort: peek.effort.clone(),

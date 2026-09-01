@@ -273,7 +273,7 @@ pub async fn count_tokens(
     }
 }
 
-fn forwarded_response(resp: &reqwest::Response) -> axum::http::response::Builder {
+pub(super) fn forwarded_response(resp: &reqwest::Response) -> axum::http::response::Builder {
     let mut builder = Response::builder().status(resp.status().as_u16());
     for (name, value) in resp.headers() {
         let n = name.as_str();

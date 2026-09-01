@@ -10,6 +10,7 @@ use crate::pool::AccountSnapshot;
 pub async fn metrics(State(state): State<AppState>) -> Response {
     let mut accounts = state.codex.snapshot().await;
     accounts.extend(state.anthropic.snapshot().await);
+    accounts.extend(state.gemini.snapshot().await);
 
     let mut out = String::with_capacity(4096);
     render_accounts(&mut out, &accounts);

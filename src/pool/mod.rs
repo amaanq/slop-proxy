@@ -1,5 +1,6 @@
 pub mod anthropic;
 pub mod codex;
+pub mod gemini;
 
 use std::sync::Arc;
 
@@ -8,7 +9,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::db::Db;
 use crate::oauth::refresh::RefreshError;
-use crate::provider::Provider;
+use crate::provider::{AuthMode, Provider};
 
 #[derive(Debug, Error)]
 pub enum PoolError {
@@ -27,7 +28,9 @@ pub(crate) struct Slot {
     pub provider_account_id: String,
     pub display: String,
     pub trusted: bool,
+    pub auth_mode: AuthMode,
     pub plan: Option<String>,
+    pub http_referer: Option<String>,
     state: Mutex<SlotState>,
 }
 
@@ -306,6 +309,9 @@ impl Slots {
     pub async fn fresh_token(&self, slot: &Arc<Slot>, force: bool) -> Result<String, ()> {
         let now = crate::clock::unix_now();
         let mut st = slot.state.lock().await;
+        if !slot.auth_mode.refreshable() {
+            return Ok(st.access_token.clone());
+        }
         if !force && st.expires_at.map(|e| e - now > 60).unwrap_or(false) {
             return Ok(st.access_token.clone());
         }
@@ -317,6 +323,9 @@ impl Slots {
         let refreshed = match self.provider {
             Provider::OpenAi => crate::oauth::refresh::refresh(&st.refresh_token).await,
             Provider::Anthropic => crate::oauth::anthropic::refresh(&st.refresh_token).await,
+            Provider::Gemini => Err(RefreshError::Terminal(
+                "google oauth grants are not implemented, add the account with an api key".into(),
+            )),
         };
         match refreshed {
             Ok(tokens) => {
@@ -412,7 +421,10 @@ fn display_for(a: &crate::db::accounts::Account) -> String {
 }
 
 fn slot_matches(s: &Slot, a: &crate::db::accounts::Account) -> bool {
-    s.trusted == a.trusted && s.plan == a.plan_type && s.display == display_for(a)
+    s.trusted == a.trusted
+        && s.plan == a.plan_type
+        && s.display == display_for(a)
+        && s.http_referer == a.http_referer
 }
 
 /// A fresh slot carrying the previous one's cooldown, tokens and quota sample.
@@ -422,7 +434,9 @@ async fn reslot(a: &crate::db::accounts::Account, prev: &Arc<Slot>) -> Slot {
         id: a.id,
         provider_account_id: a.provider_account_id.clone(),
         trusted: a.trusted,
+        auth_mode: a.auth_mode,
         plan: a.plan_type.clone(),
+        http_referer: a.http_referer.clone(),
         display: display_for(a),
         state: Mutex::new(SlotState {
             access_token: state.access_token.clone(),
@@ -448,7 +462,9 @@ fn slot_from_account(a: crate::db::accounts::Account) -> Slot {
         id: a.id,
         provider_account_id: a.provider_account_id,
         trusted: a.trusted,
+        auth_mode: a.auth_mode,
         plan: a.plan_type,
+        http_referer: a.http_referer,
         display: a
             .label
             .or(a.email)
@@ -476,7 +492,9 @@ pub(crate) fn test_slots(db: Db, provider: Provider, ids: &[(i64, bool)]) -> Slo
                         provider_account_id: format!("acct-{id}"),
                         display: format!("a{id}"),
                         trusted,
+                        auth_mode: AuthMode::OAuth,
                         plan: None,
+                        http_referer: None,
                         state: Mutex::new(SlotState {
                             access_token: "at".into(),
                             refresh_token: "rt".into(),

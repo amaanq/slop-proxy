@@ -15,6 +15,7 @@ use super::{AppState, LogGuard, cache_key, log_error, log_rejected, log_usage};
 use crate::codex::sse::{EventStream, event_stream};
 use crate::codex::types::Usage;
 use crate::db::usage::UsageRecord;
+use crate::provider::Provider;
 use crate::translate::openai_req::{self, OpenAiRequest};
 use crate::translate::openai_stream::{OpenAiStream, render_aggregated};
 use crate::translate::{StopKind, UsageCapture, aggregate, model_map};
@@ -31,6 +32,7 @@ pub async fn chat_completions(
     Extension(auth): Extension<AuthInfo>,
     Json(body): Json<Value>,
 ) -> Response {
+    let raw = body.clone();
     let req = match serde_json::from_value::<OpenAiRequest>(body) {
         Ok(r) => r,
         Err(e) => {
@@ -38,12 +40,19 @@ pub async fn chat_completions(
             return translation_error(DIALECT, &format!("invalid request: {e}"));
         }
     };
-    if state.cfg.models.routes_to_anthropic(&req.model) {
-        log_rejected(&state.db, &auth, "chat", &req.model);
-        return translation_error(
-            DIALECT,
-            "this model is relayed to Anthropic and only available on /v1/messages",
-        );
+    match state.cfg.models.route(&req.model) {
+        Provider::Anthropic => {
+            log_rejected(&state.db, &auth, "chat", &req.model);
+            return translation_error(
+                DIALECT,
+                "this model is relayed to Anthropic and only available on /v1/messages",
+            );
+        }
+        Provider::Gemini => {
+            let model = req.model.clone();
+            return super::gemini::chat_completions(state, auth, raw, model).await;
+        }
+        Provider::OpenAi => {}
     }
     let mut upstream_req = match openai_req::to_responses(&req, &state.cfg) {
         Ok(r) => r,
@@ -231,7 +240,7 @@ pub async fn models(
         data: Vec<ModelEntry>,
     }
 
-    let data = match live {
+    let mut data = match live {
         Some(models) => models
             .iter()
             .filter(|m| m.listed())
@@ -242,7 +251,7 @@ pub async fn models(
                 owned_by: "openai",
                 context_window: m.context_window,
             })
-            .collect(),
+            .collect::<Vec<ModelEntry>>(),
         None => {
             let mut ids = state.cfg.models.known.clone();
             let default = &state.cfg.models.default;
@@ -257,9 +266,24 @@ pub async fn models(
                     owned_by: "slop-proxy",
                     context_window: None,
                 })
-                .collect()
+                .collect::<Vec<ModelEntry>>()
         }
     };
+
+    data.extend(state.gemini.models().await.into_iter().filter_map(|id| {
+        state
+            .cfg
+            .models
+            .route(&id)
+            .eq(&crate::provider::Provider::Gemini)
+            .then_some(ModelEntry {
+                id,
+                object: "model",
+                created,
+                owned_by: "google",
+                context_window: None,
+            })
+    }));
 
     Json(ModelList {
         object: "list",

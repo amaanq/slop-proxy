@@ -3,7 +3,7 @@ use rusqlite::{Row, params};
 
 use super::Db;
 use crate::oauth::TokenSet;
-use crate::provider::Provider;
+use crate::provider::{AuthMode, Provider};
 
 #[derive(Debug, Clone)]
 pub struct Account {
@@ -11,11 +11,13 @@ pub struct Account {
     pub provider: Provider,
     pub provider_account_id: String,
     pub trusted: bool,
+    pub auth_mode: AuthMode,
     pub email: Option<String>,
     pub label: Option<String>,
     pub plan_type: Option<String>,
     pub access_token: String,
     pub refresh_token: String,
+    pub http_referer: Option<String>,
     pub access_expires_at: Option<i64>,
     pub status: String,
     pub cooldown_until: Option<i64>,
@@ -28,11 +30,13 @@ fn from_row(row: &Row) -> rusqlite::Result<Account> {
         provider: row.get("provider")?,
         provider_account_id: row.get("provider_account_id")?,
         trusted: row.get("trusted")?,
+        auth_mode: row.get("auth_mode")?,
         email: row.get("email")?,
         label: row.get("label")?,
         plan_type: row.get("plan_type")?,
         access_token: row.get("access_token")?,
         refresh_token: row.get("refresh_token")?,
+        http_referer: row.get("http_referer")?,
         access_expires_at: row.get("access_expires_at")?,
         status: row.get("status")?,
         cooldown_until: row.get("cooldown_until")?,
@@ -40,7 +44,7 @@ fn from_row(row: &Row) -> rusqlite::Result<Account> {
     })
 }
 
-const COLS: &str = "id, provider, provider_account_id, trusted, email, label, plan_type, access_token, refresh_token, access_expires_at, status, cooldown_until, disabled_reason";
+const COLS: &str = "id, provider, provider_account_id, trusted, auth_mode, email, label, plan_type, access_token, refresh_token, http_referer, access_expires_at, status, cooldown_until, disabled_reason";
 
 impl Db {
     #[allow(clippy::too_many_arguments)]
@@ -52,12 +56,14 @@ impl Db {
         label: Option<&str>,
         plan_type: Option<&str>,
         tokens: &TokenSet,
+        auth_mode: AuthMode,
     ) -> Result<i64> {
         let conn = self.0.lock().await;
         conn.execute(
-            "INSERT INTO accounts (provider, provider_account_id, email, label, plan_type, access_token, refresh_token, access_expires_at, last_refresh_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, unixepoch())
+            "INSERT INTO accounts (provider, provider_account_id, email, label, plan_type, access_token, refresh_token, access_expires_at, last_refresh_at, auth_mode)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, unixepoch(), ?9)
              ON CONFLICT(provider, provider_account_id) DO UPDATE SET
+               auth_mode = excluded.auth_mode,
                email = excluded.email,
                label = COALESCE(excluded.label, label),
                plan_type = excluded.plan_type,
@@ -78,6 +84,7 @@ impl Db {
                 tokens.access_token,
                 tokens.refresh_token,
                 tokens.expires_at,
+                auth_mode,
             ],
         )?;
         let id = conn.query_row(
@@ -134,6 +141,15 @@ impl Db {
              WHERE id = ?1 OR email = ?2 OR label = ?2",
             params![id, key, trusted],
         )?)
+    }
+
+    pub async fn set_account_http_referer(&self, id: i64, referer: Option<&str>) -> Result<()> {
+        let conn = self.0.lock().await;
+        conn.execute(
+            "UPDATE accounts SET http_referer = ?2, updated_at = unixepoch() WHERE id = ?1",
+            params![id, referer],
+        )?;
+        Ok(())
     }
 
     pub async fn set_account_status(

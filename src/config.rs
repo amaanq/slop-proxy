@@ -5,6 +5,7 @@ use eyre::{Result, WrapErr};
 use serde::Deserialize;
 
 use crate::cli::Cli;
+use crate::provider::Provider;
 
 pub const DEFAULT_INSTRUCTIONS: &str = "You are Codex, based on GPT-5. You are running as a coding agent on a user's computer. Answer the user's requests directly and concisely.";
 
@@ -16,7 +17,28 @@ pub struct Config {
     pub metrics_bind: Option<String>,
     pub codex: CodexConfig,
     pub anthropic: AnthropicConfig,
+    pub gemini: GeminiConfig,
     pub models: ModelsConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct GeminiConfig {
+    pub base_url: String,
+    /// Sent on every upstream call. A key restricted to an HTTP origin needs
+    /// `Referer` here, and some deployments key on `x-goog-api-client`.
+    pub headers: BTreeMap<String, String>,
+    pub soft_utilization_limit: f64,
+}
+
+impl Default for GeminiConfig {
+    fn default() -> Self {
+        Self {
+            base_url: "https://generativelanguage.googleapis.com/v1beta/openai".into(),
+            headers: BTreeMap::new(),
+            soft_utilization_limit: 0.9,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -97,6 +119,8 @@ pub struct ModelsConfig {
     /// Model patterns relayed verbatim to the Anthropic backend instead of
     /// being translated for the codex one.
     pub anthropic_patterns: Vec<String>,
+    /// Model patterns served by the Gemini backend.
+    pub gemini_patterns: Vec<String>,
 }
 
 impl Default for ModelsConfig {
@@ -107,17 +131,25 @@ impl Default for ModelsConfig {
             aliases: BTreeMap::new(),
             known: Vec::new(),
             anthropic_patterns: vec!["claude-*".into()],
+            gemini_patterns: vec!["gemini-*".into()],
         }
     }
 }
 
 impl ModelsConfig {
-    /// True when the requested model is relayed verbatim to the Anthropic
-    /// backend instead of being translated for the codex one.
-    pub fn routes_to_anthropic(&self, model: &str) -> bool {
-        self.anthropic_patterns
-            .iter()
-            .any(|p| pattern_specificity(p, model).is_some())
+    /// Which backend serves this model.
+    pub fn route(&self, model: &str) -> Provider {
+        let best = |pats: &[String]| {
+            pats.iter()
+                .filter_map(|p| pattern_specificity(p, model))
+                .max()
+        };
+        match (best(&self.anthropic_patterns), best(&self.gemini_patterns)) {
+            (Some(a), Some(g)) if g > a => Provider::Gemini,
+            (Some(_), _) => Provider::Anthropic,
+            (None, Some(_)) => Provider::Gemini,
+            (None, None) => Provider::OpenAi,
+        }
     }
 }
 
@@ -147,6 +179,7 @@ struct FileConfig {
     db: Option<PathBuf>,
     codex: Option<CodexConfig>,
     anthropic: Option<AnthropicConfig>,
+    gemini: Option<GeminiConfig>,
     models: Option<ModelsConfig>,
 }
 
@@ -187,6 +220,7 @@ impl Config {
             metrics_bind: file.metrics_bind,
             codex: file.codex.unwrap_or_default(),
             anthropic: file.anthropic.unwrap_or_default(),
+            gemini: file.gemini.unwrap_or_default(),
             models: file.models.unwrap_or_default(),
         })
     }
@@ -201,4 +235,47 @@ fn xdg_dir(var: &str, fallback: &str) -> PathBuf {
             let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
             PathBuf::from(home).join(fallback)
         })
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::*;
+
+    fn cfg() -> ModelsConfig {
+        ModelsConfig {
+            anthropic_patterns: vec!["claude-*".into()],
+            gemini_patterns: vec!["gemini-*".into()],
+            ..ModelsConfig::default()
+        }
+    }
+
+    #[test]
+    fn each_family_reaches_its_own_backend() {
+        assert_eq!(cfg().route("claude-opus-5"), Provider::Anthropic);
+        assert_eq!(cfg().route("gemini-3-pro"), Provider::Gemini);
+        assert_eq!(cfg().route("gpt-5.6-sol"), Provider::OpenAi);
+    }
+
+    /// Claude models must never reach codex, so an alias that names no
+    /// backend has to be claimed explicitly rather than falling through.
+    #[test]
+    fn a_bare_alias_falls_through_until_it_is_claimed() {
+        assert_eq!(cfg().route("fable"), Provider::OpenAi);
+        let claimed = ModelsConfig {
+            anthropic_patterns: vec!["claude-*".into(), "fable*".into()],
+            ..cfg()
+        };
+        assert_eq!(claimed.route("fable"), Provider::Anthropic);
+    }
+
+    #[test]
+    fn the_longer_prefix_wins_over_a_broader_one() {
+        let c = ModelsConfig {
+            anthropic_patterns: vec!["gemini-*".into()],
+            gemini_patterns: vec!["gemini-3-*".into()],
+            ..cfg()
+        };
+        assert_eq!(c.route("gemini-3-pro"), Provider::Gemini);
+        assert_eq!(c.route("gemini-2-flash"), Provider::Anthropic);
+    }
 }

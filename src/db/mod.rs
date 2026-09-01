@@ -25,6 +25,15 @@ impl Db {
         conn.pragma_update(None, "foreign_keys", "ON")?;
 
         conn.execute_batch(SCHEMA).wrap_err("creating schema")?;
+        let has_http_referer = conn
+            .prepare("PRAGMA table_info(accounts)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .iter()
+            .any(|name| name == "http_referer");
+        if !has_http_referer {
+            conn.execute("ALTER TABLE accounts ADD COLUMN http_referer TEXT", [])?;
+        }
 
         Ok(Self(Arc::new(Mutex::new(conn))))
     }

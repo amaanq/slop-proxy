@@ -4,6 +4,7 @@ mod clock;
 mod codex;
 mod config;
 mod db;
+mod gemini;
 mod oauth;
 mod pool;
 mod pricing;

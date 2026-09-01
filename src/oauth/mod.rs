@@ -6,6 +6,7 @@ use eyre::{Result, WrapErr, bail, eyre};
 use serde::Deserialize;
 
 use crate::db::Db;
+use crate::provider::AuthMode;
 
 /// One shared client so token refreshes reuse connections instead of paying
 /// TLS setup per call (refreshes run while a slot mutex is held).
@@ -158,6 +159,7 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
             label.as_deref(),
             info.plan_type.as_deref(),
             &tokens,
+            AuthMode::OAuth,
         )
         .await?;
 

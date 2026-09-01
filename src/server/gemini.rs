@@ -86,7 +86,7 @@ pub async fn chat_completions(
     };
 
     let session_key = session_key(&auth.user, &body);
-    let (account_id, upstream) = match state.gemini.execute(&body, &session_key).await {
+    let (account_id, upstream) = match state.gemini.execute(crate::pool::gemini::Call::OpenAi(&body), &session_key).await {
         Ok(r) => r,
         Err(e) => {
             log_error(&state.db, record, pool_error_status(&e), "pool");
@@ -235,6 +235,174 @@ impl ChatUsageScan {
                 && let Some(u) = env.usage
             {
                 self.capture.record(&u.into());
+            }
+        }
+    }
+}
+
+/// The native surface Gemini CLI speaks. Nothing is translated in either
+/// direction, so the reply is byte-identical to Google's and only usage is
+/// read out of it on the way past.
+pub async fn native(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+    axum::extract::Path(spec): axum::extract::Path<String>,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
+    axum::Json(body): axum::Json<Value>,
+) -> Response {
+    let Some((model, action)) = spec.split_once(':') else {
+        return error_response(
+            DIALECT,
+            404,
+            "invalid_request_error",
+            "expected /v1beta/models/{model}:{generateContent|streamGenerateContent}",
+        );
+    };
+    if !matches!(action, "generateContent" | "streamGenerateContent") {
+        return error_response(
+            DIALECT,
+            404,
+            "invalid_request_error",
+            "unsupported action on the native surface",
+        );
+    }
+    if state.cfg.models.route(model) != crate::provider::Provider::Gemini {
+        return error_response(
+            DIALECT,
+            400,
+            "invalid_request_error",
+            "this model is not served by the gemini backend",
+        );
+    }
+
+    let streaming = action == "streamGenerateContent";
+    let record = UsageRecord {
+        meter_id: Some(auth.meter_id),
+        token_id: Some(auth.token_id),
+        user: auth.user.clone(),
+        dialect: "native",
+        requested_model: model.to_string(),
+        upstream_model: model.to_string(),
+        status: 200,
+        ..Default::default()
+    };
+
+    let key = native_session_key(&auth.user, &body);
+    let call = crate::pool::gemini::Call::Native {
+        model,
+        action,
+        query: query.as_deref(),
+        body: &body,
+    };
+    let (account_id, upstream) = match state.gemini.execute(call, &key).await {
+        Ok(r) => r,
+        Err(e) => {
+            log_error(&state.db, record, pool_error_status(&e), "pool");
+            return pool_error_response(DIALECT, e);
+        }
+    };
+    let resp = upstream.response;
+    let mut record = record;
+    record.account_id = Some(account_id);
+    record.status = resp.status().as_u16() as i64;
+    let ok = resp.status().is_success();
+    let builder = forwarded_response(&resp);
+
+    if streaming {
+        let capture = UsageCapture::default();
+        let guard = LogGuard::new(state.db.clone(), state.prices.clone(), capture.clone(), record);
+        let mut scan = NativeUsageScan::new(capture);
+        let stream = resp.bytes_stream().map(move |item| {
+            let _ = &guard;
+            if let Ok(bytes) = &item {
+                scan.feed(bytes);
+            }
+            item
+        });
+        return builder
+            .body(Body::from_stream(stream))
+            .unwrap_or_else(|e| error_response(DIALECT, 502, "api_error", &e.to_string()));
+    }
+
+    let bytes = match resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            log_error(&state.db, record, 502, "upstream_read");
+            return error_response(DIALECT, 502, "api_error", &e.to_string());
+        }
+    };
+    if ok
+        && let Ok(v) = serde_json::from_slice::<Value>(&bytes)
+        && let Some(u) = v.get("usageMetadata")
+    {
+        apply_native_usage(&mut record, u);
+    }
+    super::log_usage(&state.db, &state.prices, record);
+    builder
+        .body(Body::from(bytes))
+        .unwrap_or_else(|e| error_response(DIALECT, 502, "api_error", &e.to_string()))
+}
+
+fn apply_native_usage(record: &mut UsageRecord, usage: &Value) {
+    let Ok(chat) = serde_json::from_value::<ChatUsage>(crate::gemini::native::usage_value(usage))
+    else {
+        return;
+    };
+    let capture = UsageCapture::default();
+    capture.record(&chat.into());
+    let snap = capture.snapshot();
+    record.input_tokens = snap.input_tokens;
+    record.output_tokens = snap.output_tokens;
+    record.cache_read_tokens = snap.cache_read_tokens;
+    record.reasoning_tokens = snap.reasoning_tokens;
+}
+
+/// The native request nests its first turn under `contents`, where the chat
+/// dialect uses `messages`.
+fn native_session_key(user: &str, body: &Value) -> String {
+    let mut h = hmac_sha256::Hash::new();
+    h.update(user.as_bytes());
+    if let Some(first) = body
+        .get("contents")
+        .and_then(Value::as_array)
+        .and_then(|c| c.first())
+    {
+        h.update(serde_json::to_string(first).unwrap_or_default().as_bytes());
+    }
+    data_encoding::HEXLOWER.encode(&h.finalize())
+}
+
+/// Reads `usageMetadata` out of a native SSE stream. Only the terminal chunk
+/// carries totals, so every frame is tried and the last one wins.
+struct NativeUsageScan {
+    capture: UsageCapture,
+    buf: Vec<u8>,
+}
+
+impl NativeUsageScan {
+    fn new(capture: UsageCapture) -> Self {
+        Self {
+            capture,
+            buf: Vec::new(),
+        }
+    }
+
+    fn feed(&mut self, bytes: &[u8]) {
+        self.buf.extend_from_slice(bytes);
+        while let Some(nl) = self.buf.iter().position(|b| *b == b'\n') {
+            let line: Vec<u8> = self.buf.drain(..=nl).collect();
+            let line = line.strip_suffix(b"\n").unwrap_or(&line);
+            let line = line.strip_suffix(b"\r").unwrap_or(line);
+            let Some(data) = line.strip_prefix(b"data:") else {
+                continue;
+            };
+            let data = data.strip_prefix(b" ").unwrap_or(data);
+            if let Ok(v) = serde_json::from_slice::<Value>(data)
+                && let Some(u) = v.get("usageMetadata")
+                && let Ok(chat) =
+                    serde_json::from_value::<ChatUsage>(crate::gemini::native::usage_value(u))
+            {
+                self.capture.record(&chat.into());
             }
         }
     }

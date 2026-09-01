@@ -227,6 +227,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/messages/count_tokens", post(anthropic::count_tokens))
         .route("/v1/chat/completions", post(openai::chat_completions))
         .route("/v1/models", get(openai::models))
+        .route("/v1beta/models/{spec}", post(gemini::native))
         .route("/config/codex/auth.json", get(clientcfg::codex_auth))
         .route("/config/codex/config.toml", get(clientcfg::codex_config))
         .route(

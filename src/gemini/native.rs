@@ -424,7 +424,7 @@ fn finish_reason(reason: Option<&str>) -> Value {
     }
 }
 
-fn usage_value(usage: &Value) -> Value {
+pub fn usage_value(usage: &Value) -> Value {
     let prompt = usage
         .get("promptTokenCount")
         .and_then(Value::as_i64)

@@ -216,7 +216,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/models", get(openai::models))
         .route("/config/codex/auth.json", get(clientcfg::codex_auth))
         .route("/config/codex/config.toml", get(clientcfg::codex_config))
-        .route("/v1/responses", post(openai::responses_passthrough))
+        .route(
+            "/v1/responses",
+            post(openai::responses_passthrough).get(openai::responses_upgrade_required),
+        )
         .layer(middleware::from_fn(decompress::zstd_requests))
         .layer(axum::extract::DefaultBodyLimit::max(decompress::MAX_BODY))
         .layer(middleware::from_fn_with_state(

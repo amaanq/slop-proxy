@@ -99,6 +99,25 @@ fn render_accounts(out: &mut String, accounts: &[AccountSnapshot]) {
     }
     gauge_header(
         out,
+        "slop_account_model_utilization_ratio",
+        "Fraction of a model's own sub-limit consumed. Measured against that \
+         model's allowance rather than the account's, so it is not comparable \
+         to slop_account_utilization_ratio",
+    );
+    for a in accounts {
+        let Some(usage) = &a.usage else { continue };
+        for w in &usage.model_windows {
+            line(
+                out,
+                "slop_account_model_utilization_ratio",
+                a,
+                &[("window", &w.window), ("model", &w.model)],
+                w.utilization,
+            );
+        }
+    }
+    gauge_header(
+        out,
         "slop_account_window_reset_seconds",
         "Seconds until the account's limit window rolls over",
     );

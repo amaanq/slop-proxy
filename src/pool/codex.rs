@@ -73,6 +73,7 @@ impl CodexPool {
                             &slot,
                             AccountUsage {
                                 windows,
+                                model_windows: Vec::new(),
                                 locked: usage.rate_limit.limit_reached,
                                 observed_at: 0,
                             },
@@ -262,6 +263,7 @@ fn usage_from_headers(headers: &reqwest::header::HeaderMap) -> Option<AccountUsa
     }
     (!windows.is_empty()).then_some(AccountUsage {
         windows,
+        model_windows: Vec::new(),
         locked: false,
         observed_at: 0,
     })

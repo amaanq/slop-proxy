@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use super::{AccountUsage, PoolError, Slot, Slots, UsageWindow};
+use super::{AccountUsage, ModelWindow, PoolError, Slot, Slots, UsageWindow};
 use crate::anthropic::client::{AnthropicClient, RelayHeaders};
 use crate::db::Db;
 use crate::provider::Provider;
@@ -65,6 +65,14 @@ impl AnthropicPool {
                             &slot,
                             AccountUsage {
                                 windows,
+                                model_windows: usage
+                                    .model_windows()
+                                    .map(|(model, window, utilization)| ModelWindow {
+                                        model,
+                                        window: window.to_string(),
+                                        utilization,
+                                    })
+                                    .collect(),
                                 locked: usage.locked(),
                                 observed_at: 0,
                             },
@@ -217,6 +225,7 @@ mod tests {
             .note_usage(
                 &head,
                 AccountUsage {
+                    model_windows: Vec::new(),
                     windows: vec![UsageWindow {
                         name: "5h".into(),
                         utilization: 0.97,
@@ -237,6 +246,7 @@ mod tests {
             .note_usage(
                 &fresh,
                 AccountUsage {
+                    model_windows: Vec::new(),
                     windows: vec![UsageWindow {
                         name: "5h".into(),
                         utilization: 0.01,
@@ -261,6 +271,7 @@ mod tests {
                     .note_usage(
                         &slot,
                         AccountUsage {
+                            model_windows: Vec::new(),
                             windows: vec![UsageWindow {
                                 name: "5h".into(),
                                 utilization: 0.95,

@@ -61,7 +61,12 @@ pub fn request(body: &Value) -> Result<NativeRequest, String> {
                     .map(argument_value)
                     .transpose()?
                     .unwrap_or_else(|| json!({}));
-                parts.push(json!({"functionCall": {"name": name, "args": args}}));
+                let mut part = json!({"functionCall": {"name": name, "args": args}});
+                // Gemini 3 rejects replayed history that lost this.
+                if let Some(sig) = thought_signature(call) {
+                    part["thoughtSignature"] = json!(sig);
+                }
+                parts.push(part);
             }
         }
 
@@ -332,7 +337,8 @@ fn response_choice(candidate: &Value, index: usize) -> Value {
             text.push_str(value);
         }
         if let Some(call) = part.get("functionCall") {
-            tool_calls.push(tool_call(call, tool_calls.len(), false));
+            let sig = part.get("thoughtSignature").and_then(Value::as_str);
+            tool_calls.push(tool_call(call, sig, tool_calls.len(), false));
         }
         if let Some(data) = part.get("inlineData") {
             let mime = data
@@ -377,7 +383,16 @@ fn response_choice(candidate: &Value, index: usize) -> Value {
     })
 }
 
-fn tool_call(call: &Value, index: usize, streaming: bool) -> Value {
+/// Reads the signature back out of the shape Google's own OpenAI-compatible
+/// surface uses.
+fn thought_signature(call: &Value) -> Option<&str> {
+    call.get("extra_content")?
+        .get("google")?
+        .get("thought_signature")?
+        .as_str()
+}
+
+fn tool_call(call: &Value, signature: Option<&str>, index: usize, streaming: bool) -> Value {
     let name = call.get("name").and_then(Value::as_str).unwrap_or_default();
     let args = call.get("args").cloned().unwrap_or_else(|| json!({}));
     let id = call
@@ -390,6 +405,9 @@ fn tool_call(call: &Value, index: usize, streaming: bool) -> Value {
         "type": "function",
         "function": {"name": name, "arguments": serde_json::to_string(&args).unwrap_or_default()}
     });
+    if let Some(sig) = signature {
+        output["extra_content"] = json!({"google": {"thought_signature": sig}});
+    }
     if streaming {
         output["index"] = json!(index);
     }
@@ -517,7 +535,8 @@ impl NativeStream {
                     text.push_str(value);
                 }
                 if let Some(call) = part.get("functionCall") {
-                    tool_calls.push(tool_call(call, tool_calls.len(), true));
+                    let sig = part.get("thoughtSignature").and_then(Value::as_str);
+                    tool_calls.push(tool_call(call, sig, tool_calls.len(), true));
                 }
                 if let Some(data) = part.get("inlineData") {
                     let mime = data
@@ -658,5 +677,48 @@ mod tests {
         assert!(text.contains("chatcmpl-r2"));
         assert!(text.contains("\"content\":\"OK\""));
         assert_eq!(output[1], b"data: [DONE]\n\n");
+    }
+}
+
+#[cfg(test)]
+mod signature_tests {
+    use super::*;
+
+    /// The signature rides on the part, beside functionCall not inside it.
+    #[test]
+    fn a_replayed_tool_call_keeps_its_signature() {
+        let candidate = json!({
+            "content": {"parts": [{
+                "functionCall": {"name": "shell", "args": {"cmd": "ls"}, "id": "call_1"},
+                "thoughtSignature": "EtUBCtIB"
+            }]}
+        });
+        let choice = response_choice(&candidate, 0);
+        let call = &choice["message"]["tool_calls"][0];
+        assert_eq!(
+            call["extra_content"]["google"]["thought_signature"],
+            "EtUBCtIB"
+        );
+
+        let replay = json!({
+            "model": "gemini-3-flash-preview",
+            "messages": [
+                {"role": "user", "content": "ls"},
+                {"role": "assistant", "content": null, "tool_calls": [call]},
+                {"role": "tool", "tool_call_id": "call_1", "content": "{}"}
+            ]
+        });
+        let out = request(&replay).unwrap();
+        let parts = out.body["contents"][1]["parts"].as_array().unwrap();
+        assert_eq!(parts[0]["thoughtSignature"], "EtUBCtIB");
+    }
+
+    #[test]
+    fn a_call_without_a_signature_adds_no_field() {
+        let candidate = json!({
+            "content": {"parts": [{"functionCall": {"name": "shell", "args": {}}}]}
+        });
+        let choice = response_choice(&candidate, 0);
+        assert!(choice["message"]["tool_calls"][0].get("extra_content").is_none());
     }
 }

@@ -8,6 +8,19 @@ use crate::gemini::client::{GeminiClient, GeminiResponse};
 use crate::provider::Provider;
 use crate::upstream::SendError;
 
+/// What to send upstream. A caller already speaking the native dialect skips
+/// the translation entirely, but shares the retry and cooldown policy.
+#[derive(Clone, Copy)]
+pub enum Call<'a> {
+    OpenAi(&'a Value),
+    Native {
+        model: &'a str,
+        action: &'a str,
+        query: Option<&'a str>,
+        body: &'a Value,
+    },
+}
+
 /// Session-sticky pool over Gemini accounts.
 pub struct GeminiPool {
     slots: Slots,
@@ -68,7 +81,7 @@ impl GeminiPool {
 
     pub async fn execute(
         &self,
-        body: &Value,
+        call: Call<'_>,
         session_key: &str,
     ) -> Result<(i64, GeminiResponse), PoolError> {
         let ranked = self.ranked(session_key).await;
@@ -90,11 +103,24 @@ impl GeminiPool {
                 continue;
             };
 
-            match self
-                .client
-                .send(&key, slot.http_referer.as_deref(), body)
-                .await
-            {
+            let referer = slot.http_referer.as_deref();
+            let sent = match call {
+                Call::OpenAi(body) => self.client.send(&key, referer, body).await,
+                Call::Native {
+                    model,
+                    action,
+                    query,
+                    body,
+                } => self
+                    .client
+                    .send_native(&key, referer, model, action, query, body)
+                    .await
+                    .map(|response| GeminiResponse {
+                        response,
+                        protocol: crate::gemini::client::GeminiProtocol::Native,
+                    }),
+            };
+            match sent {
                 Ok(resp) => {
                     self.slots.mark_ok(&slot).await;
                     return Ok((slot.id, resp));

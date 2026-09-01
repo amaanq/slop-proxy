@@ -26,18 +26,7 @@ pub async fn require_token(
         Dialect::OpenAi
     };
 
-    let raw = req
-        .headers()
-        .get("x-api-key")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string)
-        .or_else(|| {
-            req.headers()
-                .get("authorization")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.strip_prefix("Bearer "))
-                .map(str::to_string)
-        });
+    let raw = bearer_token(req.headers(), req.uri().query());
 
     let Some(raw) = raw else {
         return error_response(
@@ -71,8 +60,10 @@ pub async fn require_token(
                 }
             };
             if admission.slowdown_ms > 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(admission.slowdown_ms as u64))
-                    .await;
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    admission.slowdown_ms as u64,
+                ))
+                .await;
             }
             req.extensions_mut().insert(AuthInfo {
                 token_id: token.id,
@@ -118,4 +109,29 @@ fn insert_header(response: &mut Response, name: &'static str, value: i64) {
             .headers_mut()
             .insert(HeaderName::from_static(name), value);
     }
+}
+
+/// Gemini CLI sends its key as `x-goog-api-key`, and the raw REST form puts it
+/// in a `key` query parameter, so neither of the other two headers is present.
+fn bearer_token(
+    headers: &axum::http::HeaderMap,
+    query: Option<&str>,
+) -> Option<String> {
+    let header = |name: &str| headers.get(name)?.to_str().ok().map(str::to_string);
+    header("x-api-key")
+        .or_else(|| header("x-goog-api-key"))
+        .or_else(|| {
+            headers
+                .get("authorization")?
+                .to_str()
+                .ok()?
+                .strip_prefix("Bearer ")
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            query?
+                .split('&')
+                .find_map(|p| p.strip_prefix("key="))
+                .map(str::to_string)
+        })
 }

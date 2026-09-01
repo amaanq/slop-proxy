@@ -111,6 +111,60 @@ impl GeminiClient {
         })
     }
 
+    /// A caller that already speaks the native dialect is relayed as-is, so
+    /// nothing round-trips through the OpenAI shape and back.
+    pub async fn send_native(
+        &self,
+        api_key: &str,
+        account_referer: Option<&str>,
+        model: &str,
+        action: &str,
+        query: Option<&str>,
+        body: &Value,
+    ) -> Result<reqwest::Response, SendError> {
+        let base = self.cfg.base_url.trim_end_matches('/');
+        let base = base.strip_suffix("/openai").unwrap_or(base);
+        let query = forwarded_query(query);
+        let mut req = self
+            .http
+            .post(format!("{base}/models/{model}:{action}{query}"))
+            .header("x-goog-api-key", api_key)
+            .json(body);
+        let referer = account_referer.or_else(|| {
+            self.cfg
+                .headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("referer"))
+                .map(|(_, v)| v.as_str())
+        });
+        if let Some(referer) = referer {
+            req = req.header("referer", referer);
+        }
+        for (name, value) in &self.cfg.headers {
+            if name.eq_ignore_ascii_case("referer") && referer.is_some() {
+                continue;
+            }
+            req = req.header(name, value);
+        }
+
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| SendError::Network(e.to_string()))?;
+        let status = resp.status().as_u16();
+        if !matches!(status, 401 | 403 | 429 | 500..=599) {
+            return Ok(resp);
+        }
+        let retry_after = retry_after_secs(resp.headers(), RESET_HEADERS);
+        let body = resp.text().await.unwrap_or_default();
+        let body = body.chars().take(2000).collect::<String>();
+        Err(match status {
+            401 | 403 => SendError::Auth(body),
+            429 => SendError::RateLimited { retry_after, body },
+            s => SendError::Upstream { status: s, body },
+        })
+    }
+
     /// The catalog carries no per-key state, so a restricted key can read it
     /// from the native surface with the same referer the send path uses.
     pub async fn models(
@@ -154,6 +208,21 @@ impl GeminiClient {
     }
 }
 
+/// `alt=sse` decides whether the reply streams, so it has to survive, but
+/// `key` holds the caller's own token and upstream would reject it.
+fn forwarded_query(query: Option<&str>) -> String {
+    query
+        .map(|q| {
+            q.split('&')
+                .filter(|p| !p.starts_with("key="))
+                .collect::<Vec<_>>()
+                .join("&")
+        })
+        .filter(|q| !q.is_empty())
+        .map(|q| format!("?{q}"))
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
@@ -164,6 +233,15 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn the_callers_own_token_is_not_forwarded_upstream() {
+        assert_eq!(forwarded_query(Some("key=sp-secret")), "");
+        assert_eq!(forwarded_query(Some("alt=sse&key=sp-secret")), "?alt=sse");
+        assert_eq!(forwarded_query(Some("key=sp-secret&alt=sse")), "?alt=sse");
+        assert_eq!(forwarded_query(Some("alt=sse")), "?alt=sse");
+        assert_eq!(forwarded_query(None), "");
+    }
 
     #[tokio::test]
     async fn restricted_keys_use_the_native_auth_surface() {
@@ -209,3 +287,4 @@ mod tests {
         );
     }
 }
+

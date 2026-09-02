@@ -18,15 +18,8 @@ impl RequestFacts {
         Self {
             request_bytes: request_bytes(headers),
             turn_index: turns.map_or(0, |t| t.len() as i64),
-            tools_declared: body.get("tools").and_then(Value::as_array).map_or(0, |t| {
-                t.iter()
-                    .map(|d| {
-                        d.get("functionDeclarations")
-                            .and_then(Value::as_array)
-                            .map_or(1, Vec::len) as i64
-                    })
-                    .sum()
-            }),
+            tools_declared: tools_in(body)
+                + turns.map_or(0, |t| t.iter().map(tools_in).sum::<i64>()),
             thinking_budget: thinking_budget(body),
             image_count: turns.map_or(0, |t| t.iter().map(image_parts).sum()),
         }
@@ -41,6 +34,21 @@ fn request_bytes(headers: &axum::http::HeaderMap) -> i64 {
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse().ok())
         .unwrap_or(0)
+}
+
+/// Codex carries its catalog as an `AdditionalTools` item inside `input`
+/// rather than a top-level array (protocol/src/models.rs:953), so a request
+/// has to be searched in both places.
+fn tools_in(node: &Value) -> i64 {
+    node.get("tools").and_then(Value::as_array).map_or(0, |t| {
+        t.iter()
+            .map(|d| {
+                d.get("functionDeclarations")
+                    .and_then(Value::as_array)
+                    .map_or(1, Vec::len) as i64
+            })
+            .sum()
+    })
 }
 
 /// `messages` is Anthropic and OpenAI chat, `input` the Responses API,
@@ -119,6 +127,17 @@ mod tests {
             "generationConfig": {"thinkingConfig": {"thinkingBudget": 512}},
         }));
         assert_eq!((f.tools_declared, f.thinking_budget, f.image_count), (2, 512, 1));
+    }
+
+    #[test]
+    fn codex_declares_its_tools_inside_input() {
+        let f = facts(json!({
+            "input": [
+                {"role": "system", "tools": [{"name": "exec"}, {"name": "wait"}]},
+                {"role": "user", "content": []},
+            ],
+        }));
+        assert_eq!((f.turn_index, f.tools_declared), (2, 2));
     }
 
     #[test]

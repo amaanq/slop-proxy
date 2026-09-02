@@ -325,6 +325,21 @@ fn render_sessions(out: &mut String, rows: &[crate::db::usage::SessionRow]) {
     }
     gauge_header(
         out,
+        "slop_session_tokens_max",
+        "Tokens the largest single conversation has billed over its life, \
+         counting every turn it ever resent rather than what fits in the \
+         context now. Reasoning is excluded, being a subset of output",
+    );
+    for r in rows {
+        let _ = writeln!(
+            out,
+            "slop_session_tokens_max{{user={}}} {}",
+            quote(&r.user),
+            r.tokens_max
+        );
+    }
+    gauge_header(
+        out,
         "slop_session_deepest_turn",
         "Longest conversation seen, in messages carried",
     );

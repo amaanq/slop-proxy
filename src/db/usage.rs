@@ -126,6 +126,7 @@ pub struct SessionRow {
     pub sessions: i64,
     pub deepest: i64,
     pub switches: i64,
+    pub tokens_max: i64,
 }
 
 impl Db {
@@ -528,9 +529,12 @@ impl Db {
     pub async fn session_metrics(&self) -> Result<Vec<SessionRow>> {
         let conn = self.0.lock().await;
         let mut stmt = conn.prepare(
-            "SELECT user, COUNT(*), COALESCE(MAX(deepest),0), COALESCE(SUM(accounts - 1),0)
+            "SELECT user, COUNT(*), COALESCE(MAX(deepest),0), COALESCE(SUM(accounts - 1),0),
+                    COALESCE(MAX(tokens),0)
              FROM (SELECT user, COUNT(DISTINCT account_id) AS accounts,
-                          MAX(turn_index) AS deepest
+                          MAX(turn_index) AS deepest,
+                          SUM(input_tokens + output_tokens
+                              + cache_read_tokens + cache_write_tokens) AS tokens
                    FROM usage_log
                    WHERE session_key <> '' AND account_id IS NOT NULL
                    GROUP BY user, session_key)
@@ -542,6 +546,7 @@ impl Db {
                 sessions: r.get(1)?,
                 deepest: r.get(2)?,
                 switches: r.get(3)?,
+                tokens_max: r.get(4)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)

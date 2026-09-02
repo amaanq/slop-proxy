@@ -172,6 +172,12 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
             Provider::Gemini => Err(eyre::eyre!(
                 "google has no device-code flow here, use `accounts add-key --provider gemini`"
             )),
+            Provider::Glm => Err(eyre::eyre!(
+                "z.ai issues static keys, use `accounts add-key --provider glm`"
+            )),
+            Provider::Zen => Err(eyre::eyre!(
+                "zen serves its free models without a credential, use `accounts add-key --provider zen` if you have one"
+            )),
         },
         Command::Accounts { command } => match command {
             AccountsCommand::List => accounts_list(&db).await,

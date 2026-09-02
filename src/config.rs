@@ -18,6 +18,8 @@ pub struct Config {
     pub codex: CodexConfig,
     pub anthropic: AnthropicConfig,
     pub gemini: GeminiConfig,
+    pub zen: ZenConfig,
+    pub glm: GlmConfig,
     pub models: ModelsConfig,
 }
 
@@ -37,6 +39,34 @@ impl Default for GeminiConfig {
             base_url: "https://generativelanguage.googleapis.com/v1beta/openai".into(),
             headers: BTreeMap::new(),
             soft_utilization_limit: 0.9,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct GlmConfig {
+    pub base_url: String,
+}
+
+impl Default for GlmConfig {
+    fn default() -> Self {
+        Self {
+            base_url: "https://api.z.ai/api/anthropic".into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ZenConfig {
+    pub base_url: String,
+}
+
+impl Default for ZenConfig {
+    fn default() -> Self {
+        Self {
+            base_url: "https://opencode.ai/zen/v1".into(),
         }
     }
 }
@@ -121,6 +151,10 @@ pub struct ModelsConfig {
     pub anthropic_patterns: Vec<String>,
     /// Model patterns served by the Gemini backend.
     pub gemini_patterns: Vec<String>,
+    /// Model patterns served by OpenCode Zen.
+    pub zen_patterns: Vec<String>,
+    /// Model patterns served by Z.ai's anthropic-compatible endpoint.
+    pub glm_patterns: Vec<String>,
 }
 
 impl Default for ModelsConfig {
@@ -132,24 +166,36 @@ impl Default for ModelsConfig {
             known: Vec::new(),
             anthropic_patterns: vec!["claude-*".into()],
             gemini_patterns: vec!["gemini-*".into()],
+            zen_patterns: Vec::new(),
+            glm_patterns: vec!["glm-*".into()],
         }
     }
 }
 
 impl ModelsConfig {
-    /// Which backend serves this model.
+    /// Which backend serves this model. The most specific pattern wins, and a
+    /// tie goes to whichever backend is listed first here.
     pub fn route(&self, model: &str) -> Provider {
-        let best = |pats: &[String]| {
-            pats.iter()
+        let sets = [
+            (Provider::Anthropic, &self.anthropic_patterns),
+            (Provider::Gemini, &self.gemini_patterns),
+            (Provider::Zen, &self.zen_patterns),
+            (Provider::Glm, &self.glm_patterns),
+        ];
+        let mut best: Option<(usize, Provider)> = None;
+        for (provider, patterns) in sets {
+            let Some(score) = patterns
+                .iter()
                 .filter_map(|p| pattern_specificity(p, model))
                 .max()
-        };
-        match (best(&self.anthropic_patterns), best(&self.gemini_patterns)) {
-            (Some(a), Some(g)) if g > a => Provider::Gemini,
-            (Some(_), _) => Provider::Anthropic,
-            (None, Some(_)) => Provider::Gemini,
-            (None, None) => Provider::OpenAi,
+            else {
+                continue;
+            };
+            if best.is_none_or(|(seen, _)| score > seen) {
+                best = Some((score, provider));
+            }
         }
+        best.map_or(Provider::OpenAi, |(_, provider)| provider)
     }
 }
 
@@ -180,6 +226,8 @@ struct FileConfig {
     codex: Option<CodexConfig>,
     anthropic: Option<AnthropicConfig>,
     gemini: Option<GeminiConfig>,
+    zen: Option<ZenConfig>,
+    glm: Option<GlmConfig>,
     models: Option<ModelsConfig>,
 }
 
@@ -221,6 +269,8 @@ impl Config {
             codex: file.codex.unwrap_or_default(),
             anthropic: file.anthropic.unwrap_or_default(),
             gemini: file.gemini.unwrap_or_default(),
+            zen: file.zen.unwrap_or_default(),
+            glm: file.glm.unwrap_or_default(),
             models: file.models.unwrap_or_default(),
         })
     }
@@ -277,5 +327,31 @@ mod route_tests {
         };
         assert_eq!(c.route("gemini-3-pro"), Provider::Gemini);
         assert_eq!(c.route("gemini-2-flash"), Provider::Anthropic);
+    }
+
+    fn with_zen(zen: &[&str]) -> ModelsConfig {
+        ModelsConfig {
+            zen_patterns: zen.iter().map(|s| s.to_string()).collect(),
+            ..cfg()
+        }
+    }
+
+    #[test]
+    fn zen_takes_the_models_it_names() {
+        let c = with_zen(&["muse-spark-*", "big-pickle"]);
+        assert_eq!(c.route("muse-spark-1.3-contributor-free"), Provider::Zen);
+        assert_eq!(c.route("big-pickle"), Provider::Zen);
+        assert_eq!(c.route("gpt-5.6-sol"), Provider::OpenAi);
+    }
+
+    /// Zen resells the other vendors under their own names, so a bare
+    /// `claude-*` there would silently move subscription traffic off the Max
+    /// seats. The longer prefix has to win for that split to be expressible.
+    #[test]
+    fn a_zen_pattern_only_takes_what_it_is_more_specific_about() {
+        let c = with_zen(&["claude-haiku-*"]);
+        assert_eq!(c.route("claude-haiku-4-5"), Provider::Zen);
+        assert_eq!(c.route("claude-opus-5"), Provider::Anthropic);
+        assert_eq!(with_zen(&["claude-*"]).route("claude-opus-5"), Provider::Anthropic);
     }
 }

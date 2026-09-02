@@ -60,6 +60,13 @@ pub async fn chat_completions(
             let model = req.model.clone();
             return super::gemini::chat_completions(state, auth, raw, model, facts).await;
         }
+        Provider::Glm => {
+            log_rejected(&state.db, &auth, "chat", &req.model);
+            return translation_error(
+                DIALECT,
+                "this model is served over /v1/messages",
+            );
+        }
         Provider::Zen => {}
         Provider::OpenAi => {}
     }
@@ -524,6 +531,7 @@ async fn gemini_responses(
     started: std::time::Instant,
 ) -> Response {
     let model = body["model"].as_str().unwrap_or_default().to_string();
+    let custom = crate::translate::gemini_bridge::custom_tools(&body);
     let chat = crate::translate::gemini_bridge::to_chat(&body);
     let (account_id, upstream) = match state
         .gemini
@@ -539,7 +547,7 @@ async fn gemini_responses(
     record.account_id = Some(account_id);
     let capture = UsageCapture::default();
     let frames =
-        crate::translate::gemini_bridge::value_stream(upstream.response, upstream.protocol, &model);
+        crate::translate::gemini_bridge::value_stream(upstream.response, upstream.protocol, &model, custom);
 
     if client_streams {
         let guard = LogGuard::new(

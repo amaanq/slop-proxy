@@ -387,6 +387,7 @@ pub async fn responses_passthrough(
     let capture = UsageCapture::default();
 
     if client_streams {
+        let limits = rate_limit_headers(&state.codex.pool_windows().await);
         return relay_stream(
             resp,
             LogGuard::new(
@@ -396,6 +397,7 @@ pub async fn responses_passthrough(
                 record,
             ),
             capture,
+            limits,
         );
     }
 
@@ -468,7 +470,33 @@ struct ResponseUsage {
     usage: Option<Usage>,
 }
 
-fn relay_stream(resp: reqwest::Response, guard: LogGuard, capture: UsageCapture) -> Response {
+/// What codex reads for `/status`.
+fn rate_limit_headers(windows: &[crate::pool::UsageWindow]) -> Vec<(String, String)> {
+    let mut sorted: Vec<_> = windows.iter().collect();
+    sorted.sort_by_key(|w| crate::pool::window_seconds(&w.name).unwrap_or(i64::MAX));
+    let mut out = Vec::new();
+    for (tier, w) in ["primary", "secondary"].iter().zip(sorted) {
+        let Some(minutes) = crate::pool::window_seconds(&w.name).map(|s| s / 60) else {
+            continue;
+        };
+        out.push((format!("x-codex-{tier}-window-minutes"), minutes.to_string()));
+        out.push((
+            format!("x-codex-{tier}-used-percent"),
+            ((w.utilization * 100.0).round() as i64).to_string(),
+        ));
+        if let Some(resets_at) = w.resets_at {
+            out.push((format!("x-codex-{tier}-reset-at"), resets_at.to_string()));
+        }
+    }
+    out
+}
+
+fn relay_stream(
+    resp: reqwest::Response,
+    guard: LogGuard,
+    capture: UsageCapture,
+    limits: Vec<(String, String)>,
+) -> Response {
     let eof_capture = capture.clone();
     let stream = resp.bytes_stream().eventsource().filter_map(move |ev| {
         let capture = capture.clone();
@@ -523,9 +551,18 @@ fn relay_stream(resp: reqwest::Response, guard: LogGuard, capture: UsageCapture)
         capture: eof_capture,
         _guard: guard,
     };
-    Sse::new(held)
+    let mut response = Sse::new(held)
         .keep_alive(KeepAlive::default())
-        .into_response()
+        .into_response();
+    for (name, value) in limits {
+        if let (Ok(name), Ok(value)) = (
+            axum::http::HeaderName::try_from(name),
+            axum::http::HeaderValue::try_from(value),
+        ) {
+            response.headers_mut().insert(name, value);
+        }
+    }
+    response
 }
 
 #[cfg(test)]
@@ -552,5 +589,44 @@ mod passthrough_tests {
         assert_eq!(req.service_tier, None);
         let out = serde_json::to_value(&req).unwrap();
         assert!(out.get("service_tier").is_none());
+    }
+}
+
+#[cfg(test)]
+mod rate_limit_header_tests {
+    use super::*;
+    use crate::pool::UsageWindow;
+
+    fn window(name: &str, utilization: f64, resets_at: Option<i64>) -> UsageWindow {
+        UsageWindow {
+            name: name.into(),
+            utilization,
+            resets_at,
+        }
+    }
+
+    #[test]
+    fn the_shorter_window_is_primary() {
+        let out = rate_limit_headers(&[
+            window("7d", 0.42, Some(1000)),
+            window("5h", 0.11, Some(500)),
+        ]);
+        let get = |k: &str| {
+            out.iter()
+                .find(|(n, _)| n == k)
+                .map(|(_, v)| v.as_str())
+                .unwrap()
+        };
+        assert_eq!(get("x-codex-primary-window-minutes"), "300");
+        assert_eq!(get("x-codex-primary-used-percent"), "11");
+        assert_eq!(get("x-codex-secondary-window-minutes"), "10080");
+        assert_eq!(get("x-codex-secondary-used-percent"), "42");
+    }
+
+    #[test]
+    fn a_window_without_a_reset_still_reports() {
+        let out = rate_limit_headers(&[window("7d", 0.8, None)]);
+        assert!(out.iter().any(|(n, v)| n == "x-codex-primary-used-percent" && v == "80"));
+        assert!(!out.iter().any(|(n, _)| n == "x-codex-primary-reset-at"));
     }
 }

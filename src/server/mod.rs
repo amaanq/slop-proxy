@@ -29,6 +29,8 @@ use crate::gemini::client::GeminiClient;
 use crate::pool::anthropic::AnthropicPool;
 use crate::pool::codex::CodexPool;
 use crate::pool::gemini::GeminiPool;
+use crate::pool::glm::GlmPool;
+use crate::pool::zen::ZenPool;
 use crate::pricing::{Prices, Tokens};
 use crate::translate::UsageCapture;
 
@@ -38,6 +40,8 @@ pub struct AppState {
     pub codex: Arc<CodexPool>,
     pub anthropic: Arc<AnthropicPool>,
     pub gemini: Arc<GeminiPool>,
+    pub zen: Arc<ZenPool>,
+    pub glm: Arc<GlmPool>,
     pub cfg: Arc<Config>,
     pub models: Arc<ModelCache>,
     pub prices: Arc<Prices>,
@@ -126,6 +130,16 @@ pub async fn serve(db: Db, cfg: Config, bind: &str) -> Result<()> {
         tracing::info!("loaded {} gemini account(s)", gemini.len().await);
     }
 
+    let zen = ZenPool::load(db.clone(), crate::zen::client::ZenClient::new(cfg.zen.clone())).await?;
+    if zen.len().await > 0 {
+        tracing::info!("loaded {} zen account(s)", zen.len().await);
+    }
+
+    let glm = GlmPool::load(db.clone(), cfg.glm.clone()).await?;
+    if glm.len().await > 0 {
+        tracing::info!("loaded {} glm account(s)", glm.len().await);
+    }
+
     let prices = Arc::new(Prices::new(&cfg.db_path));
     prices.load().await;
     let state = AppState {
@@ -133,6 +147,8 @@ pub async fn serve(db: Db, cfg: Config, bind: &str) -> Result<()> {
         codex: Arc::new(codex),
         anthropic: Arc::new(anthropic),
         gemini: Arc::new(gemini),
+        zen: Arc::new(zen),
+        glm: Arc::new(glm),
         cfg: Arc::new(cfg),
         models: Arc::new(ModelCache::new()),
         prices,
@@ -163,6 +179,12 @@ pub async fn serve(db: Db, cfg: Config, bind: &str) -> Result<()> {
             }
             if let Err(e) = reload_state.gemini.reload().await {
                 tracing::warn!("reloading gemini accounts: {e}");
+            }
+            if let Err(e) = reload_state.zen.reload().await {
+                tracing::warn!("reloading zen accounts: {e}");
+            }
+            if let Err(e) = reload_state.glm.reload().await {
+                tracing::warn!("reloading glm accounts: {e}");
             }
             reload_state.codex.poll_usage().await;
             reload_state.anthropic.poll_usage().await;

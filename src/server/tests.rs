@@ -116,6 +116,7 @@ async fn spawn_proxy_with(models: ModelsConfig, anthropic_base: Option<String>) 
         },
         gemini: Default::default(),
         zen: Default::default(),
+        glm: Default::default(),
         models,
     };
     let codex = CodexPool::load(db.clone(), CodexClient::new(cfg.codex.clone()))
@@ -133,12 +134,16 @@ async fn spawn_proxy_with(models: ModelsConfig, anthropic_base: Option<String>) 
     )
     .await
     .unwrap();
+    let glm_pool = crate::pool::glm::GlmPool::load(db.clone(), cfg.glm.clone())
+        .await
+        .unwrap();
     let state = AppState {
         db: db.clone(),
         codex: Arc::new(codex),
         anthropic: Arc::new(anthropic),
         gemini: Arc::new(gemini_pool),
         zen: Arc::new(zen_pool),
+        glm: Arc::new(glm_pool),
         cfg: Arc::new(cfg),
         models: Arc::new(super::ModelCache::new()),
         prices: Arc::new(crate::pricing::Prices::new(&cfg_db_path)),
@@ -405,6 +410,7 @@ async fn metrics_render_accounts_and_usage() {
         anthropic: AnthropicConfig::default(),
         gemini: Default::default(),
         zen: Default::default(),
+        glm: Default::default(),
         models: ModelsConfig::default(),
     };
     let state = AppState {
@@ -431,6 +437,11 @@ async fn metrics_render_accounts_and_usage() {
             )
             .await
             .unwrap(),
+        ),
+        glm: Arc::new(
+            crate::pool::glm::GlmPool::load(db.clone(), cfg.glm.clone())
+                .await
+                .unwrap(),
         ),
         cfg: Arc::new(cfg),
         models: Arc::new(super::ModelCache::new()),

@@ -1,6 +1,8 @@
 pub mod anthropic;
 pub mod codex;
 pub mod gemini;
+pub mod glm;
+pub mod zen;
 
 use std::sync::Arc;
 
@@ -325,6 +327,12 @@ impl Slots {
             Provider::Anthropic => crate::oauth::anthropic::refresh(&st.refresh_token).await,
             Provider::Gemini => Err(RefreshError::Terminal(
                 "google oauth grants are not implemented, add the account with an api key".into(),
+            )),
+            Provider::Glm => Err(RefreshError::Terminal(
+                "z.ai issues static keys, there is nothing to exchange".into(),
+            )),
+            Provider::Zen => Err(RefreshError::Terminal(
+                "zen issues static keys, there is nothing to exchange".into(),
             )),
         };
         match refreshed {

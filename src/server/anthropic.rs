@@ -38,6 +38,11 @@ pub async fn messages(
         Provider::Anthropic => {
             return super::relay::messages(state, auth, headers, body, peek).await;
         }
+        // Z.ai speaks this dialect, so the body it needs is the one that
+        // arrived and the reply needs no translating back.
+        Provider::Glm => {
+            return super::relay::glm(state, auth, headers, body, peek).await;
+        }
         Provider::Gemini => {}
         Provider::Zen => {}
         Provider::OpenAi => {}
@@ -121,7 +126,7 @@ pub async fn messages(
 
     let capture = UsageCapture::default();
     let events = if gemini {
-        gemini_bridge::event_stream(resp, protocol, &upstream_req.model)
+        gemini_bridge::event_stream(resp, protocol, &upstream_req.model, Default::default())
     } else {
         event_stream(resp)
     };
@@ -216,6 +221,7 @@ pub async fn count_tokens(
         }
         Provider::Gemini => {}
         Provider::Zen => {}
+        Provider::Glm => {}
         Provider::OpenAi => {}
     }
     let req = match serde_json::from_value::<AnthropicRequest>(body) {

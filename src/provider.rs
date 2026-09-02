@@ -5,6 +5,8 @@ pub enum Provider {
     OpenAi,
     Anthropic,
     Gemini,
+    Zen,
+    Glm,
 }
 
 impl Provider {
@@ -13,6 +15,8 @@ impl Provider {
             "openai" => Some(Provider::OpenAi),
             "anthropic" => Some(Provider::Anthropic),
             "gemini" => Some(Provider::Gemini),
+            "zen" => Some(Provider::Zen),
+            "glm" => Some(Provider::Glm),
             _ => None,
         }
     }
@@ -22,6 +26,8 @@ impl Provider {
             Provider::OpenAi => "openai",
             Provider::Anthropic => "anthropic",
             Provider::Gemini => "gemini",
+            Provider::Zen => "zen",
+            Provider::Glm => "glm",
         }
     }
 }
@@ -87,6 +93,8 @@ impl FromSql for Provider {
             "openai" | "codex" => Ok(Provider::OpenAi),
             "anthropic" => Ok(Provider::Anthropic),
             "gemini" => Ok(Provider::Gemini),
+            "zen" => Ok(Provider::Zen),
+            "glm" => Ok(Provider::Glm),
             other => Err(FromSqlError::Other(
                 format!("unknown provider {other:?}").into(),
             )),

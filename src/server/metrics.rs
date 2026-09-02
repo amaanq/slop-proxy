@@ -13,6 +13,7 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
     accounts.extend(state.anthropic.snapshot().await);
     accounts.extend(state.gemini.snapshot().await);
     accounts.extend(state.zen.snapshot().await);
+    accounts.extend(state.glm.snapshot().await);
 
     let mut out = String::with_capacity(4096);
     render_accounts(&mut out, &accounts);

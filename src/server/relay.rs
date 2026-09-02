@@ -281,6 +281,109 @@ pub async fn messages(
     }
 }
 
+/// Z.ai answers the messages API directly, so this is the anthropic relay
+/// without the subscription guard, which covers Claude Code and not a paid
+/// third-party key.
+pub async fn glm(
+    state: AppState,
+    auth: AuthInfo,
+    headers: HeaderMap,
+    body: Value,
+    peek: Peek,
+) -> Response {
+    let started = std::time::Instant::now();
+    let key = peek.session_key(&body, &auth);
+    let facts = super::facts::RequestFacts::extract(&body, &headers);
+    let record = UsageRecord {
+        meter_id: Some(auth.meter_id),
+        token_id: Some(auth.token_id),
+        user: auth.user.clone(),
+        provider: Some(Provider::Glm),
+        dialect: "messages",
+        requested_model: peek.model.clone(),
+        upstream_model: peek.model.clone(),
+        effort: peek.effort.clone(),
+        status: 200,
+        session_key: key.clone(),
+        turn_index: facts.turn_index,
+        tools_declared: facts.tools_declared,
+        thinking_budget: facts.thinking_budget,
+        image_count: facts.image_count,
+        request_bytes: facts.request_bytes,
+        ..Default::default()
+    };
+
+    let (account_id, resp) = match state.glm.execute("/v1/messages", &body, &key).await {
+        Ok(r) => r,
+        Err(e) => {
+            log_error(&state.db, record, pool_error_status(&e), "pool");
+            return pool_error_response(DIALECT, e);
+        }
+    };
+    let mut record = record;
+    record.account_id = Some(account_id);
+    record.status = resp.status().as_u16() as i64;
+
+    let streaming = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.contains("text/event-stream"));
+    let builder = forwarded_response(&resp);
+
+    if streaming {
+        let capture = UsageCapture::default();
+        let guard = LogGuard::new(
+            state.db.clone(),
+            state.prices.clone(),
+            capture.clone(),
+            record,
+            started,
+        );
+        let mut scan = SseScan::new(capture.clone());
+        let stream = resp
+            .bytes_stream()
+            .map(move |item| {
+                let _ = &guard;
+                match &item {
+                    Ok(bytes) => scan.feed(bytes),
+                    Err(_) => scan.capture().fail("upstream_stream_error"),
+                }
+                item
+            })
+            .chain(futures_util::stream::once(async move {
+                capture.note_upstream_eof();
+                Ok(axum::body::Bytes::new())
+            }));
+        return builder
+            .body(Body::from_stream(stream))
+            .unwrap_or_else(|e| error_response(DIALECT, 502, "api_error", &e.to_string()));
+    }
+
+    let ok = resp.status().is_success();
+    let bytes = match resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            log_error(&state.db, record, 502, "upstream_read");
+            return error_response(DIALECT, 502, "api_error", &e.to_string());
+        }
+    };
+    if ok {
+        if let Ok(m) = serde_json::from_slice::<MessageEnvelope>(&bytes) {
+            record.input_tokens = m.usage.input_tokens;
+            record.output_tokens = m.usage.output_tokens;
+            record.cache_read_tokens = m.usage.cache_read_input_tokens;
+            record.cache_write_tokens = m.usage.cache_creation_input_tokens;
+        }
+    } else {
+        record.error_kind = Some("upstream_error".into());
+    }
+    log_usage(&state.db, &state.prices, record);
+    builder
+        .body(Body::from(bytes))
+        .unwrap_or_else(|e| error_response(DIALECT, 502, "api_error", &e.to_string()))
+}
+
 pub async fn count_tokens(
     state: AppState,
     auth: AuthInfo,

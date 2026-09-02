@@ -43,7 +43,12 @@ pub async fn chat_completions(
             return translation_error(DIALECT, &format!("invalid request: {e}"));
         }
     };
-    match state.cfg.models.route(&req.model) {
+    let provider = state.cfg.models.route(&req.model);
+    if !auth.may_use(provider) {
+        log_rejected(&state.db, &auth, "chat", &req.model);
+        return super::error::out_of_scope(DIALECT, provider);
+    }
+    match provider {
         Provider::Anthropic => {
             log_rejected(&state.db, &auth, "chat", &req.model);
             return translation_error(
@@ -338,6 +343,9 @@ pub async fn responses_passthrough(
         Err(e) => return translation_error(DIALECT, &format!("invalid request: {e}")),
     };
 
+    if !auth.may_use(Provider::OpenAi) {
+        return super::error::out_of_scope(DIALECT, Provider::OpenAi);
+    }
     let requested_model = req
         .model
         .unwrap_or_else(|| state.cfg.models.default.clone());

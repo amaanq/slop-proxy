@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS api_tokens (
   window_seconds INTEGER NOT NULL DEFAULT 3600,
   slowdown_ms    INTEGER NOT NULL DEFAULT 0,
   prefer_trusted INTEGER NOT NULL DEFAULT 0,
+  allowed_providers TEXT NOT NULL DEFAULT '',
   created_at     INTEGER NOT NULL DEFAULT (unixepoch()),
   revoked_at     INTEGER
 );

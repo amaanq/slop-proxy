@@ -29,7 +29,12 @@ pub async fn messages(
 ) -> Response {
     let started = std::time::Instant::now();
     let peek = super::relay::Peek::from_body(&body);
-    match state.cfg.models.route(&peek.model) {
+    let provider = state.cfg.models.route(&peek.model);
+    if !auth.may_use(provider) {
+        log_rejected(&state.db, &auth, "messages", &peek.model);
+        return super::error::out_of_scope(DIALECT, provider);
+    }
+    match provider {
         Provider::Anthropic => {
             return super::relay::messages(state, auth, headers, body, peek).await;
         }
@@ -190,7 +195,11 @@ pub async fn count_tokens(
     Json(body): Json<Value>,
 ) -> Response {
     let peek = super::relay::Peek::from_body(&body);
-    match state.cfg.models.route(&peek.model) {
+    let provider = state.cfg.models.route(&peek.model);
+    if !auth.may_use(provider) {
+        return super::error::out_of_scope(DIALECT, provider);
+    }
+    match provider {
         Provider::Anthropic => {
             return super::relay::count_tokens(state, auth, headers, body, peek).await;
         }

@@ -3,6 +3,7 @@ use rand::RngCore;
 use rusqlite::params;
 
 use super::Db;
+use crate::provider::Provider;
 
 #[derive(Debug, Clone)]
 pub struct ApiToken {
@@ -21,6 +22,27 @@ pub struct TokenLimits {
     pub window_seconds: i64,
     pub slowdown_ms: i64,
     pub prefer_trusted: bool,
+    /// Providers this token may reach. Empty means every one, so a token
+    /// created before the column existed keeps its old reach.
+    pub providers: Vec<Provider>,
+}
+
+impl TokenLimits {
+    pub fn may_use(&self, provider: Provider) -> bool {
+        self.providers.is_empty() || self.providers.contains(&provider)
+    }
+
+    fn encode(&self) -> String {
+        self.providers
+            .iter()
+            .map(|p| p.as_str())
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    fn decode(raw: &str) -> Vec<Provider> {
+        raw.split(',').filter_map(Provider::from_str).collect()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -56,7 +78,8 @@ impl Db {
         let conn = self.0.lock().await;
         let mut stmt = conn.prepare(
             "SELECT id, user, token_prefix, created_at, revoked_at,
-                    request_limit, token_limit, window_seconds, slowdown_ms, prefer_trusted
+                    request_limit, token_limit, window_seconds, slowdown_ms, prefer_trusted,
+                    allowed_providers
              FROM api_tokens ORDER BY id",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -72,6 +95,7 @@ impl Db {
                     window_seconds: r.get(7)?,
                     slowdown_ms: r.get(8)?,
                     prefer_trusted: r.get(9)?,
+                    providers: TokenLimits::decode(&r.get::<_, String>(10)?),
                 },
             })
         })?;
@@ -94,7 +118,7 @@ impl Db {
         Ok(conn.execute(
             "UPDATE api_tokens
              SET request_limit = ?3, token_limit = ?4, window_seconds = ?5, slowdown_ms = ?6,
-                 prefer_trusted = ?7
+                 prefer_trusted = ?7, allowed_providers = ?8
              WHERE id = ?1 OR token_prefix = ?2",
             params![
                 id,
@@ -104,6 +128,7 @@ impl Db {
                 limits.window_seconds,
                 limits.slowdown_ms,
                 limits.prefer_trusted,
+                limits.encode(),
             ],
         )?)
     }
@@ -111,7 +136,8 @@ impl Db {
     pub async fn auth_token(&self, raw: &str) -> Result<Option<AuthenticatedToken>> {
         let conn = self.0.lock().await;
         let mut stmt = conn.prepare(
-            "SELECT id, user, request_limit, token_limit, window_seconds, slowdown_ms, prefer_trusted
+            "SELECT id, user, request_limit, token_limit, window_seconds, slowdown_ms,
+                    prefer_trusted, allowed_providers
              FROM api_tokens WHERE token_hash = ?1 AND revoked_at IS NULL",
         )?;
         let mut rows = stmt.query_map(params![hash(raw)], |r| {
@@ -124,9 +150,41 @@ impl Db {
                     window_seconds: r.get(4)?,
                     slowdown_ms: r.get(5)?,
                     prefer_trusted: r.get(6)?,
+                    providers: TokenLimits::decode(&r.get::<_, String>(7)?),
                 },
             })
         })?;
         Ok(rows.next().transpose()?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TokenLimits;
+    use crate::provider::Provider;
+
+    #[test]
+    fn an_unscoped_token_reaches_every_backend() {
+        let l = TokenLimits::default();
+        assert!(l.may_use(Provider::Gemini) && l.may_use(Provider::Anthropic));
+    }
+
+    #[test]
+    fn a_scoped_token_reaches_only_its_own() {
+        let l = TokenLimits {
+            providers: vec![Provider::Gemini],
+            ..TokenLimits::default()
+        };
+        assert!(l.may_use(Provider::Gemini));
+        assert!(!l.may_use(Provider::Anthropic) && !l.may_use(Provider::OpenAi));
+    }
+
+    #[test]
+    fn the_scope_survives_a_round_trip_through_the_column() {
+        let l = TokenLimits {
+            providers: vec![Provider::Gemini, Provider::OpenAi],
+            ..TokenLimits::default()
+        };
+        assert_eq!(TokenLimits::decode(&l.encode()), l.providers);
     }
 }

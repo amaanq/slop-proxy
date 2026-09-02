@@ -11,6 +11,7 @@ use super::{AppState, LogGuard, log_error, log_usage};
 use crate::anthropic::client::RelayHeaders;
 use crate::db::usage::UsageRecord;
 use crate::translate::UsageCapture;
+use crate::provider::Provider;
 
 const DIALECT: Dialect = Dialect::Anthropic;
 
@@ -180,6 +181,7 @@ pub async fn messages(
         meter_id: Some(auth.meter_id),
         token_id: Some(auth.token_id),
         user: auth.user.clone(),
+        provider: Some(Provider::Anthropic),
         dialect: "messages",
         requested_model: peek.model.clone(),
         upstream_model: peek.model.clone(),

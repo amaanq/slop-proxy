@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS usage_log (
   token_id          INTEGER REFERENCES api_tokens(id),
   user              TEXT    NOT NULL,
   account_id        INTEGER REFERENCES accounts(id),
+  provider          TEXT    NOT NULL DEFAULT '',
   dialect           TEXT    NOT NULL,
   requested_model   TEXT    NOT NULL,
   upstream_model    TEXT    NOT NULL,

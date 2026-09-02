@@ -1,4 +1,5 @@
 pub mod anthropic_req;
+pub mod gemini_bridge;
 pub mod anthropic_stream;
 pub mod count_tokens;
 pub mod model_map;

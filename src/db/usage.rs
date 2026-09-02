@@ -25,6 +25,16 @@ pub struct UsageRecord {
     pub status: i64,
     pub error_kind: Option<String>,
     pub duration_ms: Option<i64>,
+    pub session_key: String,
+    pub turn_index: i64,
+    pub tools_declared: i64,
+    pub tools_called: String,
+    pub thinking_budget: i64,
+    pub image_count: i64,
+    pub request_bytes: i64,
+    pub response_bytes: i64,
+    pub ttft_ms: Option<i64>,
+    pub stop_reason: String,
 }
 
 #[derive(Debug, Serialize, Default)]
@@ -87,14 +97,46 @@ pub struct ErrorRow {
     pub count: i64,
 }
 
+#[derive(Debug, Clone)]
+pub struct ToolRow {
+    pub user: String,
+    pub tool: String,
+    pub count: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct InsightRow {
+    pub user: String,
+    pub account: String,
+    pub stop_reason: String,
+    pub requests: i64,
+    pub request_bytes: i64,
+    pub response_bytes: i64,
+    pub turns: i64,
+    pub images: i64,
+    pub thinking_budget: i64,
+    pub tools_declared: i64,
+    pub ttft_ms: i64,
+    pub ttft_samples: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionRow {
+    pub user: String,
+    pub sessions: i64,
+    pub deepest: i64,
+}
+
 impl Db {
     pub async fn log_usage(&self, r: &UsageRecord) -> Result<()> {
         let mut conn = self.0.lock().await;
         let tx = conn.transaction()?;
         tx.execute(
             "INSERT INTO usage_log (token_id, user, account_id, dialect, requested_model, upstream_model, effort, service_tier,
-               input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, cost_usd, status, error_kind, duration_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+               input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, cost_usd, status, error_kind, duration_ms,
+               session_key, turn_index, tools_declared, tools_called, thinking_budget, image_count, request_bytes, response_bytes, ttft_ms, stop_reason)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
+                     ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)",
             params![
                 r.token_id,
                 r.user,
@@ -113,6 +155,16 @@ impl Db {
                 r.status,
                 r.error_kind,
                 r.duration_ms,
+                r.session_key,
+                r.turn_index,
+                r.tools_declared,
+                r.tools_called,
+                r.thinking_budget,
+                r.image_count,
+                r.request_bytes,
+                r.response_bytes,
+                r.ttft_ms,
+                r.stop_reason,
             ],
         )?;
         if let Some(meter_id) = r.meter_id {
@@ -410,6 +462,81 @@ impl Db {
 
     /// Failures grouped by what went wrong. Kept off MetricsRow because
     /// error_kind would otherwise split every token counter by it too.
+    /// `tools_called` holds a comma-joined list, so the split has to happen in
+    /// SQL to yield one row per tool.
+    pub async fn tool_metrics(&self) -> Result<Vec<ToolRow>> {
+        let conn = self.0.lock().await;
+        let mut stmt = conn.prepare(
+            "WITH RECURSIVE split(user, tool, rest) AS (
+               SELECT user, '', tools_called || ',' FROM usage_log WHERE tools_called <> ''
+               UNION ALL
+               SELECT user, substr(rest, 1, instr(rest, ',') - 1), substr(rest, instr(rest, ',') + 1)
+               FROM split WHERE rest <> ''
+             )
+             SELECT user, tool, COUNT(*) FROM split WHERE tool <> '' GROUP BY user, tool",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(ToolRow {
+                user: r.get(0)?,
+                tool: r.get(1)?,
+                count: r.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub async fn insight_metrics(&self) -> Result<Vec<InsightRow>> {
+        let conn = self.0.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT u.user,
+                    COALESCE((SELECT COALESCE(a.label, a.email, 'account#' || a.id)
+                              FROM accounts a WHERE a.id = u.account_id), 'none') AS account,
+                    COALESCE(NULLIF(u.stop_reason, ''), 'unknown') AS stop_reason,
+                    COUNT(*),
+                    COALESCE(SUM(u.request_bytes),0), COALESCE(SUM(u.response_bytes),0),
+                    COALESCE(SUM(u.turn_index),0), COALESCE(SUM(u.image_count),0),
+                    COALESCE(SUM(u.thinking_budget),0), COALESCE(SUM(u.tools_declared),0),
+                    COALESCE(SUM(u.ttft_ms),0), SUM(u.ttft_ms IS NOT NULL)
+             FROM usage_log u
+             GROUP BY u.user, account, stop_reason",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(InsightRow {
+                user: r.get(0)?,
+                account: r.get(1)?,
+                stop_reason: r.get(2)?,
+                requests: r.get(3)?,
+                request_bytes: r.get(4)?,
+                response_bytes: r.get(5)?,
+                turns: r.get(6)?,
+                images: r.get(7)?,
+                thinking_budget: r.get(8)?,
+                tools_declared: r.get(9)?,
+                ttft_ms: r.get(10)?,
+                ttft_samples: r.get::<_, Option<i64>>(11)?.unwrap_or(0),
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Grouped by user alone, because a session spans models and accounts and
+    /// counting it once per group would multiply it.
+    pub async fn session_metrics(&self) -> Result<Vec<SessionRow>> {
+        let conn = self.0.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT user, COUNT(DISTINCT session_key), COALESCE(MAX(turn_index),0)
+             FROM usage_log WHERE session_key <> '' GROUP BY user",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(SessionRow {
+                user: r.get(0)?,
+                sessions: r.get(1)?,
+                deepest: r.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub async fn error_metrics(&self) -> Result<Vec<ErrorRow>> {
         let conn = self.0.lock().await;
         let mut stmt = conn.prepare(

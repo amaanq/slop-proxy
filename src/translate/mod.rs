@@ -53,6 +53,12 @@ pub struct CapturedUsage {
     /// Distinguishes upstream ending early from the caller hanging up.
     pub upstream_eof: bool,
     pub last_event: Option<String>,
+    /// Separates a slow account from a long answer, which one duration cannot.
+    pub first_byte_at: Option<std::time::Instant>,
+    pub response_bytes: i64,
+    pub stop_reason: Option<String>,
+    /// Names only. An argument is the caller's shell command or source.
+    pub tools_called: Vec<String>,
 }
 
 #[derive(Default, Clone)]
@@ -75,6 +81,24 @@ impl UsageCapture {
     pub fn note_event(&self, name: &str) {
         let mut c = self.0.lock().unwrap();
         c.last_event = Some(name.to_string());
+        c.first_byte_at.get_or_insert_with(std::time::Instant::now);
+    }
+
+    pub fn note_bytes(&self, n: usize) {
+        let mut c = self.0.lock().unwrap();
+        c.response_bytes += n as i64;
+        c.first_byte_at.get_or_insert_with(std::time::Instant::now);
+    }
+
+    pub fn note_stop_reason(&self, reason: &str) {
+        self.0.lock().unwrap().stop_reason = Some(reason.to_string());
+    }
+
+    pub fn note_tool_call(&self, name: &str) {
+        let mut c = self.0.lock().unwrap();
+        if !c.tools_called.iter().any(|t| t == name) {
+            c.tools_called.push(name.to_string());
+        }
     }
 
     pub fn note_upstream_eof(&self) {

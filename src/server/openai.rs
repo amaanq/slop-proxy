@@ -30,9 +30,11 @@ pub struct ModelsQuery {
 pub async fn chat_completions(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthInfo>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
     let raw = body.clone();
+    let facts = super::facts::RequestFacts::extract(&raw, &headers);
     let req = match serde_json::from_value::<OpenAiRequest>(body) {
         Ok(r) => r,
         Err(e) => {
@@ -50,7 +52,7 @@ pub async fn chat_completions(
         }
         Provider::Gemini => {
             let model = req.model.clone();
-            return super::gemini::chat_completions(state, auth, raw, model).await;
+            return super::gemini::chat_completions(state, auth, raw, model, facts).await;
         }
         Provider::OpenAi => {}
     }
@@ -76,6 +78,11 @@ pub async fn chat_completions(
             .map(|r| r.effort.clone())
             .unwrap_or_default(),
         status: 200,
+        turn_index: facts.turn_index,
+        tools_declared: facts.tools_declared,
+        thinking_budget: facts.thinking_budget,
+        image_count: facts.image_count,
+        request_bytes: facts.request_bytes,
         ..Default::default()
     };
 
@@ -100,6 +107,7 @@ pub async fn chat_completions(
     };
     let mut record = record;
     record.account_id = Some(account_id);
+    record.session_key = session_key;
 
     let capture = UsageCapture::default();
     let events = event_stream(resp);
@@ -320,6 +328,7 @@ struct ReasoningPatch {
 pub async fn responses_passthrough(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthInfo>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
     let mut req = match serde_json::from_value::<PassthroughRequest>(body) {
@@ -348,6 +357,14 @@ pub async fn responses_passthrough(
         Err(e) => return translation_error(DIALECT, &format!("serializing request: {e}")),
     };
 
+    // Codex sends its own prompt_cache_key, which is stable per conversation.
+    let session_key = body
+        .pointer("/prompt_cache_key")
+        .and_then(Value::as_str)
+        .unwrap_or(&auth.user)
+        .to_string();
+
+    let facts = super::facts::RequestFacts::extract(&body, &headers);
     let record = UsageRecord {
         meter_id: Some(auth.meter_id),
         token_id: Some(auth.token_id),
@@ -362,15 +379,14 @@ pub async fn responses_passthrough(
             .unwrap_or_default(),
         service_tier: req.service_tier.clone().unwrap_or_default(),
         status: 200,
+        session_key: session_key.clone(),
+        turn_index: facts.turn_index,
+        tools_declared: facts.tools_declared,
+        thinking_budget: facts.thinking_budget,
+        image_count: facts.image_count,
+        request_bytes: facts.request_bytes,
         ..Default::default()
     };
-
-    // Codex sends its own prompt_cache_key, which is stable per conversation.
-    let session_key = body
-        .pointer("/prompt_cache_key")
-        .and_then(Value::as_str)
-        .unwrap_or(&auth.user)
-        .to_string();
     let (account_id, resp) = match state
         .codex
         .execute(&body, auth.prefer_trusted, &session_key)
@@ -468,6 +484,28 @@ struct UsageEnvelope {
 struct ResponseUsage {
     #[serde(default)]
     usage: Option<Usage>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    incomplete_details: Option<IncompleteDetails>,
+}
+
+#[derive(serde::Deserialize)]
+struct IncompleteDetails {
+    reason: Option<String>,
+}
+
+/// `response.output_item.done` names the tool it emitted. Its `arguments`
+/// field is the caller's own content and is never read.
+#[derive(serde::Deserialize)]
+struct OutputItemDone {
+    item: OutputItem,
+}
+
+#[derive(serde::Deserialize)]
+struct OutputItem {
+    #[serde(default)]
+    name: Option<String>,
 }
 
 /// What codex reads for `/status`.
@@ -509,12 +547,28 @@ fn relay_stream(
                     if !ev.event.is_empty() {
                         capture.note_event(&ev.event);
                     }
+                    capture.note_bytes(ev.data.len());
                     if (ev.event == "response.completed"
                         || ev.data.contains("\"response.completed\""))
                         && let Ok(env) = serde_json::from_str::<UsageEnvelope>(&ev.data)
-                        && let Some(usage) = env.response.usage
                     {
-                        capture.record(&usage);
+                        if let Some(usage) = env.response.usage {
+                            capture.record(&usage);
+                        }
+                        let reason = env
+                            .response
+                            .incomplete_details
+                            .and_then(|d| d.reason)
+                            .or(env.response.status);
+                        if let Some(reason) = reason {
+                            capture.note_stop_reason(&reason);
+                        }
+                    }
+                    if ev.event == "response.output_item.done"
+                        && let Ok(done) = serde_json::from_str::<OutputItemDone>(&ev.data)
+                        && let Some(name) = done.item.name
+                    {
+                        capture.note_tool_call(&name);
                     }
                     let mut out = Event::default().data(ev.data);
                     if !ev.event.is_empty() && ev.event != "message" {

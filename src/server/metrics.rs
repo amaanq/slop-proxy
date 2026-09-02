@@ -23,6 +23,18 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
         Ok(rows) => render_errors(&mut out, &rows),
         Err(e) => tracing::error!("reading error metrics: {e}"),
     }
+    match state.db.tool_metrics().await {
+        Ok(rows) => render_tools(&mut out, &rows),
+        Err(e) => tracing::error!("reading tool metrics: {e}"),
+    }
+    match state.db.insight_metrics().await {
+        Ok(rows) => render_insights(&mut out, &rows),
+        Err(e) => tracing::error!("reading insight metrics: {e}"),
+    }
+    match state.db.session_metrics().await {
+        Ok(rows) => render_sessions(&mut out, &rows),
+        Err(e) => tracing::error!("reading session metrics: {e}"),
+    }
 
     ([(CONTENT_TYPE, "text/plain; version=0.0.4")], out).into_response()
 }
@@ -250,6 +262,79 @@ fn render_errors(out: &mut String, rows: &[crate::db::usage::ErrorRow]) {
         );
     }
 }
+
+fn render_tools(out: &mut String, rows: &[crate::db::usage::ToolRow]) {
+    counter_header(
+        out,
+        "slop_tool_turns_total",
+        "Turns that used each tool. Names only, never their arguments. A turn \
+         calling one tool repeatedly counts once",
+    );
+    for r in rows {
+        let _ = writeln!(
+            out,
+            "slop_tool_turns_total{{user={},tool={}}} {}",
+            quote(&r.user),
+            quote(&r.tool),
+            r.count,
+        );
+    }
+}
+
+fn render_insights(out: &mut String, rows: &[crate::db::usage::InsightRow]) {
+    let line = |out: &mut String, name: &str, r: &crate::db::usage::InsightRow, v: i64| {
+        let _ = writeln!(
+            out,
+            "{name}{{user={},account={},stop_reason={}}} {v}",
+            quote(&r.user),
+            quote(&r.account),
+            quote(&r.stop_reason),
+        );
+    };
+    for (name, help, get) in INSIGHTS {
+        counter_header(out, name, help);
+        for r in rows {
+            line(out, name, r, get(r));
+        }
+    }
+}
+
+fn render_sessions(out: &mut String, rows: &[crate::db::usage::SessionRow]) {
+    gauge_header(
+        out,
+        "slop_sessions",
+        "Distinct conversations seen. Divide slop_requests_total by it for turns per session",
+    );
+    for r in rows {
+        let _ = writeln!(out, "slop_sessions{{user={}}} {}", quote(&r.user), r.sessions);
+    }
+    gauge_header(
+        out,
+        "slop_session_deepest_turn",
+        "Longest conversation seen, in messages carried",
+    );
+    for r in rows {
+        let _ = writeln!(
+            out,
+            "slop_session_deepest_turn{{user={}}} {}",
+            quote(&r.user),
+            r.deepest
+        );
+    }
+}
+
+type InsightGetter = fn(&crate::db::usage::InsightRow) -> i64;
+const INSIGHTS: [(&str, &str, InsightGetter); 9] = [
+    ("slop_stop_reason_total", "Requests by how the turn ended", |r| r.requests),
+    ("slop_request_bytes_total", "Request bodies as the handler parsed them", |r| r.request_bytes),
+    ("slop_response_bytes_total", "Response bytes relayed", |r| r.response_bytes),
+    ("slop_turns_total", "Messages carried in, summed. Divide by requests for conversation depth", |r| r.turns),
+    ("slop_images_total", "Image parts carried in", |r| r.images),
+    ("slop_thinking_budget_total", "Thinking tokens asked for, against reasoning tokens actually spent", |r| r.thinking_budget),
+    ("slop_tools_declared_total", "Tools offered to the model, summed. Every one costs prompt on every turn", |r| r.tools_declared),
+    ("slop_ttft_ms_total", "Time to first byte, summed. Divide by slop_ttft_samples_total", |r| r.ttft_ms),
+    ("slop_ttft_samples_total", "Requests that produced a first byte", |r| r.ttft_samples),
+];
 
 type TokenGetter = fn(&crate::db::usage::MetricsRow) -> i64;
 const TOKEN_KINDS: [(&str, TokenGetter); 5] = [

@@ -62,7 +62,17 @@ CREATE TABLE IF NOT EXISTS usage_log (
   cost_usd          REAL    NOT NULL DEFAULT 0,
   status            INTEGER NOT NULL,
   error_kind        TEXT,
-  duration_ms       INTEGER
+  duration_ms       INTEGER,
+  session_key       TEXT    NOT NULL DEFAULT '',
+  turn_index        INTEGER NOT NULL DEFAULT 0,
+  tools_declared    INTEGER NOT NULL DEFAULT 0,
+  tools_called      TEXT    NOT NULL DEFAULT '',
+  thinking_budget   INTEGER NOT NULL DEFAULT 0,
+  image_count       INTEGER NOT NULL DEFAULT 0,
+  request_bytes     INTEGER NOT NULL DEFAULT 0,
+  response_bytes    INTEGER NOT NULL DEFAULT 0,
+  ttft_ms           INTEGER,
+  stop_reason       TEXT    NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_usage_ts         ON usage_log(ts);

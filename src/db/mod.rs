@@ -30,6 +30,8 @@ impl Db {
         for (table, column, ddl) in ADDED_COLUMNS {
             add_column(&conn, table, column, ddl)?;
         }
+        conn.execute_batch(LATE_INDEXES)
+            .wrap_err("creating indexes")?;
 
         Ok(Self(Arc::new(Mutex::new(conn))))
     }
@@ -39,7 +41,22 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     ("accounts", "http_referer", "TEXT"),
     ("accounts", "auth_mode", "TEXT NOT NULL DEFAULT 'oauth'"),
     ("usage_log", "service_tier", "TEXT NOT NULL DEFAULT ''"),
+    ("usage_log", "session_key", "TEXT NOT NULL DEFAULT ''"),
+    ("usage_log", "turn_index", "INTEGER NOT NULL DEFAULT 0"),
+    ("usage_log", "tools_declared", "INTEGER NOT NULL DEFAULT 0"),
+    ("usage_log", "tools_called", "TEXT NOT NULL DEFAULT ''"),
+    ("usage_log", "thinking_budget", "INTEGER NOT NULL DEFAULT 0"),
+    ("usage_log", "image_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("usage_log", "request_bytes", "INTEGER NOT NULL DEFAULT 0"),
+    ("usage_log", "response_bytes", "INTEGER NOT NULL DEFAULT 0"),
+    ("usage_log", "ttft_ms", "INTEGER"),
+    ("usage_log", "stop_reason", "TEXT NOT NULL DEFAULT ''"),
 ];
+
+/// Indexes over columns `ADDED_COLUMNS` introduces, so they are built after
+/// the ALTERs rather than failing on a database that predates them.
+const LATE_INDEXES: &str =
+    "CREATE INDEX IF NOT EXISTS idx_usage_session_ts ON usage_log(session_key, ts);";
 
 fn add_column(conn: &Connection, table: &str, column: &str, ddl: &str) -> Result<()> {
     let present = conn

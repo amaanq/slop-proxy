@@ -89,6 +89,10 @@ enum RelayEvent {
     },
     MessageDelta {
         usage: Option<RelayUsage>,
+        delta: Option<StopDelta>,
+    },
+    ContentBlockStart {
+        content_block: ContentBlock,
     },
     MessageStop,
     Error,
@@ -100,6 +104,18 @@ enum RelayEvent {
 struct MessageEnvelope {
     #[serde(default)]
     usage: RelayUsage,
+}
+
+#[derive(Deserialize)]
+struct StopDelta {
+    stop_reason: Option<String>,
+}
+
+/// Only the tool's name is read. Its `input` is the caller's shell command or
+/// source text, and never reaches the log.
+#[derive(Deserialize)]
+struct ContentBlock {
+    name: Option<String>,
 }
 
 fn relay_headers(headers: &HeaderMap) -> RelayHeaders {
@@ -157,6 +173,8 @@ pub async fn messages(
     body: Value,
     peek: Peek,
 ) -> Response {
+    let key = peek.session_key(&body, &auth);
+    let facts = super::facts::RequestFacts::extract(&body, &headers);
     let record = UsageRecord {
         meter_id: Some(auth.meter_id),
         token_id: Some(auth.token_id),
@@ -166,6 +184,12 @@ pub async fn messages(
         upstream_model: peek.model.clone(),
         effort: peek.effort.clone(),
         status: 200,
+        session_key: key.clone(),
+        turn_index: facts.turn_index,
+        tools_declared: facts.tools_declared,
+        thinking_budget: facts.thinking_budget,
+        image_count: facts.image_count,
+        request_bytes: facts.request_bytes,
         ..Default::default()
     };
 
@@ -175,7 +199,6 @@ pub async fn messages(
     }
 
     let hdrs = relay_headers(&headers);
-    let key = peek.session_key(&body, &auth);
     let (account_id, resp) = match state
         .anthropic
         .execute("/v1/messages", &body, &hdrs, &key)
@@ -365,14 +388,20 @@ impl SseScan {
     }
 
     fn feed(&mut self, chunk: &[u8]) {
+        self.capture.note_bytes(chunk.len());
         self.buf.push_str(&String::from_utf8_lossy(chunk));
         let mut consumed = 0;
         while let Some(nl) = self.buf[consumed..].find('\n') {
             let line = self.buf[consumed..consumed + nl].trim();
             if let Some(event) = line.strip_prefix("event:") {
+                self.capture.note_event(event.trim());
                 self.interesting = matches!(
                     event.trim(),
-                    "message_start" | "message_delta" | "message_stop" | "error"
+                    "message_start"
+                        | "message_delta"
+                        | "message_stop"
+                        | "content_block_start"
+                        | "error"
                 );
             } else if self.interesting
                 && let Some(data) = line.strip_prefix("data:")
@@ -395,10 +424,21 @@ fn apply_event(capture: &UsageCapture, ev: RelayEvent) {
             c.cache_read_tokens = message.usage.cache_read_input_tokens;
             c.cache_write_tokens = message.usage.cache_creation_input_tokens;
         }
-        RelayEvent::MessageDelta { usage: Some(usage) } => {
-            c.output_tokens = usage.output_tokens;
+        RelayEvent::MessageDelta { usage, delta } => {
+            if let Some(usage) = usage {
+                c.output_tokens = usage.output_tokens;
+            }
+            if let Some(reason) = delta.and_then(|d| d.stop_reason) {
+                c.stop_reason = Some(reason);
+            }
         }
-        RelayEvent::MessageDelta { usage: None } => {}
+        RelayEvent::ContentBlockStart { content_block } => {
+            if let Some(name) = content_block.name
+                && !c.tools_called.contains(&name)
+            {
+                c.tools_called.push(name);
+            }
+        }
         RelayEvent::MessageStop => c.completed = true,
         RelayEvent::Error => {
             if c.error_kind.is_none() {

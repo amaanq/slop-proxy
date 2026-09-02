@@ -6,6 +6,7 @@ use axum::response::{IntoResponse, Response};
 
 use super::AppState;
 use crate::pool::AccountSnapshot;
+use crate::provider::Provider;
 
 pub async fn metrics(State(state): State<AppState>) -> Response {
     let mut accounts = state.codex.snapshot().await;
@@ -44,6 +45,19 @@ fn render_accounts(out: &mut String, accounts: &[AccountSnapshot]) {
             &[("plan", plan), ("trusted", bool_label(a.trusted))],
             1.0,
         );
+    }
+    gauge_header(
+        out,
+        "slop_account_capacity",
+        "Share of the provider's largest plan this account is worth, for \
+         weighting a pooled average. Emitted only where quota is reported, so \
+         a provider that reports none stays out of the average entirely",
+    );
+    for a in accounts {
+        if a.usage.is_none() {
+            continue;
+        }
+        line(out, "slop_account_capacity", a, &[], plan_capacity(a));
     }
     gauge_header(
         out,
@@ -162,6 +176,15 @@ fn render_accounts(out: &mut String, accounts: &[AccountSnapshot]) {
     for a in accounts {
         let Some(usage) = &a.usage else { continue };
         line(out, "slop_account_locked", a, &[], f64::from(usage.locked));
+    }
+}
+
+/// Measured weekly throughput puts a 20x account at 1.7-2x a 5x one, not the
+/// 4x the plan names imply.
+fn plan_capacity(a: &AccountSnapshot) -> f64 {
+    match (a.provider, a.plan.as_deref()) {
+        (Provider::Anthropic, Some("default_claude_max_5x")) => 0.5,
+        _ => 1.0,
     }
 }
 

@@ -63,6 +63,7 @@ pub async fn chat_completions(
     auth: AuthInfo,
     mut body: Value,
     model: String,
+    facts: super::facts::RequestFacts,
 ) -> Response {
     let streaming = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
     // Without this the terminal chunk carries no usage and the request bills
@@ -82,10 +83,16 @@ pub async fn chat_completions(
         requested_model: model.clone(),
         upstream_model: model.clone(),
         status: 200,
+        session_key: session_key(&auth.user, &body),
+        turn_index: facts.turn_index,
+        tools_declared: facts.tools_declared,
+        thinking_budget: facts.thinking_budget,
+        image_count: facts.image_count,
+        request_bytes: facts.request_bytes,
         ..Default::default()
     };
 
-    let session_key = session_key(&auth.user, &body);
+    let session_key = record.session_key.clone();
     let (account_id, upstream) = match state
         .gemini
         .execute(crate::pool::gemini::Call::OpenAi(&body), &session_key)
@@ -252,6 +259,7 @@ pub async fn native(
     axum::Extension(auth): axum::Extension<AuthInfo>,
     axum::extract::Path(spec): axum::extract::Path<String>,
     axum::extract::RawQuery(query): axum::extract::RawQuery,
+    headers: axum::http::HeaderMap,
     axum::Json(body): axum::Json<Value>,
 ) -> Response {
     let Some((model, action)) = spec.split_once(':') else {
@@ -280,6 +288,8 @@ pub async fn native(
     }
 
     let streaming = action == "streamGenerateContent";
+    let key = native_session_key(&auth.user, &body);
+    let facts = super::facts::RequestFacts::extract(&body, &headers);
     let record = UsageRecord {
         meter_id: Some(auth.meter_id),
         token_id: Some(auth.token_id),
@@ -288,10 +298,14 @@ pub async fn native(
         requested_model: model.to_string(),
         upstream_model: model.to_string(),
         status: 200,
+        session_key: key.clone(),
+        turn_index: facts.turn_index,
+        tools_declared: facts.tools_declared,
+        thinking_budget: facts.thinking_budget,
+        image_count: facts.image_count,
+        request_bytes: facts.request_bytes,
         ..Default::default()
     };
-
-    let key = native_session_key(&auth.user, &body);
     let call = crate::pool::gemini::Call::Native {
         model,
         action,

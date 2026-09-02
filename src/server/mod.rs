@@ -3,6 +3,7 @@ pub mod auth;
 pub mod clientcfg;
 pub mod decompress;
 pub mod error;
+pub mod facts;
 mod gemini;
 pub mod metrics;
 pub mod openai;
@@ -285,6 +286,12 @@ impl Drop for LogGuard {
         record.cache_write_tokens = cap.cache_write_tokens;
         record.reasoning_tokens = cap.reasoning_tokens;
         record.error_kind = cap.error_kind;
+        record.response_bytes = cap.response_bytes;
+        record.stop_reason = cap.stop_reason.unwrap_or_default();
+        record.tools_called = cap.tools_called.join(",");
+        record.ttft_ms = cap
+            .first_byte_at
+            .map(|t| t.saturating_duration_since(self.start).as_millis() as i64);
         if !cap.completed && record.error_kind.is_none() {
             record.error_kind = Some(if cap.upstream_eof {
                 "upstream_eof".into()

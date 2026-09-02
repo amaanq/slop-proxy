@@ -392,7 +392,11 @@ impl Db {
         let mut stmt = conn.prepare(
             "SELECT u.user,
                     COALESCE((SELECT COALESCE(a.label, a.email, 'account#' || a.id)
-                              FROM accounts a WHERE a.id = u.account_id), 'none') AS account,
+                              FROM accounts a WHERE a.id = u.account_id),
+                             CASE WHEN u.provider <> '' AND NOT EXISTS
+                                    (SELECT 1 FROM accounts a2 WHERE a2.provider = u.provider)
+                                  THEN u.provider END,
+                             'none') AS account,
                     COALESCE(NULLIF(u.provider, ''),
                              (SELECT a.provider FROM accounts a WHERE a.id = u.account_id),
                              'none') AS provider,

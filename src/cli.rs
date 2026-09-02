@@ -118,6 +118,9 @@ pub enum TokenCommand {
         /// Serve this token from trusted accounts when any are available
         #[pound(long)]
         prefer_trusted: bool,
+        /// Providers this token may reach, comma separated. Empty allows all.
+        #[pound(long)]
+        providers: Option<String>,
     },
     /// List issued tokens
     List,
@@ -136,6 +139,9 @@ pub enum TokenCommand {
         slowdown_ms: i64,
         #[pound(long)]
         prefer_trusted: bool,
+        /// Providers this token may reach, comma separated. Empty allows all.
+        #[pound(long)]
+        providers: Option<String>,
     },
     /// Show metered usage for a token's current rolling window
     Usage { token: String },
@@ -186,6 +192,7 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
                 window_seconds,
                 slowdown_ms,
                 prefer_trusted,
+                providers,
             } => {
                 let limits = token_limits(
                     requests,
@@ -193,6 +200,7 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
                     window_seconds,
                     slowdown_ms,
                     prefer_trusted,
+                    providers,
                 )?;
                 token_create(&db, &user, &limits).await
             }
@@ -205,6 +213,7 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
                 window_seconds,
                 slowdown_ms,
                 prefer_trusted,
+                providers,
             } => {
                 let limits = token_limits(
                     requests,
@@ -212,6 +221,7 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
                     window_seconds,
                     slowdown_ms,
                     prefer_trusted,
+                    providers,
                 )?;
                 token_set_limits(&db, &token, &limits).await
             }
@@ -348,6 +358,7 @@ fn token_limits(
     window_seconds: i64,
     slowdown_ms: i64,
     prefer_trusted: bool,
+    providers: Option<String>,
 ) -> Result<crate::db::tokens::TokenLimits> {
     if requests.is_some_and(|v| v <= 0) {
         bail!("--requests must be greater than zero");
@@ -361,12 +372,25 @@ fn token_limits(
     if slowdown_ms < 0 {
         bail!("--slowdown-ms cannot be negative");
     }
+    let providers = providers
+        .filter(|p| !p.trim().is_empty())
+        .map(|raw| {
+            raw.split(',')
+                .map(|p| {
+                    crate::provider::Provider::from_str(p)
+                        .ok_or_else(|| eyre::eyre!("unknown provider: {p}"))
+                })
+                .collect::<Result<Vec<_>>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
     Ok(crate::db::tokens::TokenLimits {
         requests,
         tokens,
         window_seconds,
         slowdown_ms,
         prefer_trusted,
+        providers,
     })
 }
 

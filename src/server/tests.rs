@@ -464,6 +464,7 @@ async fn token_request_limit_enforced() {
     db.set_token_limits(
         &id.to_string(),
         &crate::db::tokens::TokenLimits {
+            providers: Vec::new(),
             requests: Some(1),
             tokens: None,
             window_seconds: 3600,

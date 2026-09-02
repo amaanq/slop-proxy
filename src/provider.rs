@@ -8,6 +8,15 @@ pub enum Provider {
 }
 
 impl Provider {
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.trim() {
+            "openai" => Some(Provider::OpenAi),
+            "anthropic" => Some(Provider::Anthropic),
+            "gemini" => Some(Provider::Gemini),
+            _ => None,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Provider::OpenAi => "openai",

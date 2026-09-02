@@ -291,6 +291,9 @@ pub async fn native(
     }
 
     let started = std::time::Instant::now();
+    if !auth.may_use(crate::provider::Provider::Gemini) {
+        return super::error::out_of_scope(DIALECT, crate::provider::Provider::Gemini);
+    }
     let streaming = action == "streamGenerateContent";
     let key = native_session_key(&auth.user, &body);
     let facts = super::facts::RequestFacts::extract(&body, &headers);

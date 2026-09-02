@@ -109,3 +109,17 @@ pub fn pool_error_status(e: &PoolError) -> i64 {
         PoolError::Upstream(_) => 502,
     }
 }
+
+/// A 403 that says which provider the token lacks, so a scoped key does not
+/// read as the model being broken for everyone.
+pub fn out_of_scope(dialect: Dialect, provider: crate::provider::Provider) -> Response {
+    error_response(
+        dialect,
+        403,
+        "permission_error",
+        &format!(
+            "this token is not scoped to the {} backend",
+            provider.as_str()
+        ),
+    )
+}

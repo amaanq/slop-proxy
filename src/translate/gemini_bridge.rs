@@ -102,6 +102,7 @@ fn parts(content: &[ContentPart]) -> Value {
 pub struct ChatToResponses {
     opened: bool,
     calls: Vec<OpenCall>,
+    text: String,
     frames: usize,
     emitted: usize,
     first_frame: Option<String>,
@@ -143,6 +144,7 @@ impl ChatToResponses {
         if let Some(text) = delta.and_then(|d| d.get("content")).and_then(Value::as_str)
             && !text.is_empty()
         {
+            self.text.push_str(text);
             out.push(json!({"type": "response.output_text.delta", "delta": text}));
         }
         if let Some(calls) = delta.and_then(|d| d.get("tool_calls")).and_then(Value::as_array) {
@@ -162,6 +164,15 @@ impl ChatToResponses {
                 }
             }
             self.calls.clear();
+            // The streaming translator reads text deltas, but `aggregate`
+            // builds its blocks only from finished items, so a non-streaming
+            // turn needs the whole message restated as one.
+            if !self.text.is_empty() {
+                out.push(json!({"type": "response.output_item.done", "item": {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": std::mem::take(&mut self.text)}],
+                }}));
+            }
         }
         if let Some(usage) = chunk.get("usage").filter(|u| !u.is_null()) {
             out.push(json!({"type": "response.completed", "response": {"usage": usage}}));
@@ -374,5 +385,32 @@ mod real_chunk {
             matches!(parsed[1], ResponsesEvent::OutputTextDelta { .. }),
             "text delta degraded to {:?}", parsed[1]
         );
+    }
+}
+
+#[cfg(test)]
+mod aggregate_path {
+    use super::*;
+    use crate::codex::types::{OutputContentPart, OutputItem, ResponsesEvent};
+
+    #[test]
+    fn a_finished_turn_restates_its_text_as_an_item() {
+        let mut b = ChatToResponses::default();
+        b.feed(&serde_json::json!({"choices": [{"delta": {"content": "ok"}}]}));
+        let done = b.feed(&serde_json::json!({"choices": [{"finish_reason": "stop"}]}));
+        let items: Vec<ResponsesEvent> = done
+            .into_iter()
+            .map(|e| serde_json::from_value(e).unwrap_or(ResponsesEvent::Other))
+            .collect();
+        let text = items.iter().find_map(|e| match e {
+            ResponsesEvent::OutputItemDone {
+                item: OutputItem::Message { content },
+            } => content.as_ref().and_then(|c| c.first()).map(|p| match p {
+                OutputContentPart::OutputText { text } => text.clone(),
+                OutputContentPart::Other => String::new(),
+            }),
+            _ => None,
+        });
+        assert_eq!(text.as_deref(), Some("ok"));
     }
 }

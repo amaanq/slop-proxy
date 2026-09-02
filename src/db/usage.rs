@@ -321,7 +321,7 @@ impl Db {
         let key_expr = match dim {
             UsageDim::User => "u.user",
             UsageDim::Account => {
-                "COALESCE((SELECT COALESCE(a.label, a.email, 'account#' || a.id) FROM accounts a WHERE a.id = u.account_id), 'none')"
+                "COALESCE((SELECT COALESCE(a.label, a.email, 'account#' || a.id) FROM accounts a WHERE a.id = u.account_id), NULLIF(u.provider, ''), 'none')"
             }
             UsageDim::Model => "u.upstream_model",
         };
@@ -503,7 +503,11 @@ impl Db {
         let mut stmt = conn.prepare(
             "SELECT u.user,
                     COALESCE((SELECT COALESCE(a.label, a.email, 'account#' || a.id)
-                              FROM accounts a WHERE a.id = u.account_id), 'none') AS account,
+                              FROM accounts a WHERE a.id = u.account_id),
+                             CASE WHEN u.provider <> '' AND NOT EXISTS
+                                    (SELECT 1 FROM accounts a2 WHERE a2.provider = u.provider)
+                                  THEN u.provider END,
+                             'none') AS account,
                     COALESCE(NULLIF(u.stop_reason, ''), u.error_kind,
                              CASE WHEN u.status >= 400
                                   THEN 'http_' || (u.status / 100) || 'xx' END,
@@ -567,8 +571,9 @@ impl Db {
         let conn = self.0.lock().await;
         let mut stmt = conn.prepare(
             "SELECT u.user,
-                    COALESCE((SELECT a.provider
-                              FROM accounts a WHERE a.id = u.account_id), 'none') AS provider,
+                    COALESCE(NULLIF(u.provider, ''),
+                             (SELECT a.provider FROM accounts a WHERE a.id = u.account_id),
+                             'none') AS provider,
                     COALESCE(u.error_kind, 'http_' || (u.status / 100) || 'xx') AS kind,
                     COUNT(*)
              FROM usage_log u

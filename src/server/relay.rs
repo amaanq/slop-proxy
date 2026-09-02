@@ -201,14 +201,22 @@ pub async fn messages(
     if streaming {
         let capture = UsageCapture::default();
         let guard = LogGuard::new(state.db.clone(), state.prices.clone(), capture.clone(), record);
-        let mut scan = SseScan::new(capture);
-        let stream = resp.bytes_stream().map(move |item| {
-            let _ = &guard;
-            if let Ok(bytes) = &item {
-                scan.feed(bytes);
-            }
-            item
-        });
+        let mut scan = SseScan::new(capture.clone());
+        // `chain` only runs if the caller stayed to drain the body.
+        let stream = resp
+            .bytes_stream()
+            .map(move |item| {
+                let _ = &guard;
+                match &item {
+                    Ok(bytes) => scan.feed(bytes),
+                    Err(_) => scan.capture().fail("upstream_stream_error"),
+                }
+                item
+            })
+            .chain(futures_util::stream::once(async move {
+                capture.note_upstream_eof();
+                Ok(axum::body::Bytes::new())
+            }));
         builder
             .body(Body::from_stream(stream))
             .unwrap_or_else(|e| error_response(DIALECT, 502, "api_error", &e.to_string()))
@@ -298,6 +306,10 @@ struct SseScan {
 }
 
 impl SseScan {
+    fn capture(&self) -> &UsageCapture {
+        &self.capture
+    }
+
     fn new(capture: UsageCapture) -> Self {
         Self {
             buf: String::new(),

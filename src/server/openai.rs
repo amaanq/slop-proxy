@@ -469,11 +469,15 @@ struct ResponseUsage {
 }
 
 fn relay_stream(resp: reqwest::Response, guard: LogGuard, capture: UsageCapture) -> Response {
+    let eof_capture = capture.clone();
     let stream = resp.bytes_stream().eventsource().filter_map(move |ev| {
         let capture = capture.clone();
         async move {
             match ev {
                 Ok(ev) => {
+                    if !ev.event.is_empty() {
+                        capture.note_event(&ev.event);
+                    }
                     if (ev.event == "response.completed"
                         || ev.data.contains("\"response.completed\""))
                         && let Ok(env) = serde_json::from_str::<UsageEnvelope>(&ev.data)
@@ -489,6 +493,7 @@ fn relay_stream(resp: reqwest::Response, guard: LogGuard, capture: UsageCapture)
                 }
                 Err(e) => {
                     tracing::warn!("passthrough SSE error: {e}");
+                    capture.fail("upstream_sse_error");
                     None
                 }
             }
@@ -496,6 +501,7 @@ fn relay_stream(resp: reqwest::Response, guard: LogGuard, capture: UsageCapture)
     });
     struct Held<S> {
         inner: S,
+        capture: UsageCapture,
         _guard: LogGuard,
     }
     impl<S: futures_util::Stream + Unpin> futures_util::Stream for Held<S> {
@@ -504,11 +510,17 @@ fn relay_stream(resp: reqwest::Response, guard: LogGuard, capture: UsageCapture)
             mut self: std::pin::Pin<&mut Self>,
             cx: &mut std::task::Context<'_>,
         ) -> std::task::Poll<Option<Self::Item>> {
-            std::pin::Pin::new(&mut self.inner).poll_next(cx)
+            let polled = std::pin::Pin::new(&mut self.inner).poll_next(cx);
+            // Never reached if the caller went away first.
+            if matches!(polled, std::task::Poll::Ready(None)) {
+                self.capture.note_upstream_eof();
+            }
+            polled
         }
     }
     let held = Held {
         inner: Box::pin(stream),
+        capture: eof_capture,
         _guard: guard,
     };
     Sse::new(held)

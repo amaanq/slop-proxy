@@ -25,7 +25,11 @@ pub struct Window {
 
 impl Window {
     pub fn resets_at_unix(&self) -> Option<i64> {
-        self.resets_at.as_deref()?.parse::<jiff::Timestamp>().ok().map(|t| t.as_second())
+        self.resets_at
+            .as_deref()?
+            .parse::<jiff::Timestamp>()
+            .ok()
+            .map(|t| t.as_second())
     }
 }
 
@@ -63,7 +67,6 @@ impl Limit {
             _ => "7d",
         }
     }
-
 }
 
 #[derive(Debug, Default, Clone, serde::Deserialize)]
@@ -156,7 +159,10 @@ impl AnthropicClient {
     /// The catalog exactly as the backend sends it. Relayed rather than
     /// rebuilt so a client sees the same model ids and display names it would
     /// talking to Anthropic directly.
-    pub async fn models_raw(&self, access_token: &str) -> Result<(reqwest::StatusCode, String), String> {
+    pub async fn models_raw(
+        &self,
+        access_token: &str,
+    ) -> Result<(reqwest::StatusCode, String), String> {
         let resp = self
             .http
             .get(format!(

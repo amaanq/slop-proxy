@@ -36,6 +36,33 @@ impl AnthropicPool {
         self.slots.reload().await
     }
 
+    /// Averaged across accounts, so a caller's figures do not jump when
+    /// routing moves it.
+    pub async fn pool_windows(&self) -> Vec<UsageWindow> {
+        let mut by_name: std::collections::BTreeMap<String, (f64, usize, Option<i64>)> =
+            Default::default();
+        for account in self.slots.snapshot().await {
+            let Some(usage) = account.usage else { continue };
+            for w in usage.windows {
+                let slot = by_name.entry(w.name.clone()).or_insert((0.0, 0, None));
+                slot.0 += w.utilization;
+                slot.1 += 1;
+                slot.2 = match (slot.2, w.resets_at) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (a, b) => a.or(b),
+                };
+            }
+        }
+        by_name
+            .into_iter()
+            .map(|(name, (sum, count, resets_at))| UsageWindow {
+                name,
+                utilization: sum / count.max(1) as f64,
+                resets_at,
+            })
+            .collect()
+    }
+
     pub async fn snapshot(&self) -> Vec<super::AccountSnapshot> {
         self.slots.snapshot().await
     }

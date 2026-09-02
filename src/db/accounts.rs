@@ -128,7 +128,12 @@ impl Db {
                access_expires_at = ?4,
                last_refresh_at = unixepoch(), updated_at = unixepoch()
              WHERE id = ?1",
-            params![id, tokens.access_token, tokens.refresh_token, tokens.expires_at],
+            params![
+                id,
+                tokens.access_token,
+                tokens.refresh_token,
+                tokens.expires_at
+            ],
         )?;
         Ok(())
     }

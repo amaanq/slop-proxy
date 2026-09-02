@@ -19,12 +19,12 @@ use axum::routing::{get, post};
 use eyre::{Result, WrapErr};
 
 use crate::anthropic::client::AnthropicClient;
-use crate::gemini::client::GeminiClient;
 use crate::codex::client::CodexClient;
 use crate::codex::models::ModelInfo;
 use crate::config::Config;
 use crate::db::Db;
 use crate::db::usage::UsageRecord;
+use crate::gemini::client::GeminiClient;
 use crate::pool::anthropic::AnthropicPool;
 use crate::pool::codex::CodexPool;
 use crate::pool::gemini::GeminiPool;
@@ -264,12 +264,7 @@ pub struct LogGuard {
 }
 
 impl LogGuard {
-    pub fn new(
-        db: Db,
-        prices: Arc<Prices>,
-        capture: UsageCapture,
-        record: UsageRecord,
-    ) -> Self {
+    pub fn new(db: Db, prices: Arc<Prices>, capture: UsageCapture, record: UsageRecord) -> Self {
         Self {
             db,
             prices,
@@ -308,9 +303,7 @@ impl Drop for LogGuard {
             );
         }
         record.duration_ms = Some(self.start.elapsed().as_millis() as i64);
-        record.cost_usd = self
-            .prices
-            .cost(&record.upstream_model, billable(&record));
+        record.cost_usd = self.prices.cost(&record.upstream_model, billable(&record));
         let db = self.db.clone();
         tokio::spawn(async move {
             if let Err(e) = db.log_usage(&record).await {
@@ -399,7 +392,10 @@ mod end_reason_tests {
         cut_by_client.note_event("response.output_text.delta");
         let snap = cut_by_client.snapshot();
         assert!(!snap.completed && !snap.upstream_eof);
-        assert_eq!(snap.last_event.as_deref(), Some("response.output_text.delta"));
+        assert_eq!(
+            snap.last_event.as_deref(),
+            Some("response.output_text.delta")
+        );
 
         let cut_by_upstream = UsageCapture::default();
         cut_by_upstream.note_upstream_eof();

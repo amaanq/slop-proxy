@@ -9,11 +9,11 @@ use crate::anthropic::client::AnthropicClient;
 use crate::codex::client::CodexClient;
 use crate::config::{AnthropicConfig, CodexConfig, Config, ModelsConfig};
 use crate::db::Db;
+use crate::gemini::client::GeminiClient;
 use crate::oauth::TokenSet;
 use crate::pool::anthropic::AnthropicPool;
 use crate::pool::codex::CodexPool;
 use crate::pool::gemini::GeminiPool;
-use crate::gemini::client::GeminiClient;
 use crate::provider::{AuthMode, Provider};
 
 const MOCK_SSE: &str = concat!(
@@ -344,7 +344,10 @@ async fn anthropic_relay_passthrough() {
     let resp = reqwest::Client::new()
         .post(format!("{base}/v1/messages"))
         .header("x-api-key", "sp-test")
-        .header("anthropic-beta", "claude-code-20250219,context-1m-2025-08-07")
+        .header(
+            "anthropic-beta",
+            "claude-code-20250219,context-1m-2025-08-07",
+        )
         .header("user-agent", "claude-cli/2.1.252 (external, cli)")
         .json(&body)
         .send()

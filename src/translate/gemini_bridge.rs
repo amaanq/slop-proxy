@@ -46,6 +46,9 @@ pub fn to_chat(req: &Value) -> Value {
     if let Some(max) = req["max_output_tokens"].as_u64() {
         body.insert("max_tokens".into(), json!(max));
     }
+    if let Some(effort) = req["reasoning"]["effort"].as_str() {
+        body.insert("reasoning_effort".into(), json!(gemini_effort(effort)));
+    }
     let tools: Vec<Value> = req["tools"]
         .as_array()
         .into_iter()
@@ -75,6 +78,17 @@ pub fn to_chat(req: &Value) -> Value {
         _ => {}
     }
     Value::Object(body)
+}
+
+/// Gemini takes none, low, medium or high and rejects anything else outright,
+/// so codex asking for xhigh would 400 the whole turn.
+fn gemini_effort(effort: &str) -> &str {
+    match effort {
+        "none" | "minimal" => "none",
+        "low" => "low",
+        "medium" => "medium",
+        _ => "high",
+    }
 }
 
 /// Chat completions has no `developer` role.
@@ -440,6 +454,25 @@ mod tests {
         let body = to_chat(&req);
         assert_eq!(body["messages"][1]["role"], "system");
         assert_eq!(body["messages"][1]["content"][0]["text"], "ctx");
+    }
+
+    /// Gemini rejects any effort outside none/low/medium/high, and codex asks
+    /// for xhigh, so an unmapped value would 400 the turn rather than degrade.
+    #[test]
+    fn an_unsupported_effort_clamps_instead_of_failing() {
+        let with = |e: &str| {
+            to_chat(&json!({
+                "model": "gemini-3.8-flash", "instructions": "s", "stream": true,
+                "input": [], "reasoning": {"effort": e},
+            }))["reasoning_effort"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(with("xhigh"), "high");
+        assert_eq!(with("minimal"), "none");
+        assert_eq!(with("medium"), "medium");
+        assert_eq!(with("low"), "low");
     }
 
     /// The responses surface forwards a body it received, so tool calls and

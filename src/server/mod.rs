@@ -291,7 +291,21 @@ impl Drop for LogGuard {
         record.reasoning_tokens = cap.reasoning_tokens;
         record.error_kind = cap.error_kind;
         if !cap.completed && record.error_kind.is_none() {
-            record.error_kind = Some("client_disconnect".into());
+            record.error_kind = Some(if cap.upstream_eof {
+                "upstream_eof".into()
+            } else {
+                "client_disconnect".into()
+            });
+        }
+        if !cap.completed {
+            tracing::warn!(
+                user = %record.user,
+                model = %record.upstream_model,
+                kind = record.error_kind.as_deref().unwrap_or("?"),
+                last_event = cap.last_event.as_deref().unwrap_or("none"),
+                after_ms = self.start.elapsed().as_millis() as i64,
+                "stream ended without usage"
+            );
         }
         record.duration_ms = Some(self.start.elapsed().as_millis() as i64);
         record.cost_usd = self
@@ -360,4 +374,36 @@ pub fn cache_key(user: &str, req: &crate::codex::types::ResponsesRequest) -> Str
     uuid::Builder::from_random_bytes(bytes)
         .into_uuid()
         .to_string()
+}
+
+#[cfg(test)]
+mod end_reason_tests {
+    use crate::translate::UsageCapture;
+
+    #[test]
+    fn a_completed_stream_has_no_error() {
+        let cap = UsageCapture::default();
+        cap.record(&crate::codex::types::Usage {
+            input_tokens: 10,
+            output_tokens: 5,
+            ..Default::default()
+        });
+        cap.note_upstream_eof();
+        let snap = cap.snapshot();
+        assert!(snap.completed);
+    }
+
+    #[test]
+    fn the_two_ways_a_stream_dies_are_distinguishable() {
+        let cut_by_client = UsageCapture::default();
+        cut_by_client.note_event("response.output_text.delta");
+        let snap = cut_by_client.snapshot();
+        assert!(!snap.completed && !snap.upstream_eof);
+        assert_eq!(snap.last_event.as_deref(), Some("response.output_text.delta"));
+
+        let cut_by_upstream = UsageCapture::default();
+        cut_by_upstream.note_upstream_eof();
+        let snap = cut_by_upstream.snapshot();
+        assert!(!snap.completed && snap.upstream_eof);
+    }
 }

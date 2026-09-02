@@ -50,6 +50,9 @@ pub struct CapturedUsage {
     pub reasoning_tokens: i64,
     pub completed: bool,
     pub error_kind: Option<String>,
+    /// Distinguishes upstream ending early from the caller hanging up.
+    pub upstream_eof: bool,
+    pub last_event: Option<String>,
 }
 
 #[derive(Default, Clone)]
@@ -67,6 +70,15 @@ impl UsageCapture {
         c.cache_read_tokens = cached;
         c.reasoning_tokens = usage.output_tokens_details.reasoning_tokens;
         c.completed = true;
+    }
+
+    pub fn note_event(&self, name: &str) {
+        let mut c = self.0.lock().unwrap();
+        c.last_event = Some(name.to_string());
+    }
+
+    pub fn note_upstream_eof(&self) {
+        self.0.lock().unwrap().upstream_eof = true;
     }
 
     pub fn fail(&self, kind: &str) {

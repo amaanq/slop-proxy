@@ -37,6 +37,11 @@ pub fn to_chat(req: &ResponsesRequest) -> Value {
     body.insert("model".into(), json!(req.model));
     body.insert("messages".into(), json!(messages));
     body.insert("stream".into(), json!(req.stream));
+    if req.stream {
+        // Without this the terminal chunk carries no usage and the request
+        // bills as zero tokens.
+        body.insert("stream_options".into(), json!({"include_usage": true}));
+    }
     if let Some(max) = req.max_output_tokens {
         body.insert("max_tokens".into(), json!(max));
     }
@@ -97,6 +102,23 @@ fn parts(content: &[ContentPart]) -> Value {
 pub struct ChatToResponses {
     opened: bool,
     calls: Vec<OpenCall>,
+    frames: usize,
+    emitted: usize,
+    first_frame: Option<String>,
+}
+
+/// A stream that produced nothing is the failure this path keeps hitting, and
+/// the frame count separates nothing arriving from nothing being understood.
+impl Drop for ChatToResponses {
+    fn drop(&mut self) {
+        if self.emitted == 0 {
+            tracing::warn!(
+                frames = self.frames,
+                first = self.first_frame.as_deref().unwrap_or("<none>"),
+                "gemini bridge produced no content"
+            );
+        }
+    }
 }
 
 #[derive(Default)]
@@ -108,6 +130,10 @@ struct OpenCall {
 
 impl ChatToResponses {
     pub fn feed(&mut self, chunk: &Value) -> Vec<Value> {
+        self.frames += 1;
+        if self.first_frame.is_none() {
+            self.first_frame = Some(chunk.to_string().chars().take(400).collect());
+        }
         let mut out = Vec::new();
         if !self.opened {
             self.opened = true;
@@ -140,6 +166,17 @@ impl ChatToResponses {
         if let Some(usage) = chunk.get("usage").filter(|u| !u.is_null()) {
             out.push(json!({"type": "response.completed", "response": {"usage": usage}}));
         }
+        // `created` and `completed` carry no answer, so they do not count as
+        // content when deciding whether the bridge produced anything.
+        self.emitted += out
+            .iter()
+            .filter(|e| {
+                !matches!(
+                    e["type"].as_str(),
+                    Some("response.created") | Some("response.completed")
+                )
+            })
+            .count();
         out
     }
 
@@ -275,5 +312,67 @@ mod tests {
         let body = to_chat(&req);
         assert_eq!(body["messages"][1]["role"], "system");
         assert_eq!(body["messages"][1]["content"][0]["text"], "ctx");
+    }
+}
+
+#[cfg(test)]
+mod full_chain {
+    use super::*;
+    use crate::codex::types::ResponsesEvent;
+    use crate::gemini::native::NativeStream;
+
+    /// The whole native path offline: gemini frames in, Responses events out.
+    #[test]
+    fn a_captured_native_stream_yields_text() {
+        let raw = include_bytes!("testdata/gemini_native.sse");
+        let mut native = NativeStream::new("gemini-3.8-flash");
+        let mut bridge = ChatToResponses::default();
+        let mut kinds = Vec::new();
+        let mut text = String::new();
+        // The network delivers arbitrary chunks, not whole frames.
+        let frames: Vec<Vec<u8>> = raw.chunks(64).flat_map(|c| native.feed(c)).collect();
+        for frame in frames {
+            let line = String::from_utf8_lossy(&frame);
+            for data in line.lines().filter_map(|l| l.strip_prefix("data:")) {
+                let data = data.trim();
+                if data == "[DONE]" {
+                    continue;
+                }
+                let Ok(chunk) = serde_json::from_str::<Value>(data) else {
+                    continue;
+                };
+                for ev in bridge.feed(&chunk) {
+                    let parsed: ResponsesEvent =
+                        serde_json::from_value(ev.clone()).unwrap_or(ResponsesEvent::Other);
+                    if let ResponsesEvent::OutputTextDelta { delta } = &parsed {
+                        text.push_str(delta);
+                    }
+                    kinds.push(ev["type"].as_str().unwrap().to_string());
+                }
+            }
+        }
+        assert!(!text.is_empty(), "no text recovered, events were {kinds:?}");
+    }
+}
+
+#[cfg(test)]
+mod real_chunk {
+    use super::*;
+    use crate::codex::types::ResponsesEvent;
+
+    #[test]
+    fn a_real_gemini_chunk_survives_deserialisation() {
+        let chunk: Value = serde_json::from_str(r#"{"choices":[{"delta":{"content":"OK.","role":"assistant"},"index":0}],"created":1788373398,"id":"x","model":"gemini-3.8-flash","object":"chat.completion.chunk","usage":{"completion_tokens":2,"prompt_tokens":3,"total_tokens":71}}"#).unwrap();
+        let raw = ChatToResponses::default().feed(&chunk);
+        let kinds: Vec<_> = raw.iter().map(|e| e["type"].as_str().unwrap()).collect();
+        assert_eq!(kinds, ["response.created", "response.output_text.delta", "response.completed"]);
+        let parsed: Vec<ResponsesEvent> = raw
+            .into_iter()
+            .map(|e| serde_json::from_value(e).unwrap_or(ResponsesEvent::Other))
+            .collect();
+        assert!(
+            matches!(parsed[1], ResponsesEvent::OutputTextDelta { .. }),
+            "text delta degraded to {:?}", parsed[1]
+        );
     }
 }

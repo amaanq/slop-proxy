@@ -1,8 +1,62 @@
 //! Claude Code only speaks the messages API and every Gemini surface speaks
 //! chat completions.
 
+use std::collections::{BTreeSet, HashMap};
+use std::sync::{LazyLock, Mutex};
+
 use serde_json::{Map, Value, json};
 
+/// Gemini refuses a replayed function call whose part carries no
+/// thought_signature, and the signature it issues survives nowhere in the
+/// Responses item codex hands back, so it is held here against the call id.
+/// See https://ai.google.dev/gemini-api/docs/thought-signatures.
+static SIGNATURES: LazyLock<Mutex<HashMap<String, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Long enough for any live conversation, bounded so a long-running proxy does
+/// not grow without limit.
+const MAX_SIGNATURES: usize = 4096;
+
+fn remember_signature(call_id: &str, signature: &str) {
+    let mut map = SIGNATURES.lock().unwrap();
+    if map.len() >= MAX_SIGNATURES {
+        map.clear();
+    }
+    map.insert(call_id.to_string(), signature.to_string());
+}
+
+fn signature_for(call_id: &str) -> Option<String> {
+    SIGNATURES.lock().unwrap().get(call_id).cloned()
+}
+
+fn tool_call_message(call_id: &Value, name: &Value, arguments: String) -> Value {
+    let mut call = json!({
+        "id": call_id,
+        "type": "function",
+        "function": {"name": name, "arguments": arguments},
+    });
+    if let Some(sig) = call_id.as_str().and_then(signature_for) {
+        call["extra_content"] = json!({"google": {"thought_signature": sig}});
+    }
+    json!({"role": "assistant", "content": Value::Null, "tool_calls": [call]})
+}
+
+
+/// Codex's shell tool is a grammar-constrained freeform tool taking raw text.
+/// Chat completions has no way to say that, so those are offered as a function
+/// over a single string and their calls are turned back on the way out.
+pub fn custom_tools(req: &Value) -> BTreeSet<String> {
+    req["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|t| t["type"] == "custom")
+        .filter_map(|t| t["name"].as_str().map(String::from))
+        .collect()
+}
+
+/// The single argument a custom tool is presented as taking.
+const FREEFORM_ARG: &str = "input";
 
 /// Takes the serialized request rather than the struct, so the responses
 /// surface can hand over a body it received instead of one it built.
@@ -14,20 +68,23 @@ pub fn to_chat(req: &Value) -> Value {
                 "role": chat_role(item["role"].as_str().unwrap_or("user")),
                 "content": parts(&item["content"]),
             })),
-            Some("function_call") => messages.push(json!({
-                "role": "assistant",
-                "content": Value::Null,
-                "tool_calls": [{
-                    "id": item["call_id"],
-                    "type": "function",
-                    "function": {"name": item["name"], "arguments": item["arguments"]},
-                }],
-            })),
-            Some("function_call_output") => messages.push(json!({
-                "role": "tool",
-                "tool_call_id": item["call_id"],
-                "content": item["output"],
-            })),
+            Some("function_call") => messages.push(tool_call_message(
+                &item["call_id"],
+                &item["name"],
+                item["arguments"].as_str().unwrap_or("{}").to_string(),
+            )),
+            Some("function_call_output") | Some("custom_tool_call_output") => {
+                messages.push(json!({
+                    "role": "tool",
+                    "tool_call_id": item["call_id"],
+                    "content": tool_output(&item["output"]),
+                }))
+            }
+            Some("custom_tool_call") => messages.push(tool_call_message(
+                &item["call_id"],
+                &item["name"],
+                json!({FREEFORM_ARG: item["input"]}).to_string(),
+            )),
             // Gemini rejects an unknown role rather than ignoring it.
             _ => {}
         }
@@ -55,10 +112,21 @@ pub fn to_chat(req: &Value) -> Value {
         .flatten()
         .filter_map(|t| {
             let name = t.get("name")?;
+            let parameters = match t.get("parameters") {
+                Some(p) if t["type"] != "custom" => p.clone(),
+                _ => json!({
+                    "type": "object",
+                    "properties": {FREEFORM_ARG: {
+                        "type": "string",
+                        "description": "The complete tool input, verbatim.",
+                    }},
+                    "required": [FREEFORM_ARG],
+                }),
+            };
             Some(json!({"type": "function", "function": {
                 "name": name,
                 "description": t.get("description").cloned().unwrap_or(Value::Null),
-                "parameters": t.get("parameters").cloned().unwrap_or(json!({})),
+                "parameters": parameters,
             }}))
         })
         .collect();
@@ -91,6 +159,21 @@ fn gemini_effort(effort: &str) -> &str {
     }
 }
 
+/// Codex returns a tool result as the content array it received, but chat
+/// completions takes a plain string on a `tool` message and rejects the whole
+/// request otherwise, which comes back as an empty stream.
+fn tool_output(output: &Value) -> String {
+    match output {
+        Value::String(s) => s.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(|p| p["text"].as_str().or_else(|| p.as_str()))
+            .collect::<Vec<_>>()
+            .join(""),
+        other => other.to_string(),
+    }
+}
+
 /// Chat completions has no `developer` role.
 fn chat_role(role: &str) -> &str {
     match role {
@@ -118,6 +201,7 @@ fn parts(content: &Value) -> Value {
 /// name until there is enough to open an item.
 #[derive(Default)]
 pub struct ChatToResponses {
+    custom: BTreeSet<String>,
     opened: bool,
     calls: Vec<OpenCall>,
     text: String,
@@ -156,6 +240,12 @@ struct OpenCall {
 }
 
 impl ChatToResponses {
+    pub fn with_custom(custom: BTreeSet<String>) -> Self {
+        let mut b = Self::default();
+        b.custom = custom;
+        b
+    }
+
     pub fn feed(&mut self, chunk: &Value) -> Vec<Value> {
         self.frames += 1;
         if self.first_frame.is_none() {
@@ -198,20 +288,38 @@ impl ChatToResponses {
         {
             self.finished = true;
             for call in &self.calls {
-                if call.announced {
-                    // An item done without its arguments is a tool call the
-                    // client cannot run.
-                    out.push(json!({"type": "response.function_call_arguments.done",
+                if !call.announced {
+                    continue;
+                }
+                // A freeform tool takes raw text, so the single string it was
+                // offered as is unwrapped before the item is handed back.
+                if self.custom.contains(&call.name) {
+                    let input = serde_json::from_str::<Value>(&call.arguments)
+                        .ok()
+                        .and_then(|a| a[FREEFORM_ARG].as_str().map(String::from))
+                        .unwrap_or_else(|| call.arguments.clone());
+                    out.push(json!({"type": "response.custom_tool_call_input.done",
                         "item_id": call.item_id, "output_index": call.index,
-                        "arguments": call.arguments}));
+                        "input": input}));
                     out.push(json!({"type": "response.output_item.done",
                         "output_index": call.index,
                         "item": {
-                            "type": "function_call", "id": call.item_id, "call_id": call.id,
-                            "name": call.name, "arguments": call.arguments,
+                            "type": "custom_tool_call", "id": call.item_id,
+                            "call_id": call.id, "name": call.name, "input": input,
                             "status": "completed",
                         }}));
+                    continue;
                 }
+                out.push(json!({"type": "response.function_call_arguments.done",
+                    "item_id": call.item_id, "output_index": call.index,
+                    "arguments": call.arguments}));
+                out.push(json!({"type": "response.output_item.done",
+                    "output_index": call.index,
+                    "item": {
+                        "type": "function_call", "id": call.item_id, "call_id": call.id,
+                        "name": call.name, "arguments": call.arguments,
+                        "status": "completed",
+                    }}));
             }
             self.calls.clear();
             // The streaming translator reads text deltas, but `aggregate`
@@ -276,18 +384,28 @@ impl ChatToResponses {
         if let Some(name) = call.pointer("/function/name").and_then(Value::as_str) {
             slot.name = name.to_string();
         }
+        if let Some(sig) = call
+            .pointer("/extra_content/google/thought_signature")
+            .and_then(Value::as_str)
+            && !slot.id.is_empty()
+        {
+            remember_signature(&slot.id, sig);
+        }
         if !slot.announced && !slot.name.is_empty() {
             slot.announced = true;
             slot.item_id = format!("fc_{}", uuid::Uuid::new_v4().simple());
             slot.index = self.next_index;
             self.next_index += 1;
             let slot = &self.calls[idx];
+            let kind = if self.custom.contains(&slot.name) {
+                json!({"type": "custom_tool_call", "id": slot.item_id,
+                       "call_id": slot.id, "name": slot.name, "input": ""})
+            } else {
+                json!({"type": "function_call", "id": slot.item_id,
+                       "call_id": slot.id, "name": slot.name, "arguments": ""})
+            };
             out.push(json!({"type": "response.output_item.added",
-                "output_index": slot.index,
-                "item": {
-                    "type": "function_call", "id": slot.item_id, "call_id": slot.id,
-                    "name": slot.name, "arguments": "",
-                }}));
+                "output_index": slot.index, "item": kind}));
         }
         let slot = &mut self.calls[idx];
         if let Some(args) = call.pointer("/function/arguments").and_then(Value::as_str)
@@ -310,6 +428,7 @@ pub fn value_stream(
     resp: reqwest::Response,
     protocol: crate::gemini::client::GeminiProtocol,
     model: &str,
+    custom: BTreeSet<String>,
 ) -> impl futures_util::Stream<Item = Value> + Send + use<> {
     use crate::gemini::client::GeminiProtocol;
     use eventsource_stream::Eventsource;
@@ -329,7 +448,7 @@ pub fn value_stream(
         futures_util::stream::iter(frames.into_iter().map(Ok::<_, std::io::Error>))
     });
 
-    let mut bridge = ChatToResponses::default();
+    let mut bridge = ChatToResponses::with_custom(custom);
     chat_bytes.eventsource().flat_map(move |ev| {
         let events = match ev {
             Ok(ev) if ev.data != "[DONE]" => serde_json::from_str::<Value>(&ev.data)
@@ -349,9 +468,10 @@ pub fn event_stream(
     resp: reqwest::Response,
     protocol: crate::gemini::client::GeminiProtocol,
     model: &str,
+    custom: BTreeSet<String>,
 ) -> crate::codex::sse::EventStream {
     use futures_util::StreamExt;
-    let stream = value_stream(resp, protocol, model)
+    let stream = value_stream(resp, protocol, model, custom)
         .map(|e| {
             serde_json::from_value(e).unwrap_or(crate::codex::types::ResponsesEvent::Other)
         })
@@ -473,6 +593,66 @@ mod tests {
         assert_eq!(with("minimal"), "none");
         assert_eq!(with("medium"), "medium");
         assert_eq!(with("low"), "low");
+    }
+
+    /// Codex's shell tool is `{"type":"custom","format":{"syntax":"lark"}}`
+    /// with no parameters at all, so offering it verbatim gave gemini an empty
+    /// schema and codex refused the arguments it invented.
+    #[test]
+    fn a_freeform_tool_round_trips_as_raw_text() {
+        let req = json!({
+            "model": "gemini-3.8-flash", "instructions": "s", "stream": true, "input": [],
+            "tools": [{"type": "custom", "name": "exec",
+                       "format": {"type": "grammar", "syntax": "lark"}}],
+        });
+        let names = custom_tools(&req);
+        assert!(names.contains("exec"));
+
+        let schema = &to_chat(&req)["tools"][0]["function"]["parameters"];
+        assert_eq!(schema["properties"]["input"]["type"], "string");
+        assert_eq!(schema["required"][0], "input");
+
+        let mut b = ChatToResponses::with_custom(names);
+        b.feed(&json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "c1",
+            "function": {"name": "exec", "arguments": "{\"input\":\"ls -la\"}"}}]}}]}));
+        let done = b.feed(&json!({"choices": [{"finish_reason": "tool_calls"}]}));
+        let item = &done[1]["item"];
+        assert_eq!(item["type"], "custom_tool_call");
+        assert_eq!(item["input"], "ls -la");
+        assert_eq!(item["call_id"], "c1");
+    }
+
+    /// A prior turn comes back as the item type it was handed out as, so the
+    /// call and its result have to map back onto chat messages.
+    #[test]
+    fn a_freeform_call_and_its_output_replay_as_messages() {
+        let body = to_chat(&json!({
+            "model": "g", "instructions": "s", "stream": true,
+            "input": [
+                {"type": "custom_tool_call", "call_id": "c1", "name": "exec", "input": "ls"},
+                {"type": "custom_tool_call_output", "call_id": "c1", "output": "a.txt"},
+            ],
+        }));
+        let call = &body["messages"][1]["tool_calls"][0]["function"];
+        assert_eq!(call["name"], "exec");
+        assert_eq!(call["arguments"], "{\"input\":\"ls\"}");
+        assert_eq!(body["messages"][2]["role"], "tool");
+        assert_eq!(body["messages"][2]["content"], "a.txt");
+    }
+
+    /// Codex hands a tool result back as the content array it received, and a
+    /// chat `tool` message takes a plain string, so forwarding the array made
+    /// gemini reject the request and answer with an empty stream.
+    #[test]
+    fn a_tool_result_flattens_to_a_string() {
+        let body = to_chat(&json!({
+            "model": "g", "instructions": "s", "stream": true,
+            "input": [{"type": "custom_tool_call_output", "call_id": "c1", "output": [
+                {"type": "input_text", "text": "Script completed\n"},
+                {"type": "input_text", "text": "mango"},
+            ]}],
+        }));
+        assert_eq!(body["messages"][1]["content"], "Script completed\nmango");
     }
 
     /// The responses surface forwards a body it received, so tool calls and

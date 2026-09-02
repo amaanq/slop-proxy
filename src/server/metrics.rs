@@ -310,6 +310,21 @@ fn render_sessions(out: &mut String, rows: &[crate::db::usage::SessionRow]) {
     }
     gauge_header(
         out,
+        "slop_session_account_switches",
+        "Times a conversation moved to a different account. Each move re-bills \
+         the whole prefix upstream, so this is what a cache hit rate collapse \
+         looks like before the cost shows up",
+    );
+    for r in rows {
+        let _ = writeln!(
+            out,
+            "slop_session_account_switches{{user={}}} {}",
+            quote(&r.user),
+            r.switches
+        );
+    }
+    gauge_header(
+        out,
         "slop_session_deepest_turn",
         "Longest conversation seen, in messages carried",
     );

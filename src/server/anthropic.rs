@@ -39,6 +39,7 @@ pub async fn messages(
             return super::relay::messages(state, auth, headers, body, peek).await;
         }
         Provider::Gemini => {}
+        Provider::Zen => {}
         Provider::OpenAi => {}
     }
     let req = match serde_json::from_value::<AnthropicRequest>(body) {
@@ -62,6 +63,7 @@ pub async fn messages(
         meter_id: Some(auth.meter_id),
         token_id: Some(auth.token_id),
         user: auth.user.clone(),
+        provider: Some(provider),
         dialect: "messages",
         requested_model: req.model.clone(),
         upstream_model: upstream_req.model.clone(),
@@ -82,20 +84,29 @@ pub async fn messages(
         }
     };
     let session_key = upstream_req.prompt_cache_key.clone().unwrap_or_default();
-    let gemini = state.cfg.models.route(&upstream_req.model) == Provider::Gemini;
-    let dispatched = if gemini {
-        let chat = gemini_bridge::to_chat(&upstream_req);
-        state
-            .gemini
-            .execute(crate::pool::gemini::Call::OpenAi(&chat), &session_key)
+    let route = state.cfg.models.route(&upstream_req.model);
+    let gemini = route == Provider::Gemini;
+    let dispatched = match route {
+        Provider::Gemini => {
+            let chat = gemini_bridge::to_chat(&req_value);
+            state
+                .gemini
+                .execute(crate::pool::gemini::Call::OpenAi(&chat), &session_key)
+                .await
+                .map(|(id, upstream)| (Some(id), upstream.protocol, upstream.response))
+        }
+        // Zen already speaks the Responses API, so the body it is handed is
+        // the one codex would have received.
+        Provider::Zen => state
+            .zen
+            .execute(&req_value, &session_key)
             .await
-            .map(|(id, upstream)| (id, upstream.protocol, upstream.response))
-    } else {
-        state
+            .map(|(id, resp)| (id, crate::gemini::client::GeminiProtocol::OpenAi, resp)),
+        _ => state
             .codex
             .execute(&req_value, auth.prefer_trusted, &session_key)
             .await
-            .map(|(id, resp)| (id, crate::gemini::client::GeminiProtocol::OpenAi, resp))
+            .map(|(id, resp)| (Some(id), crate::gemini::client::GeminiProtocol::OpenAi, resp)),
     };
     let (account_id, protocol, resp) = match dispatched {
         Ok(r) => r,
@@ -106,7 +117,7 @@ pub async fn messages(
         }
     };
     let mut record = record;
-    record.account_id = Some(account_id);
+    record.account_id = account_id;
 
     let capture = UsageCapture::default();
     let events = if gemini {
@@ -204,6 +215,7 @@ pub async fn count_tokens(
             return super::relay::count_tokens(state, auth, headers, body, peek).await;
         }
         Provider::Gemini => {}
+        Provider::Zen => {}
         Provider::OpenAi => {}
     }
     let req = match serde_json::from_value::<AnthropicRequest>(body) {

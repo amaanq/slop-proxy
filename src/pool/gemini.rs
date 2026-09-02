@@ -21,6 +21,17 @@ pub enum Call<'a> {
     },
 }
 
+/// Google answers a 429 with no retry-after and refills a token bucket rather
+/// than clearing a window, so the wait is measured: exhausting one key and
+/// probing it back took 20s, 27s and 37s.
+const RATE_LIMIT_COOLDOWN_SECS: i64 = 40;
+
+/// Google caches per key, so a conversation that moves keys re-sends its whole
+/// prefix as fresh input, which both re-bills it and spends more of the budget
+/// that caused the failover. Cache hit rate is 84.6% here against 96.9% on
+/// codex. Matching the cooldown means one wait covers exactly one backoff.
+const STICKY_WAIT_SECS: i64 = RATE_LIMIT_COOLDOWN_SECS;
+
 /// Session-sticky pool over Gemini accounts.
 pub struct GeminiPool {
     slots: Slots,
@@ -91,6 +102,18 @@ impl GeminiPool {
         let mut last_err = Option::<SendError>::None;
         let mut attempts = 0;
 
+        if let Some(preferred) = ranked.first() {
+            let left = self.slots.cooldown_left(preferred).await;
+            if (1..=STICKY_WAIT_SECS).contains(&left) {
+                tracing::debug!(
+                    account = %preferred.display,
+                    left,
+                    "waiting for the sticky gemini key rather than losing its cache"
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(left as u64 + 1)).await;
+            }
+        }
+
         for slot in ranked {
             if attempts >= 3 {
                 break;
@@ -132,7 +155,9 @@ impl GeminiPool {
                     last_err = Some(SendError::Auth(text));
                 }
                 Err(SendError::RateLimited { retry_after, body }) => {
-                    self.slots.cool_rate_limited(&slot, retry_after, 3600).await;
+                    self.slots
+                        .cool_rate_limited(&slot, retry_after, 3600, RATE_LIMIT_COOLDOWN_SECS)
+                        .await;
                     last_err = Some(SendError::RateLimited { retry_after, body });
                 }
                 Err(SendError::BadRequest(text)) => return Err(PoolError::BadRequest(text)),

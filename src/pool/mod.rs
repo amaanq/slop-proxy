@@ -376,11 +376,19 @@ impl Slots {
 
     /// Backoff for a 429: the reported retry-after when present, else
     /// exponential, clamped to the given ceiling.
-    pub async fn cool_rate_limited(&self, slot: &Arc<Slot>, retry_after: Option<i64>, max: i64) {
+    /// `base` is the first backoff to use when the provider names no
+    /// retry-after, and it doubles from there.
+    pub async fn cool_rate_limited(
+        &self,
+        slot: &Arc<Slot>,
+        retry_after: Option<i64>,
+        max: i64,
+        base: i64,
+    ) {
         let fails = slot.state.lock().await.consecutive_fails;
         let secs = retry_after
-            .unwrap_or(60i64.saturating_mul(1 << fails.min(6)))
-            .clamp(30, max);
+            .unwrap_or(base.saturating_mul(1 << fails.min(6)))
+            .clamp(base.min(30), max);
         self.cool(slot, secs, "rate limited").await;
     }
 
@@ -388,6 +396,15 @@ impl Slots {
         let fails = slot.state.lock().await.consecutive_fails;
         let secs = 15i64.saturating_mul(1 << fails.min(6)).min(900);
         self.cool(slot, secs, "upstream failure").await;
+    }
+
+    /// Seconds until this one slot is claimable, 0 when it already is.
+    pub async fn cooldown_left(&self, slot: &Arc<Slot>) -> i64 {
+        let now = crate::clock::unix_now();
+        match slot.state.lock().await.status {
+            Status::Cooldown { until } if until > now => until - now,
+            _ => 0,
+        }
     }
 
     pub async fn min_cooldown(&self) -> i64 {

@@ -4,6 +4,7 @@ use serde::Serialize;
 
 use super::Db;
 use super::tokens::TokenLimits;
+use crate::provider::Provider;
 
 #[derive(Debug, Clone, Default)]
 pub struct UsageRecord {
@@ -11,6 +12,10 @@ pub struct UsageRecord {
     pub token_id: Option<i64>,
     pub user: String,
     pub account_id: Option<i64>,
+    /// The backend the request was routed to. Kept beside the account rather
+    /// than derived from it, because a keyless backend has no account and a
+    /// request that never reached one still knows where it was headed.
+    pub provider: Option<Provider>,
     pub dialect: &'static str,
     pub requested_model: String,
     pub upstream_model: String,
@@ -134,15 +139,16 @@ impl Db {
         let mut conn = self.0.lock().await;
         let tx = conn.transaction()?;
         tx.execute(
-            "INSERT INTO usage_log (token_id, user, account_id, dialect, requested_model, upstream_model, effort, service_tier,
+            "INSERT INTO usage_log (token_id, user, account_id, provider, dialect, requested_model, upstream_model, effort, service_tier,
                input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, cost_usd, status, error_kind, duration_ms,
                session_key, turn_index, tools_declared, tools_called, thinking_budget, image_count, request_bytes, response_bytes, ttft_ms, stop_reason)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                     ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)",
+                     ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)",
             params![
                 r.token_id,
                 r.user,
                 r.account_id,
+                r.provider.map(|p| p.as_str()),
                 r.dialect,
                 r.requested_model,
                 r.upstream_model,
@@ -387,8 +393,9 @@ impl Db {
             "SELECT u.user,
                     COALESCE((SELECT COALESCE(a.label, a.email, 'account#' || a.id)
                               FROM accounts a WHERE a.id = u.account_id), 'none') AS account,
-                    COALESCE((SELECT a.provider
-                              FROM accounts a WHERE a.id = u.account_id), 'none') AS provider,
+                    COALESCE(NULLIF(u.provider, ''),
+                             (SELECT a.provider FROM accounts a WHERE a.id = u.account_id),
+                             'none') AS provider,
                     u.requested_model, u.upstream_model, u.effort, u.service_tier, u.dialect, COUNT(*),
                     SUM(u.status >= 400 OR u.error_kind IS NOT NULL),
                     COALESCE(SUM(u.input_tokens),0), COALESCE(SUM(u.output_tokens),0),

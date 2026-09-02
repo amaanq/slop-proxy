@@ -208,6 +208,16 @@ impl CodexPool {
                         .await;
                     last_err = Some(SendError::RateLimited { retry_after, body });
                 }
+                // A preview model can be enabled per account, so "not supported"
+                // describes this key rather than the request, and the next
+                // account may well serve it.
+                Err(SendError::BadRequest(body)) if body.contains("is not supported") => {
+                    tracing::warn!(
+                        account = %slot.display,
+                        "account cannot serve this model, trying another: {body}"
+                    );
+                    last_err = Some(SendError::BadRequest(body));
+                }
                 Err(SendError::BadRequest(body)) => {
                     return Err(PoolError::BadRequest(body));
                 }
@@ -219,6 +229,7 @@ impl CodexPool {
         }
 
         match last_err {
+            Some(SendError::BadRequest(body)) => Err(PoolError::BadRequest(body)),
             Some(SendError::RateLimited { .. }) | None => Err(PoolError::AllCoolingDown {
                 retry_after: self.slots.min_cooldown().await.max(30),
             }),

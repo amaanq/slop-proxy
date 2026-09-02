@@ -115,6 +115,7 @@ async fn spawn_proxy_with(models: ModelsConfig, anthropic_base: Option<String>) 
             ..AnthropicConfig::default()
         },
         gemini: Default::default(),
+        zen: Default::default(),
         models,
     };
     let codex = CodexPool::load(db.clone(), CodexClient::new(cfg.codex.clone()))
@@ -126,11 +127,18 @@ async fn spawn_proxy_with(models: ModelsConfig, anthropic_base: Option<String>) 
     let gemini_pool = GeminiPool::load(db.clone(), GeminiClient::new(cfg.gemini.clone()))
         .await
         .unwrap();
+    let zen_pool = crate::pool::zen::ZenPool::load(
+        db.clone(),
+        crate::zen::client::ZenClient::new(cfg.zen.clone()),
+    )
+    .await
+    .unwrap();
     let state = AppState {
         db: db.clone(),
         codex: Arc::new(codex),
         anthropic: Arc::new(anthropic),
         gemini: Arc::new(gemini_pool),
+        zen: Arc::new(zen_pool),
         cfg: Arc::new(cfg),
         models: Arc::new(super::ModelCache::new()),
         prices: Arc::new(crate::pricing::Prices::new(&cfg_db_path)),
@@ -396,6 +404,7 @@ async fn metrics_render_accounts_and_usage() {
         codex: CodexConfig::default(),
         anthropic: AnthropicConfig::default(),
         gemini: Default::default(),
+        zen: Default::default(),
         models: ModelsConfig::default(),
     };
     let state = AppState {
@@ -415,6 +424,14 @@ async fn metrics_render_accounts_and_usage() {
                 .await
                 .unwrap(),
         ),
+        zen: Arc::new(
+            crate::pool::zen::ZenPool::load(
+                db.clone(),
+                crate::zen::client::ZenClient::new(cfg.zen.clone()),
+            )
+            .await
+            .unwrap(),
+        ),
         cfg: Arc::new(cfg),
         models: Arc::new(super::ModelCache::new()),
         prices: Arc::new(crate::pricing::Prices::new(&std::path::PathBuf::new())),
@@ -428,7 +445,7 @@ async fn metrics_render_accounts_and_usage() {
     assert!(
         text.contains("slop_account_status{provider=\"openai\",account=\"test@example.com\"} 0")
     );
-    assert!(text.contains("slop_requests_total{user=\"alice\",account=\"test@example.com\",provider=\"openai\",requested_model=\"gpt-5-codex\",model=\"gpt-5-codex\",effort=\"medium\",service_tier=\"\",dialect=\"chat\"} 1"));
+    assert!(text.contains("slop_requests_total{user=\"alice\",account=\"test@example.com\",provider=\"openai\",requested_model=\"gpt-5-codex\",model=\"gpt-5-codex\",effort=\"medium\",service_tier=\"none\",dialect=\"chat\"} 1"));
     assert!(text.contains("kind=\"input\"} 80"));
     assert!(text.contains("kind=\"cache_read\"} 20"));
 }

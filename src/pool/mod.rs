@@ -124,7 +124,7 @@ impl AccountUsage {
 /// divide the headroom into a near-infinite score.
 const MIN_RESET_SECS: i64 = 300;
 
-fn window_seconds(name: &str) -> Option<i64> {
+pub fn window_seconds(name: &str) -> Option<i64> {
     let (value, unit) = name.split_at(name.len().checked_sub(1)?);
     let value: i64 = value.parse().ok()?;
     match unit {

@@ -546,8 +546,14 @@ mod band_tests {
     fn an_account_burning_faster_than_its_window_falls_behind() {
         let now = 1_000_000;
         let h = 3600;
-        assert_eq!(usage(&[("7d", 0.90, 37 * h)], now).band(0.9, now), Band::Spent);
-        assert_eq!(usage(&[("7d", 0.80, 37 * h)], now).band(0.9, now), Band::Behind);
+        assert_eq!(
+            usage(&[("7d", 0.90, 37 * h)], now).band(0.9, now),
+            Band::Spent
+        );
+        assert_eq!(
+            usage(&[("7d", 0.80, 37 * h)], now).band(0.9, now),
+            Band::Behind
+        );
     }
 
     /// Ranking follows the weekly window, not whichever is tighter.
@@ -589,7 +595,6 @@ mod band_tests {
 #[cfg(test)]
 mod idle_window_tests {
     use super::*;
-
 
     #[test]
     fn a_short_window_does_not_mask_expiring_weekly_quota() {

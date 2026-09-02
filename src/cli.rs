@@ -187,8 +187,13 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
                 slowdown_ms,
                 prefer_trusted,
             } => {
-                let limits =
-                    token_limits(requests, tokens, window_seconds, slowdown_ms, prefer_trusted)?;
+                let limits = token_limits(
+                    requests,
+                    tokens,
+                    window_seconds,
+                    slowdown_ms,
+                    prefer_trusted,
+                )?;
                 token_create(&db, &user, &limits).await
             }
             TokenCommand::List => token_list(&db).await,
@@ -201,8 +206,13 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
                 slowdown_ms,
                 prefer_trusted,
             } => {
-                let limits =
-                    token_limits(requests, tokens, window_seconds, slowdown_ms, prefer_trusted)?;
+                let limits = token_limits(
+                    requests,
+                    tokens,
+                    window_seconds,
+                    slowdown_ms,
+                    prefer_trusted,
+                )?;
                 token_set_limits(&db, &token, &limits).await
             }
             TokenCommand::Usage { token } => token_usage(&db, &token).await,

@@ -719,6 +719,10 @@ mod signature_tests {
             "content": {"parts": [{"functionCall": {"name": "shell", "args": {}}}]}
         });
         let choice = response_choice(&candidate, 0);
-        assert!(choice["message"]["tool_calls"][0].get("extra_content").is_none());
+        assert!(
+            choice["message"]["tool_calls"][0]
+                .get("extra_content")
+                .is_none()
+        );
     }
 }

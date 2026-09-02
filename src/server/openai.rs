@@ -479,7 +479,10 @@ fn rate_limit_headers(windows: &[crate::pool::UsageWindow]) -> Vec<(String, Stri
         let Some(minutes) = crate::pool::window_seconds(&w.name).map(|s| s / 60) else {
             continue;
         };
-        out.push((format!("x-codex-{tier}-window-minutes"), minutes.to_string()));
+        out.push((
+            format!("x-codex-{tier}-window-minutes"),
+            minutes.to_string(),
+        ));
         out.push((
             format!("x-codex-{tier}-used-percent"),
             ((w.utilization * 100.0).round() as i64).to_string(),
@@ -626,7 +629,10 @@ mod rate_limit_header_tests {
     #[test]
     fn a_window_without_a_reset_still_reports() {
         let out = rate_limit_headers(&[window("7d", 0.8, None)]);
-        assert!(out.iter().any(|(n, v)| n == "x-codex-primary-used-percent" && v == "80"));
+        assert!(
+            out.iter()
+                .any(|(n, v)| n == "x-codex-primary-used-percent" && v == "80")
+        );
         assert!(!out.iter().any(|(n, _)| n == "x-codex-primary-reset-at"));
     }
 }

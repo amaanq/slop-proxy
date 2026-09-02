@@ -142,7 +142,10 @@ impl Entry {
             let Some((prefix, tail)) = key.split_once("_above_") else {
                 continue;
             };
-            let Some(k) = tail.strip_suffix("k_tokens").and_then(|n| n.parse::<i64>().ok()) else {
+            let Some(k) = tail
+                .strip_suffix("k_tokens")
+                .and_then(|n| n.parse::<i64>().ok())
+            else {
                 continue;
             };
             let Some(rate) = value.as_f64() else { continue };
@@ -293,10 +296,8 @@ mod tests {
                 cache_write: 4_000,
             },
         );
-        let want = 1_000.0 * 0.000005
-            + 2_000.0 * 0.000025
-            + 50_000.0 * 0.0000005
-            + 4_000.0 * 0.00000625;
+        let want =
+            1_000.0 * 0.000005 + 2_000.0 * 0.000025 + 50_000.0 * 0.0000005 + 4_000.0 * 0.00000625;
         assert!((cost - want).abs() < 1e-12, "{cost} != {want}");
     }
 
@@ -312,7 +313,10 @@ mod tests {
                 cache_write: 0,
             },
         );
-        assert!((under - (10_000.0 * 0.000004 + 1_000.0 * 0.00002 + 100_000.0 * 0.0000004)).abs() < 1e-12);
+        assert!(
+            (under - (10_000.0 * 0.000004 + 1_000.0 * 0.00002 + 100_000.0 * 0.0000004)).abs()
+                < 1e-12
+        );
 
         let over = t.cost(
             "gpt-5.6-sol",

@@ -86,7 +86,11 @@ pub async fn chat_completions(
     };
 
     let session_key = session_key(&auth.user, &body);
-    let (account_id, upstream) = match state.gemini.execute(crate::pool::gemini::Call::OpenAi(&body), &session_key).await {
+    let (account_id, upstream) = match state
+        .gemini
+        .execute(crate::pool::gemini::Call::OpenAi(&body), &session_key)
+        .await
+    {
         Ok(r) => r,
         Err(e) => {
             log_error(&state.db, record, pool_error_status(&e), "pool");
@@ -310,7 +314,12 @@ pub async fn native(
 
     if streaming {
         let capture = UsageCapture::default();
-        let guard = LogGuard::new(state.db.clone(), state.prices.clone(), capture.clone(), record);
+        let guard = LogGuard::new(
+            state.db.clone(),
+            state.prices.clone(),
+            capture.clone(),
+            record,
+        );
         let mut scan = NativeUsageScan::new(capture);
         let stream = resp.bytes_stream().map(move |item| {
             let _ = &guard;

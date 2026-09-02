@@ -224,7 +224,11 @@ fn convert_message(msg: &OpenAiMessage, out: &mut Vec<InputItem>) -> Result<(), 
                     out.push(InputItem::FunctionCall {
                         call_id: call.id.clone(),
                         name: call.function.name.clone(),
-                        arguments: call.function.arguments.clone().unwrap_or_else(|| "{}".into()),
+                        arguments: call
+                            .function
+                            .arguments
+                            .clone()
+                            .unwrap_or_else(|| "{}".into()),
                     });
                 }
             }
@@ -265,9 +269,9 @@ fn user_parts(content: Option<&MessageContent>) -> Result<Vec<ContentPart>, Stri
             let mut out = Vec::new();
             for p in parts {
                 match p {
-                    MessagePart::Text { text } => out.push(ContentPart::InputText {
-                        text: text.clone(),
-                    }),
+                    MessagePart::Text { text } => {
+                        out.push(ContentPart::InputText { text: text.clone() })
+                    }
                     MessagePart::ImageUrl { image_url } => out.push(ContentPart::InputImage {
                         image_url: image_url.url.clone(),
                     }),

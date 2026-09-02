@@ -93,10 +93,7 @@ impl CodexClient {
     ) -> Result<Usage, String> {
         let resp = self
             .http
-            .get(format!(
-                "{}/usage",
-                self.cfg.base_url.trim_end_matches('/')
-            ))
+            .get(format!("{}/usage", self.cfg.base_url.trim_end_matches('/')))
             .bearer_auth(access_token)
             .header("chatgpt-account-id", chatgpt_account_id)
             .header("originator", self.cfg.originator.clone())

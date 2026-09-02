@@ -34,9 +34,7 @@ impl TokenResponse {
     /// carries over when the response omits it.
     fn into_token_set(self, prior_refresh: Option<&str>) -> Option<TokenSet> {
         Some(TokenSet {
-            expires_at: self
-                .expires_in
-                .map(|s| crate::clock::unix_now() + s),
+            expires_at: self.expires_in.map(|s| crate::clock::unix_now() + s),
             access_token: self.access_token,
             refresh_token: self
                 .refresh_token
@@ -50,7 +48,8 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
     let mut raw = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut raw);
     let verifier = data_encoding::BASE64URL_NOPAD.encode(&raw);
-    let challenge = data_encoding::BASE64URL_NOPAD.encode(&hmac_sha256::Hash::hash(verifier.as_bytes()));
+    let challenge =
+        data_encoding::BASE64URL_NOPAD.encode(&hmac_sha256::Hash::hash(verifier.as_bytes()));
 
     let mut url = Url::parse(AUTHORIZE_URL).expect("static url");
     url.query_pairs_mut()

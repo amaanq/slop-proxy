@@ -196,11 +196,19 @@ pub async fn messages(
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .is_some_and(|ct| ct.contains("text/event-stream"));
-    let builder = forwarded_response(&resp);
+    let mut builder = forwarded_response(&resp);
+    for (name, value) in pool_rate_limit_headers(&state.anthropic.pool_windows().await) {
+        builder = builder.header(name, value);
+    }
 
     if streaming {
         let capture = UsageCapture::default();
-        let guard = LogGuard::new(state.db.clone(), state.prices.clone(), capture.clone(), record);
+        let guard = LogGuard::new(
+            state.db.clone(),
+            state.prices.clone(),
+            capture.clone(),
+            record,
+        );
         let mut scan = SseScan::new(capture.clone());
         // `chain` only runs if the caller stayed to drain the body.
         let stream = resp
@@ -261,12 +269,7 @@ pub async fn count_tokens(
     let key = peek.session_key(&body, &auth);
     let resp = match state
         .anthropic
-        .execute(
-            "/v1/messages/count_tokens",
-            &body,
-            &hdrs,
-            &key,
-        )
+        .execute("/v1/messages/count_tokens", &body, &hdrs, &key)
         .await
     {
         Ok((_, r)) => r,
@@ -285,6 +288,9 @@ pub(super) fn forwarded_response(resp: &reqwest::Response) -> axum::http::respon
     let mut builder = Response::builder().status(resp.status().as_u16());
     for (name, value) in resp.headers() {
         let n = name.as_str();
+        if is_rate_limit_header(n) {
+            continue;
+        }
         if n == "content-type"
             || n == "request-id"
             || n == "retry-after"
@@ -294,6 +300,46 @@ pub(super) fn forwarded_response(resp: &reqwest::Response) -> axum::http::respon
         }
     }
     builder
+}
+
+/// These describe whichever account served the turn, and a client shows them
+/// as the caller's own quota.
+fn is_rate_limit_header(name: &str) -> bool {
+    name.starts_with("anthropic-ratelimit-")
+}
+
+/// Claude Code warns on the utilization in these, so they carry the pool's
+/// figures rather than one account's.
+pub(super) fn pool_rate_limit_headers(
+    windows: &[crate::pool::UsageWindow],
+) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut soonest: Option<i64> = None;
+    for w in windows {
+        let prefix = format!("anthropic-ratelimit-unified-{}", w.name);
+        out.push((format!("{prefix}-status"), "allowed".into()));
+        out.push((
+            format!("{prefix}-utilization"),
+            format!("{:.2}", w.utilization),
+        ));
+        if let Some(resets_at) = w.resets_at {
+            out.push((format!("{prefix}-reset"), resets_at.to_string()));
+            soonest = Some(soonest.map_or(resets_at, |s: i64| s.min(resets_at)));
+        }
+    }
+    if !out.is_empty() {
+        out.push((
+            "anthropic-ratelimit-unified-status".into(),
+            "allowed".into(),
+        ));
+        if let Some(reset) = soonest {
+            out.push((
+                "anthropic-ratelimit-unified-reset".into(),
+                reset.to_string(),
+            ));
+        }
+    }
+    out
 }
 
 /// Taps the relayed SSE bytes for usage numbers without altering them. Only
@@ -370,10 +416,7 @@ mod tests {
     fn headers(pairs: &[(&'static str, &str)]) -> HeaderMap {
         let mut h = HeaderMap::new();
         for (k, v) in pairs {
-            h.insert(
-                axum::http::HeaderName::from_static(k),
-                v.parse().unwrap(),
-            );
+            h.insert(axum::http::HeaderName::from_static(k), v.parse().unwrap());
         }
         h
     }
@@ -409,5 +452,53 @@ mod tests {
             ("anthropic-beta", "oauth-2025-04-20"),
             ("user-agent", "python-httpx/0.27"),
         ])));
+    }
+}
+
+#[cfg(test)]
+mod pool_header_tests {
+    use super::*;
+    use crate::pool::UsageWindow;
+
+    #[test]
+    fn one_accounts_quota_never_reaches_the_caller() {
+        assert!(is_rate_limit_header(
+            "anthropic-ratelimit-unified-7d-utilization"
+        ));
+        assert!(is_rate_limit_header("anthropic-ratelimit-unified-status"));
+        assert!(!is_rate_limit_header("anthropic-version"));
+        assert!(!is_rate_limit_header("anthropic-beta"));
+    }
+
+    #[test]
+    fn the_pool_headers_name_each_window() {
+        let out = pool_rate_limit_headers(&[
+            UsageWindow {
+                name: "5h".into(),
+                utilization: 0.5,
+                resets_at: Some(100),
+            },
+            UsageWindow {
+                name: "7d".into(),
+                utilization: 0.25,
+                resets_at: Some(900),
+            },
+        ]);
+        let get = |k: &str| out.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
+        assert_eq!(
+            get("anthropic-ratelimit-unified-5h-utilization"),
+            Some("0.50")
+        );
+        assert_eq!(
+            get("anthropic-ratelimit-unified-7d-utilization"),
+            Some("0.25")
+        );
+        // The summary reset is the soonest of them, not the last one seen.
+        assert_eq!(get("anthropic-ratelimit-unified-reset"), Some("100"));
+    }
+
+    #[test]
+    fn no_windows_emits_nothing_rather_than_a_false_allowed() {
+        assert!(pool_rate_limit_headers(&[]).is_empty());
     }
 }

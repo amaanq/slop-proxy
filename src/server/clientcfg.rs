@@ -1,6 +1,6 @@
+use axum::Json;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use serde_json::json;
 
 /// Ten years out. Codex refreshes when it believes the grant is near expiry,
@@ -71,9 +71,8 @@ pub async fn codex_config(headers: HeaderMap) -> Response {
 /// Unsigned JWT. Codex reads the claims without verifying them, and the proxy
 /// is the only party that ever sees this file.
 fn jwt(claims: &serde_json::Value) -> String {
-    let part = |v: &serde_json::Value| {
-        data_encoding::BASE64URL_NOPAD.encode(v.to_string().as_bytes())
-    };
+    let part =
+        |v: &serde_json::Value| data_encoding::BASE64URL_NOPAD.encode(v.to_string().as_bytes());
     format!(
         "{}.{}.slop",
         part(&json!({"alg": "none", "typ": "JWT"})),

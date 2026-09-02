@@ -279,9 +279,7 @@ impl AnthropicStream {
                         if !self.tool_args_seen
                             && let Some(args) = arguments.filter(|a| !a.is_empty())
                         {
-                            out.push(self.delta(BlockDelta::InputJson {
-                                partial_json: args,
-                            }));
+                            out.push(self.delta(BlockDelta::InputJson { partial_json: args }));
                         }
                         self.close_open(&mut out);
                     }
@@ -411,9 +409,18 @@ impl AnthropicStream {
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RenderedBlock {
-    Thinking { thinking: String, signature: String },
-    Text { text: String },
-    ToolUse { id: String, name: String, input: Value },
+    Thinking {
+        thinking: String,
+        signature: String,
+    },
+    Text {
+        text: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        input: Value,
+    },
 }
 
 #[derive(Serialize)]

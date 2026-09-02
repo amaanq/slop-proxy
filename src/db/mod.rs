@@ -19,7 +19,8 @@ impl Db {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).wrap_err_with(|| format!("creating {}", dir.display()))?;
         }
-        let conn = Connection::open(path).wrap_err_with(|| format!("opening {}", path.display()))?;
+        let conn =
+            Connection::open(path).wrap_err_with(|| format!("opening {}", path.display()))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "busy_timeout", 5000)?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -48,8 +49,11 @@ fn add_column(conn: &Connection, table: &str, column: &str, ddl: &str) -> Result
         .iter()
         .any(|name| name == column);
     if !present {
-        conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {ddl}"), [])
-            .wrap_err_with(|| format!("adding {table}.{column}"))?;
+        conn.execute(
+            &format!("ALTER TABLE {table} ADD COLUMN {column} {ddl}"),
+            [],
+        )
+        .wrap_err_with(|| format!("adding {table}.{column}"))?;
     }
     Ok(())
 }

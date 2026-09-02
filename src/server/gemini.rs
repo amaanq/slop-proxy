@@ -65,6 +65,7 @@ pub async fn chat_completions(
     model: String,
     facts: super::facts::RequestFacts,
 ) -> Response {
+    let started = std::time::Instant::now();
     let streaming = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
     // Without this the terminal chunk carries no usage and the request bills
     // as zero tokens.
@@ -119,6 +120,7 @@ pub async fn chat_completions(
             state.prices.clone(),
             capture.clone(),
             record,
+            started,
         );
         let mut native = NativeStream::new(&model);
         let mut scan = ChatUsageScan::new(capture);
@@ -150,6 +152,7 @@ pub async fn chat_completions(
             state.prices.clone(),
             capture.clone(),
             record,
+            started,
         );
         let mut scan = ChatUsageScan::new(capture);
         let stream = resp.bytes_stream().map(move |item| {
@@ -287,6 +290,7 @@ pub async fn native(
         );
     }
 
+    let started = std::time::Instant::now();
     let streaming = action == "streamGenerateContent";
     let key = native_session_key(&auth.user, &body);
     let facts = super::facts::RequestFacts::extract(&body, &headers);
@@ -333,6 +337,7 @@ pub async fn native(
             state.prices.clone(),
             capture.clone(),
             record,
+            started,
         );
         let mut scan = NativeUsageScan::new(capture);
         let stream = resp.bytes_stream().map(move |item| {

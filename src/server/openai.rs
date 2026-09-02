@@ -33,6 +33,7 @@ pub async fn chat_completions(
     headers: axum::http::HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
+    let started = std::time::Instant::now();
     let raw = body.clone();
     let facts = super::facts::RequestFacts::extract(&raw, &headers);
     let req = match serde_json::from_value::<OpenAiRequest>(body) {
@@ -114,7 +115,7 @@ pub async fn chat_completions(
 
     if req.stream.unwrap_or(false) {
         let translator = OpenAiStream::new(req.model.clone(), req.include_usage(), capture.clone());
-        let guard = LogGuard::new(state.db.clone(), state.prices.clone(), capture, record);
+        let guard = LogGuard::new(state.db.clone(), state.prices.clone(), capture, record, started);
         stream_response(events, translator, guard)
     } else {
         let agg = aggregate(events, &capture).await;
@@ -331,6 +332,7 @@ pub async fn responses_passthrough(
     headers: axum::http::HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
+    let started = std::time::Instant::now();
     let mut req = match serde_json::from_value::<PassthroughRequest>(body) {
         Ok(r) => r,
         Err(e) => return translation_error(DIALECT, &format!("invalid request: {e}")),
@@ -411,6 +413,7 @@ pub async fn responses_passthrough(
                 state.prices.clone(),
                 capture.clone(),
                 record,
+                started,
             ),
             capture,
             limits,

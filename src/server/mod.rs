@@ -265,13 +265,22 @@ pub struct LogGuard {
 }
 
 impl LogGuard {
-    pub fn new(db: Db, prices: Arc<Prices>, capture: UsageCapture, record: UsageRecord) -> Self {
+    /// `started` is the handler's own clock. Timing from here instead would
+    /// begin after the upstream response headers, hiding the wait that time
+    /// to first byte exists to measure.
+    pub fn new(
+        db: Db,
+        prices: Arc<Prices>,
+        capture: UsageCapture,
+        record: UsageRecord,
+        started: Instant,
+    ) -> Self {
         Self {
             db,
             prices,
             capture,
             record,
-            start: Instant::now(),
+            start: started,
         }
     }
 }

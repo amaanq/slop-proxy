@@ -30,6 +30,7 @@ pub async fn messages(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
+    let started = std::time::Instant::now();
     let peek = super::relay::Peek::from_body(&body);
     match state.cfg.models.route(&peek.model) {
         Provider::Anthropic => {
@@ -103,7 +104,7 @@ pub async fn messages(
     if req.stream.unwrap_or(false) {
         let translator =
             AnthropicStream::new(req.model.clone(), est_input, emit_thinking, capture.clone());
-        let guard = LogGuard::new(state.db.clone(), state.prices.clone(), capture, record);
+        let guard = LogGuard::new(state.db.clone(), state.prices.clone(), capture, record, started);
         stream_response(events, translator, guard)
     } else {
         let agg = aggregate(events, &capture).await;

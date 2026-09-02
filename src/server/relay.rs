@@ -173,6 +173,7 @@ pub async fn messages(
     body: Value,
     peek: Peek,
 ) -> Response {
+    let started = std::time::Instant::now();
     let key = peek.session_key(&body, &auth);
     let facts = super::facts::RequestFacts::extract(&body, &headers);
     let record = UsageRecord {
@@ -231,6 +232,7 @@ pub async fn messages(
             state.prices.clone(),
             capture.clone(),
             record,
+            started,
         );
         let mut scan = SseScan::new(capture.clone());
         // `chain` only runs if the caller stayed to drain the body.

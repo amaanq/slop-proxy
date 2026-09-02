@@ -3,73 +3,76 @@
 
 use serde_json::{Map, Value, json};
 
-use crate::codex::types::{ContentPart, InputItem, ResponsesRequest, ToolChoice};
 
-pub fn to_chat(req: &ResponsesRequest) -> Value {
-    let mut messages = vec![json!({"role": "system", "content": req.instructions})];
-    for item in &req.input {
-        match item {
-            InputItem::Message { role, content } => {
-                messages.push(json!({"role": chat_role(role), "content": parts(content)}));
-            }
-            InputItem::FunctionCall {
-                call_id,
-                name,
-                arguments,
-            } => messages.push(json!({
+/// Takes the serialized request rather than the struct, so the responses
+/// surface can hand over a body it received instead of one it built.
+pub fn to_chat(req: &Value) -> Value {
+    let mut messages = vec![json!({"role": "system", "content": req["instructions"]})];
+    for item in req["input"].as_array().into_iter().flatten() {
+        match item["type"].as_str() {
+            Some("message") => messages.push(json!({
+                "role": chat_role(item["role"].as_str().unwrap_or("user")),
+                "content": parts(&item["content"]),
+            })),
+            Some("function_call") => messages.push(json!({
                 "role": "assistant",
                 "content": Value::Null,
                 "tool_calls": [{
-                    "id": call_id,
+                    "id": item["call_id"],
                     "type": "function",
-                    "function": {"name": name, "arguments": arguments},
+                    "function": {"name": item["name"], "arguments": item["arguments"]},
                 }],
             })),
-            InputItem::FunctionCallOutput { call_id, output } => messages.push(json!({
-                "role": "tool", "tool_call_id": call_id, "content": output,
+            Some("function_call_output") => messages.push(json!({
+                "role": "tool",
+                "tool_call_id": item["call_id"],
+                "content": item["output"],
             })),
             // Gemini rejects an unknown role rather than ignoring it.
-            InputItem::Reasoning { .. } => {}
+            _ => {}
         }
     }
 
+    let stream = req["stream"].as_bool().unwrap_or(true);
     let mut body = Map::new();
-    body.insert("model".into(), json!(req.model));
+    body.insert("model".into(), req["model"].clone());
     body.insert("messages".into(), json!(messages));
-    body.insert("stream".into(), json!(req.stream));
-    if req.stream {
+    body.insert("stream".into(), json!(stream));
+    if stream {
         // Without this the terminal chunk carries no usage and the request
         // bills as zero tokens.
         body.insert("stream_options".into(), json!({"include_usage": true}));
     }
-    if let Some(max) = req.max_output_tokens {
+    if let Some(max) = req["max_output_tokens"].as_u64() {
         body.insert("max_tokens".into(), json!(max));
     }
-    if !req.tools.is_empty() {
-        body.insert(
-            "tools".into(),
-            json!(
-                req.tools
-                    .iter()
-                    .map(|t| json!({"type": "function", "function": {
-                        "name": t.name,
-                        "description": t.description,
-                        "parameters": t.parameters,
-                    }}))
-                    .collect::<Vec<_>>()
-            ),
-        );
+    let tools: Vec<Value> = req["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|t| {
+            let name = t.get("name")?;
+            Some(json!({"type": "function", "function": {
+                "name": name,
+                "description": t.get("description").cloned().unwrap_or(Value::Null),
+                "parameters": t.get("parameters").cloned().unwrap_or(json!({})),
+            }}))
+        })
+        .collect();
+    if !tools.is_empty() {
+        body.insert("tools".into(), json!(tools));
     }
-    if let Some(choice) = &req.tool_choice {
-        body.insert(
-            "tool_choice".into(),
-            match choice {
-                ToolChoice::Mode(m) => json!(m),
-                ToolChoice::Function { name, .. } => {
-                    json!({"type": "function", "function": {"name": name}})
-                }
-            },
-        );
+    match &req["tool_choice"] {
+        Value::String(mode) => {
+            body.insert("tool_choice".into(), json!(mode));
+        }
+        Value::Object(o) if o.contains_key("name") => {
+            body.insert(
+                "tool_choice".into(),
+                json!({"type": "function", "function": {"name": o["name"]}}),
+            );
+        }
+        _ => {}
     }
     Value::Object(body)
 }
@@ -82,15 +85,16 @@ fn chat_role(role: &str) -> &str {
     }
 }
 
-fn parts(content: &[ContentPart]) -> Value {
+fn parts(content: &Value) -> Value {
     json!(
         content
-            .iter()
-            .map(|p| match p {
-                ContentPart::InputText { text } | ContentPart::OutputText { text } =>
-                    json!({"type": "text", "text": text}),
-                ContentPart::InputImage { image_url } =>
-                    json!({"type": "image_url", "image_url": {"url": image_url}}),
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|p| match p["type"].as_str() {
+                Some("input_image") =>
+                    json!({"type": "image_url", "image_url": {"url": p["image_url"]}}),
+                _ => json!({"type": "text", "text": p["text"]}),
             })
             .collect::<Vec<_>>()
     )
@@ -225,11 +229,14 @@ impl ChatToResponses {
 
 /// A referer-restricted key is served over the native surface, which answers
 /// in Gemini's own frames, so that protocol is normalised before parsing.
-pub fn event_stream(
+/// The bridge's frames as Responses-shaped JSON, before anything parses them
+/// into `ResponsesEvent`. The responses surface relays frames rather than
+/// events, so it needs them in this form.
+pub fn value_stream(
     resp: reqwest::Response,
     protocol: crate::gemini::client::GeminiProtocol,
     model: &str,
-) -> crate::codex::sse::EventStream {
+) -> impl futures_util::Stream<Item = Value> + Send + use<> {
     use crate::gemini::client::GeminiProtocol;
     use eventsource_stream::Eventsource;
     use futures_util::StreamExt;
@@ -249,22 +256,30 @@ pub fn event_stream(
     });
 
     let mut bridge = ChatToResponses::default();
-    let stream = chat_bytes
-        .eventsource()
-        .flat_map(move |ev| {
-            let events = match ev {
-                Ok(ev) if ev.data != "[DONE]" => serde_json::from_str::<Value>(&ev.data)
-                    .map(|chunk| bridge.feed(&chunk))
-                    .unwrap_or_default(),
-                Ok(_) => Vec::new(),
-                Err(e) => {
-                    tracing::warn!("gemini SSE parse error: {e}");
-                    Vec::new()
-                }
-            };
-            futures_util::stream::iter(events.into_iter().map(|e| {
-                serde_json::from_value(e).unwrap_or(crate::codex::types::ResponsesEvent::Other)
-            }))
+    chat_bytes.eventsource().flat_map(move |ev| {
+        let events = match ev {
+            Ok(ev) if ev.data != "[DONE]" => serde_json::from_str::<Value>(&ev.data)
+                .map(|chunk| bridge.feed(&chunk))
+                .unwrap_or_default(),
+            Ok(_) => Vec::new(),
+            Err(e) => {
+                tracing::warn!("gemini SSE parse error: {e}");
+                Vec::new()
+            }
+        };
+        futures_util::stream::iter(events)
+    })
+}
+
+pub fn event_stream(
+    resp: reqwest::Response,
+    protocol: crate::gemini::client::GeminiProtocol,
+    model: &str,
+) -> crate::codex::sse::EventStream {
+    use futures_util::StreamExt;
+    let stream = value_stream(resp, protocol, model)
+        .map(|e| {
+            serde_json::from_value(e).unwrap_or(crate::codex::types::ResponsesEvent::Other)
         })
         .boxed();
     Box::pin(stream)
@@ -317,16 +332,37 @@ mod tests {
 
     #[test]
     fn the_developer_role_survives_as_system() {
-        let req = ResponsesRequest {
-            input: vec![InputItem::Message {
-                role: "developer".into(),
-                content: vec![ContentPart::InputText { text: "ctx".into() }],
-            }],
-            ..ResponsesRequest::new("gemini-3.8-flash".into(), "sys".into())
-        };
+        let req = json!({
+            "model": "gemini-3.8-flash", "instructions": "sys", "stream": true,
+            "input": [{"type": "message", "role": "developer",
+                       "content": [{"type": "input_text", "text": "ctx"}]}],
+        });
         let body = to_chat(&req);
         assert_eq!(body["messages"][1]["role"], "system");
         assert_eq!(body["messages"][1]["content"][0]["text"], "ctx");
+    }
+
+    /// The responses surface forwards a body it received, so tool calls and
+    /// their results have to survive as JSON rather than as typed items.
+    #[test]
+    fn a_tool_round_trip_survives_the_value_form() {
+        let req = json!({
+            "model": "gemini-3.8-flash", "instructions": "sys", "stream": true,
+            "input": [
+                {"type": "function_call", "call_id": "c1", "name": "grep", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "c1", "output": "hit"},
+            ],
+            "tools": [{"type": "function", "name": "grep", "description": "d",
+                       "parameters": {"type": "object"}}],
+            "tool_choice": "auto",
+        });
+        let body = to_chat(&req);
+        assert_eq!(body["messages"][1]["tool_calls"][0]["function"]["name"], "grep");
+        assert_eq!(body["messages"][2]["role"], "tool");
+        assert_eq!(body["messages"][2]["content"], "hit");
+        assert_eq!(body["tools"][0]["function"]["name"], "grep");
+        assert_eq!(body["tool_choice"], "auto");
+        assert_eq!(body["stream_options"]["include_usage"], true);
     }
 }
 

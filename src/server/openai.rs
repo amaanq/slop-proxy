@@ -60,6 +60,7 @@ pub async fn chat_completions(
             let model = req.model.clone();
             return super::gemini::chat_completions(state, auth, raw, model, facts).await;
         }
+        Provider::Zen => {}
         Provider::OpenAi => {}
     }
     let mut upstream_req = match openai_req::to_responses(&req, &state.cfg) {
@@ -75,6 +76,7 @@ pub async fn chat_completions(
         meter_id: Some(auth.meter_id),
         token_id: Some(auth.token_id),
         user: auth.user.clone(),
+        provider: Some(provider),
         dialect: "chat",
         requested_model: req.model.clone(),
         upstream_model: upstream_req.model.clone(),
@@ -100,11 +102,16 @@ pub async fn chat_completions(
         }
     };
     let session_key = upstream_req.prompt_cache_key.clone().unwrap_or_default();
-    let (account_id, resp) = match state
-        .codex
-        .execute(&req_value, auth.prefer_trusted, &session_key)
-        .await
-    {
+    let dispatched = if provider == Provider::Zen {
+        state.zen.execute(&req_value, &session_key).await
+    } else {
+        state
+            .codex
+            .execute(&req_value, auth.prefer_trusted, &session_key)
+            .await
+            .map(|(id, resp)| (Some(id), resp))
+    };
+    let (account_id, resp) = match dispatched {
         Ok(r) => r,
         Err(e) => {
             log_error(&state.db, record, pool_error_status(&e), "pool");
@@ -112,7 +119,7 @@ pub async fn chat_completions(
         }
     };
     let mut record = record;
-    record.account_id = Some(account_id);
+    record.account_id = account_id;
     record.session_key = session_key;
 
     let capture = UsageCapture::default();
@@ -284,6 +291,21 @@ pub async fn models(
         }
     };
 
+    data.extend(state.zen.models().await.into_iter().filter_map(|id| {
+        state
+            .cfg
+            .models
+            .route(&id)
+            .eq(&Provider::Zen)
+            .then_some(ModelEntry {
+                id,
+                object: "model",
+                created,
+                owned_by: "opencode",
+                context_window: None,
+            })
+    }));
+
     data.extend(state.gemini.models().await.into_iter().filter_map(|id| {
         state
             .cfg
@@ -343,13 +365,25 @@ pub async fn responses_passthrough(
         Err(e) => return translation_error(DIALECT, &format!("invalid request: {e}")),
     };
 
-    if !auth.may_use(Provider::OpenAi) {
-        return super::error::out_of_scope(DIALECT, Provider::OpenAi);
-    }
     let requested_model = req
         .model
         .unwrap_or_else(|| state.cfg.models.default.clone());
     let resolved = model_map::resolve(&state.cfg.models, &requested_model);
+    // Scope is decided by where the model resolves, not by the endpoint. This
+    // surface is the Responses API, which zen speaks as well as codex does.
+    let provider = state.cfg.models.route(&resolved.model);
+    if !matches!(
+        provider,
+        Provider::OpenAi | Provider::Zen | Provider::Gemini
+    ) {
+        return translation_error(
+            DIALECT,
+            "this model is not served over the responses api",
+        );
+    }
+    if !auth.may_use(provider) {
+        return super::error::out_of_scope(DIALECT, provider);
+    }
     req.model = Some(resolved.model.clone());
     if let Some(effort) = model_map::suffix_effort(&requested_model) {
         req.reasoning.get_or_insert_default().effort =
@@ -359,7 +393,7 @@ pub async fn responses_passthrough(
     let client_streams = req.stream.unwrap_or(false);
     req.store = Some(false);
     req.stream = Some(true);
-    if req.instructions.is_none() {
+    if req.instructions.is_none() && provider == Provider::OpenAi {
         req.instructions = Some(state.cfg.codex.instructions());
     }
     let body = match serde_json::to_value(&req) {
@@ -379,6 +413,7 @@ pub async fn responses_passthrough(
         meter_id: Some(auth.meter_id),
         token_id: Some(auth.token_id),
         user: auth.user.clone(),
+        provider: Some(provider),
         dialect: "responses",
         requested_model,
         upstream_model: resolved.model,
@@ -397,11 +432,22 @@ pub async fn responses_passthrough(
         request_bytes: facts.request_bytes,
         ..Default::default()
     };
-    let (account_id, resp) = match state
-        .codex
-        .execute(&body, auth.prefer_trusted, &session_key)
-        .await
-    {
+    if provider == Provider::Gemini {
+        return gemini_responses(
+            state, record, body, session_key, client_streams, started,
+        )
+        .await;
+    }
+    let dispatched = if provider == Provider::Zen {
+        state.zen.execute(&body, &session_key).await
+    } else {
+        state
+            .codex
+            .execute(&body, auth.prefer_trusted, &session_key)
+            .await
+            .map(|(id, resp)| (Some(id), resp))
+    };
+    let (account_id, resp) = match dispatched {
         Ok(r) => r,
         Err(e) => {
             log_error(&state.db, record, pool_error_status(&e), "pool");
@@ -409,7 +455,7 @@ pub async fn responses_passthrough(
         }
     };
     let mut record = record;
-    record.account_id = Some(account_id);
+    record.account_id = account_id;
     let capture = UsageCapture::default();
 
     if client_streams {
@@ -464,6 +510,90 @@ pub async fn responses_passthrough(
             ),
         }
     }
+}
+
+/// Gemini speaks chat completions, so the responses surface reaches it through
+/// the same bridge Claude Code uses, relaying the bridge's frames rather than
+/// the events they parse into.
+async fn gemini_responses(
+    state: AppState,
+    mut record: UsageRecord,
+    body: Value,
+    session_key: String,
+    client_streams: bool,
+    started: std::time::Instant,
+) -> Response {
+    let model = body["model"].as_str().unwrap_or_default().to_string();
+    let chat = crate::translate::gemini_bridge::to_chat(&body);
+    let (account_id, upstream) = match state
+        .gemini
+        .execute(crate::pool::gemini::Call::OpenAi(&chat), &session_key)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            log_error(&state.db, record, pool_error_status(&e), "pool");
+            return pool_error_response(DIALECT, e);
+        }
+    };
+    record.account_id = Some(account_id);
+    let capture = UsageCapture::default();
+    let frames =
+        crate::translate::gemini_bridge::value_stream(upstream.response, upstream.protocol, &model);
+
+    if client_streams {
+        let guard = LogGuard::new(
+            state.db.clone(),
+            state.prices.clone(),
+            capture.clone(),
+            record,
+            started,
+        );
+        let stream = frames.map(move |frame| {
+            let _ = &guard;
+            if let Some(usage) = frame.pointer("/response/usage")
+                && let Ok(u) = serde_json::from_value::<Usage>(usage.clone())
+            {
+                capture.record(&u);
+            }
+            let name = frame["type"].as_str().unwrap_or("message").to_string();
+            let data = frame.to_string();
+            capture.note_bytes(data.len());
+            Ok::<_, Infallible>(Event::default().event(name).data(data))
+        });
+        return Sse::new(stream)
+            .keep_alive(KeepAlive::default())
+            .into_response();
+    }
+
+    let mut output = Vec::new();
+    let mut frames = std::pin::pin!(frames);
+    while let Some(frame) = frames.next().await {
+        if let Some(usage) = frame.pointer("/response/usage")
+            && let Ok(u) = serde_json::from_value::<Usage>(usage.clone())
+        {
+            capture.record(&u);
+        }
+        if frame["type"] == "response.output_item.done"
+            && let Some(item) = frame.get("item")
+        {
+            output.push(item.clone());
+        }
+    }
+    let snap = capture.snapshot();
+    record.input_tokens = snap.input_tokens;
+    record.output_tokens = snap.output_tokens;
+    record.cache_read_tokens = snap.cache_read_tokens;
+    record.reasoning_tokens = snap.reasoning_tokens;
+    log_usage(&state.db, &state.prices, record);
+    Json(serde_json::json!({
+        "id": format!("resp_{}", uuid::Uuid::new_v4().simple()),
+        "object": "response",
+        "status": "completed",
+        "model": model,
+        "output": output,
+    }))
+    .into_response()
 }
 
 /// The stream's terminal events; `response` stays raw because it is handed

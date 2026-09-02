@@ -129,6 +129,7 @@ impl AnthropicClient {
     pub fn new(cfg: AnthropicConfig) -> Self {
         let http = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(30))
+            .tcp_keepalive(std::time::Duration::from_secs(30))
             .build()
             .expect("building http client");
         Self { http, cfg }

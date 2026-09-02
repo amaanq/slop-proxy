@@ -48,6 +48,7 @@ impl CodexClient {
         let http = reqwest::Client::builder()
             .cookie_store(true)
             .connect_timeout(std::time::Duration::from_secs(30))
+            .tcp_keepalive(std::time::Duration::from_secs(30))
             .user_agent(cfg.user_agent.clone())
             .build()
             .expect("building http client");

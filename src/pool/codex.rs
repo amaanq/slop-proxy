@@ -204,7 +204,7 @@ impl CodexPool {
                 }
                 Err(SendError::RateLimited { retry_after, body }) => {
                     self.slots
-                        .cool_rate_limited(&slot, retry_after, 6 * 3600)
+                        .cool_rate_limited(&slot, retry_after, 6 * 3600, 60)
                         .await;
                     last_err = Some(SendError::RateLimited { retry_after, body });
                 }

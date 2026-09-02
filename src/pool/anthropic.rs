@@ -189,7 +189,7 @@ impl AnthropicPool {
                 }
                 Err(SendError::RateLimited { retry_after, body }) => {
                     self.slots
-                        .cool_rate_limited(&slot, retry_after, 7 * 24 * 3600)
+                        .cool_rate_limited(&slot, retry_after, 7 * 24 * 3600, 60)
                         .await;
                     last_err = Some(SendError::RateLimited { retry_after, body });
                 }

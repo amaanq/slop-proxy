@@ -354,16 +354,24 @@ pub async fn native(
             return error_response(DIALECT, 502, "api_error", &e.to_string());
         }
     };
-    if ok
-        && let Ok(v) = serde_json::from_slice::<Value>(&bytes)
-        && let Some(u) = v.get("usageMetadata")
-    {
-        apply_native_usage(&mut record, u);
+    if ok && let Ok(v) = serde_json::from_slice::<Value>(&bytes) {
+        if let Some(reason) = finish_reason(&v) {
+            record.stop_reason = reason.to_ascii_lowercase();
+        }
+        if let Some(u) = v.get("usageMetadata") {
+            apply_native_usage(&mut record, u);
+        }
     }
     super::log_usage(&state.db, &state.prices, record);
     builder
         .body(Body::from(bytes))
         .unwrap_or_else(|e| error_response(DIALECT, 502, "api_error", &e.to_string()))
+}
+
+fn finish_reason(chunk: &Value) -> Option<&str> {
+    chunk
+        .pointer("/candidates/0/finishReason")
+        .and_then(Value::as_str)
 }
 
 fn apply_native_usage(record: &mut UsageRecord, usage: &Value) {
@@ -420,8 +428,13 @@ impl NativeUsageScan {
                 continue;
             };
             let data = data.strip_prefix(b" ").unwrap_or(data);
-            if let Ok(v) = serde_json::from_slice::<Value>(data)
-                && let Some(u) = v.get("usageMetadata")
+            let Ok(v) = serde_json::from_slice::<Value>(data) else {
+                continue;
+            };
+            if let Some(reason) = finish_reason(&v) {
+                self.capture.note_stop_reason(&reason.to_ascii_lowercase());
+            }
+            if let Some(u) = v.get("usageMetadata")
                 && let Ok(chat) =
                     serde_json::from_value::<ChatUsage>(crate::gemini::native::usage_value(u))
             {

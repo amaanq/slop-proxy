@@ -17,12 +17,9 @@ use crate::db::usage::UsageRecord;
 use crate::provider::Provider;
 use crate::translate::anthropic_req::{self, AnthropicRequest};
 use crate::translate::anthropic_stream::{AnthropicStream, render_aggregated};
-use crate::translate::{StopKind, UsageCapture, aggregate, count_tokens};
+use crate::translate::{StopKind, UsageCapture, aggregate, count_tokens, gemini_bridge};
 
 const DIALECT: Dialect = Dialect::Anthropic;
-
-const GEMINI_DIALECT_HINT: &str =
-    "gemini models are served on /v1/chat/completions, not the messages API";
 
 pub async fn messages(
     State(state): State<AppState>,
@@ -36,9 +33,7 @@ pub async fn messages(
         Provider::Anthropic => {
             return super::relay::messages(state, auth, headers, body, peek).await;
         }
-        Provider::Gemini => {
-            return translation_error(DIALECT, GEMINI_DIALECT_HINT);
-        }
+        Provider::Gemini => {}
         Provider::OpenAi => {}
     }
     let req = match serde_json::from_value::<AnthropicRequest>(body) {
@@ -82,11 +77,22 @@ pub async fn messages(
         }
     };
     let session_key = upstream_req.prompt_cache_key.clone().unwrap_or_default();
-    let (account_id, resp) = match state
-        .codex
-        .execute(&req_value, auth.prefer_trusted, &session_key)
-        .await
-    {
+    let gemini = state.cfg.models.route(&upstream_req.model) == Provider::Gemini;
+    let dispatched = if gemini {
+        let chat = gemini_bridge::to_chat(&upstream_req);
+        state
+            .gemini
+            .execute(crate::pool::gemini::Call::OpenAi(&chat), &session_key)
+            .await
+            .map(|(id, upstream)| (id, upstream.protocol, upstream.response))
+    } else {
+        state
+            .codex
+            .execute(&req_value, auth.prefer_trusted, &session_key)
+            .await
+            .map(|(id, resp)| (id, crate::gemini::client::GeminiProtocol::OpenAi, resp))
+    };
+    let (account_id, protocol, resp) = match dispatched {
         Ok(r) => r,
         Err(e) => {
             let status = pool_error_status(&e);
@@ -98,7 +104,11 @@ pub async fn messages(
     record.account_id = Some(account_id);
 
     let capture = UsageCapture::default();
-    let events = event_stream(resp);
+    let events = if gemini {
+        gemini_bridge::event_stream(resp, protocol, &upstream_req.model)
+    } else {
+        event_stream(resp)
+    };
     let emit_thinking = req.thinking_enabled();
 
     if req.stream.unwrap_or(false) {
@@ -184,9 +194,7 @@ pub async fn count_tokens(
         Provider::Anthropic => {
             return super::relay::count_tokens(state, auth, headers, body, peek).await;
         }
-        Provider::Gemini => {
-            return translation_error(DIALECT, GEMINI_DIALECT_HINT);
-        }
+        Provider::Gemini => {}
         Provider::OpenAi => {}
     }
     let req = match serde_json::from_value::<AnthropicRequest>(body) {

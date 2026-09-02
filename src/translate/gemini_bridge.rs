@@ -107,6 +107,8 @@ pub struct ChatToResponses {
     opened: bool,
     calls: Vec<OpenCall>,
     text: String,
+    msg_id: Option<String>,
+    next_index: usize,
     finished: bool,
     usage: Option<Value>,
     completed: bool,
@@ -132,7 +134,10 @@ impl Drop for ChatToResponses {
 #[derive(Default)]
 struct OpenCall {
     id: String,
+    item_id: String,
     name: String,
+    arguments: String,
+    index: usize,
     announced: bool,
 }
 
@@ -151,8 +156,22 @@ impl ChatToResponses {
         if let Some(text) = delta.and_then(|d| d.get("content")).and_then(Value::as_str)
             && !text.is_empty()
         {
+            // Codex attaches a delta to an item by id, so text streamed before
+            // the item is announced is parsed and then dropped.
+            let id = self.msg_id.get_or_insert_with(|| {
+                format!("msg_{}", uuid::Uuid::new_v4().simple())
+            });
+            if self.text.is_empty() {
+                out.push(json!({"type": "response.output_item.added",
+                    "output_index": 0,
+                    "item": {"type": "message", "id": id, "role": "assistant", "content": []}}));
+                out.push(json!({"type": "response.content_part.added",
+                    "item_id": id, "output_index": 0, "content_index": 0,
+                    "part": {"type": "output_text", "text": ""}}));
+            }
+            out.push(json!({"type": "response.output_text.delta",
+                "item_id": id, "output_index": 0, "content_index": 0, "delta": text}));
             self.text.push_str(text);
-            out.push(json!({"type": "response.output_text.delta", "delta": text}));
         }
         if let Some(calls) = delta.and_then(|d| d.get("tool_calls")).and_then(Value::as_array) {
             for call in calls {
@@ -166,9 +185,18 @@ impl ChatToResponses {
             self.finished = true;
             for call in &self.calls {
                 if call.announced {
-                    out.push(json!({"type": "response.output_item.done", "item": {
-                        "type": "function_call", "call_id": call.id, "name": call.name,
-                    }}));
+                    // An item done without its arguments is a tool call the
+                    // client cannot run.
+                    out.push(json!({"type": "response.function_call_arguments.done",
+                        "item_id": call.item_id, "output_index": call.index,
+                        "arguments": call.arguments}));
+                    out.push(json!({"type": "response.output_item.done",
+                        "output_index": call.index,
+                        "item": {
+                            "type": "function_call", "id": call.item_id, "call_id": call.id,
+                            "name": call.name, "arguments": call.arguments,
+                            "status": "completed",
+                        }}));
                 }
             }
             self.calls.clear();
@@ -176,10 +204,16 @@ impl ChatToResponses {
             // builds its blocks only from finished items, so a non-streaming
             // turn needs the whole message restated as one.
             if !self.text.is_empty() {
-                out.push(json!({"type": "response.output_item.done", "item": {
-                    "type": "message",
-                    "content": [{"type": "output_text", "text": std::mem::take(&mut self.text)}],
-                }}));
+                let id = self.msg_id.clone().unwrap_or_default();
+                let text = std::mem::take(&mut self.text);
+                out.push(json!({"type": "response.output_text.done",
+                    "item_id": id, "output_index": 0, "content_index": 0, "text": text}));
+                out.push(json!({"type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": {
+                        "type": "message", "id": id, "role": "assistant", "status": "completed",
+                        "content": [{"type": "output_text", "text": text}],
+                    }}));
             }
         }
         if let Some(usage) = chunk
@@ -230,14 +264,24 @@ impl ChatToResponses {
         }
         if !slot.announced && !slot.name.is_empty() {
             slot.announced = true;
-            out.push(json!({"type": "response.output_item.added", "item": {
-                "type": "function_call", "call_id": slot.id, "name": slot.name, "arguments": "",
-            }}));
+            slot.item_id = format!("fc_{}", uuid::Uuid::new_v4().simple());
+            slot.index = self.next_index;
+            self.next_index += 1;
+            let slot = &self.calls[idx];
+            out.push(json!({"type": "response.output_item.added",
+                "output_index": slot.index,
+                "item": {
+                    "type": "function_call", "id": slot.item_id, "call_id": slot.id,
+                    "name": slot.name, "arguments": "",
+                }}));
         }
+        let slot = &mut self.calls[idx];
         if let Some(args) = call.pointer("/function/arguments").and_then(Value::as_str)
             && !args.is_empty()
         {
-            out.push(json!({"type": "response.function_call_arguments.delta", "delta": args}));
+            slot.arguments.push_str(args);
+            out.push(json!({"type": "response.function_call_arguments.delta",
+                "item_id": slot.item_id, "output_index": slot.index, "delta": args}));
         }
         out
     }
@@ -316,7 +360,11 @@ mod tests {
     fn text_deltas_become_output_text() {
         let mut b = ChatToResponses::default();
         let first = feed(&mut b, json!({"choices": [{"delta": {"content": "hi"}}]}));
-        assert_eq!(first, ["response.created", "response.output_text.delta"]);
+        assert_eq!(
+            first,
+            ["response.created", "response.output_item.added",
+             "response.content_part.added", "response.output_text.delta"]
+        );
         let next = feed(&mut b, json!({"choices": [{"delta": {"content": "!"}}]}));
         assert_eq!(next, ["response.output_text.delta"]);
     }
@@ -333,7 +381,28 @@ mod tests {
         );
         assert_eq!(more, ["response.function_call_arguments.delta"]);
         let done = feed(&mut b, json!({"choices": [{"finish_reason": "tool_calls"}]}));
-        assert_eq!(done, ["response.output_item.done"]);
+        assert_eq!(
+            done,
+            ["response.function_call_arguments.done", "response.output_item.done"]
+        );
+        // An item done without its arguments is a call the client cannot run.
+        let last = b.feed(&json!({"choices": [{"finish_reason": "tool_calls"}]}));
+        assert!(last.is_empty(), "the turn closed twice: {last:?}");
+    }
+
+    #[test]
+    fn a_finished_tool_call_carries_its_arguments() {
+        let mut b = ChatToResponses::default();
+        b.feed(&json!({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "id": "c1", "function": {"name": "Read", "arguments": "{\"p"}}]}}]}));
+        b.feed(&json!({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "function": {"arguments": "ath\":1}"}}]}}]}));
+        let done = b.feed(&json!({"choices": [{"finish_reason": "tool_calls"}]}));
+        let item = &done[1]["item"];
+        assert_eq!(item["arguments"], "{\"path\":1}");
+        assert_eq!(item["call_id"], "c1");
+        assert_eq!(item["name"], "Read");
+        assert!(item["id"].as_str().is_some_and(|s| s.starts_with("fc_")));
     }
 
     /// Gemini puts usage on a chunk of its own, often ahead of the one with
@@ -344,7 +413,8 @@ mod tests {
         let mut b = ChatToResponses::default();
         assert_eq!(
             feed(&mut b, json!({"choices": [{"delta": {"content": "hi"}}]})),
-            ["response.created", "response.output_text.delta"]
+            ["response.created", "response.output_item.added",
+             "response.content_part.added", "response.output_text.delta"]
         );
         assert_eq!(
             feed(&mut b, json!({"choices": [{"delta": {}}], "usage": {"prompt_tokens": 1}})),
@@ -352,7 +422,7 @@ mod tests {
         );
         assert_eq!(
             feed(&mut b, json!({"choices": [{"delta": {}, "finish_reason": "stop"}]})),
-            ["response.output_item.done", "response.completed"]
+            ["response.output_text.done", "response.output_item.done", "response.completed"]
         );
         assert_eq!(
             feed(&mut b, json!({"choices": [{"delta": {}}], "usage": {"prompt_tokens": 1}})),
@@ -446,14 +516,20 @@ mod real_chunk {
         let chunk: Value = serde_json::from_str(r#"{"choices":[{"delta":{"content":"OK.","role":"assistant"},"index":0}],"created":1788373398,"id":"x","model":"gemini-3.8-flash","object":"chat.completion.chunk","usage":{"completion_tokens":2,"prompt_tokens":3,"total_tokens":71}}"#).unwrap();
         let raw = ChatToResponses::default().feed(&chunk);
         let kinds: Vec<_> = raw.iter().map(|e| e["type"].as_str().unwrap()).collect();
-        assert_eq!(kinds, ["response.created", "response.output_text.delta"]);
+        assert_eq!(
+            kinds,
+            ["response.created", "response.output_item.added",
+             "response.content_part.added", "response.output_text.delta"]
+        );
         let parsed: Vec<ResponsesEvent> = raw
             .into_iter()
             .map(|e| serde_json::from_value(e).unwrap_or(ResponsesEvent::Other))
             .collect();
         assert!(
-            matches!(parsed[1], ResponsesEvent::OutputTextDelta { .. }),
-            "text delta degraded to {:?}", parsed[1]
+            parsed
+                .iter()
+                .any(|e| matches!(e, ResponsesEvent::OutputTextDelta { .. })),
+            "no text delta survived: {parsed:?}"
         );
     }
 }

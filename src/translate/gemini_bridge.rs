@@ -107,6 +107,9 @@ pub struct ChatToResponses {
     opened: bool,
     calls: Vec<OpenCall>,
     text: String,
+    finished: bool,
+    usage: Option<Value>,
+    completed: bool,
     frames: usize,
     emitted: usize,
     first_frame: Option<String>,
@@ -160,6 +163,7 @@ impl ChatToResponses {
             .pointer("/choices/0/finish_reason")
             .is_some_and(|f| !f.is_null())
         {
+            self.finished = true;
             for call in &self.calls {
                 if call.announced {
                     out.push(json!({"type": "response.output_item.done", "item": {
@@ -183,7 +187,19 @@ impl ChatToResponses {
             .filter(|u| !u.is_null())
             .and_then(crate::gemini::usage::as_responses)
         {
-            out.push(json!({"type": "response.completed", "response": {"usage": usage}}));
+            self.usage = Some(usage);
+        }
+        // Gemini reports usage on a chunk of its own, often before the one
+        // carrying finish_reason, so emitting on usage alone closed the
+        // response before its content and then closed it twice.
+        if self.finished
+            && !self.completed
+            && let Some(usage) = self.usage.take()
+        {
+            self.completed = true;
+            out.push(json!({"type": "response.completed", "response": {
+                "id": chunk.get("id"), "status": "completed", "usage": usage,
+            }}));
         }
         // `created` and `completed` carry no answer, so they do not count as
         // content when deciding whether the bridge produced anything.
@@ -320,14 +336,28 @@ mod tests {
         assert_eq!(done, ["response.output_item.done"]);
     }
 
+    /// Gemini puts usage on a chunk of its own, often ahead of the one with
+    /// finish_reason. Closing on usage alone ended the response before its
+    /// content and then ended it a second time, which codex rejects.
     #[test]
-    fn usage_closes_the_response() {
+    fn the_response_closes_once_and_after_its_content() {
         let mut b = ChatToResponses::default();
-        let out = feed(
-            &mut b,
-            json!({"choices": [{"delta": {}}], "usage": {"prompt_tokens": 1}}),
+        assert_eq!(
+            feed(&mut b, json!({"choices": [{"delta": {"content": "hi"}}]})),
+            ["response.created", "response.output_text.delta"]
         );
-        assert_eq!(out, ["response.created", "response.completed"]);
+        assert_eq!(
+            feed(&mut b, json!({"choices": [{"delta": {}}], "usage": {"prompt_tokens": 1}})),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            feed(&mut b, json!({"choices": [{"delta": {}, "finish_reason": "stop"}]})),
+            ["response.output_item.done", "response.completed"]
+        );
+        assert_eq!(
+            feed(&mut b, json!({"choices": [{"delta": {}}], "usage": {"prompt_tokens": 1}})),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
@@ -416,7 +446,7 @@ mod real_chunk {
         let chunk: Value = serde_json::from_str(r#"{"choices":[{"delta":{"content":"OK.","role":"assistant"},"index":0}],"created":1788373398,"id":"x","model":"gemini-3.8-flash","object":"chat.completion.chunk","usage":{"completion_tokens":2,"prompt_tokens":3,"total_tokens":71}}"#).unwrap();
         let raw = ChatToResponses::default().feed(&chunk);
         let kinds: Vec<_> = raw.iter().map(|e| e["type"].as_str().unwrap()).collect();
-        assert_eq!(kinds, ["response.created", "response.output_text.delta", "response.completed"]);
+        assert_eq!(kinds, ["response.created", "response.output_text.delta"]);
         let parsed: Vec<ResponsesEvent> = raw
             .into_iter()
             .map(|e| serde_json::from_value(e).unwrap_or(ResponsesEvent::Other))

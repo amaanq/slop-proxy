@@ -1,59 +1,19 @@
 use axum::body::{Body, Bytes};
 use axum::response::Response;
 use futures_util::{StreamExt, stream};
-use serde::Deserialize;
 use serde_json::Value;
 
 use super::auth::AuthInfo;
 use super::error::{Dialect, error_response, pool_error_response, pool_error_status};
 use super::relay::forwarded_response;
 use super::{AppState, LogGuard, log_error};
-use crate::codex::types::{TokenDetails, Usage};
 use crate::db::usage::UsageRecord;
 use crate::gemini::client::GeminiProtocol;
 use crate::gemini::native::NativeStream;
+use crate::gemini::usage::{ChatEnvelope, ChatUsage};
 use crate::translate::UsageCapture;
 
 const DIALECT: Dialect = Dialect::OpenAi;
-
-/// The chat-completions usage block, which names the same quantities the
-/// Responses API reports under different keys.
-#[derive(Debug, Default, Deserialize)]
-struct ChatUsage {
-    #[serde(default)]
-    prompt_tokens: i64,
-    #[serde(default)]
-    completion_tokens: i64,
-    #[serde(default)]
-    total_tokens: i64,
-    #[serde(default)]
-    prompt_tokens_details: TokenDetails,
-    #[serde(default)]
-    completion_tokens_details: TokenDetails,
-}
-
-impl From<ChatUsage> for Usage {
-    /// Google leaves thinking out of `completion_tokens` and reports it only
-    /// in `total_tokens`.
-    fn from(c: ChatUsage) -> Self {
-        let billed_output = (c.total_tokens - c.prompt_tokens).max(c.completion_tokens);
-        let mut output_details = c.completion_tokens_details;
-        if output_details.reasoning_tokens == 0 {
-            output_details.reasoning_tokens = billed_output - c.completion_tokens;
-        }
-        Usage {
-            input_tokens: c.prompt_tokens,
-            output_tokens: billed_output,
-            input_tokens_details: c.prompt_tokens_details,
-            output_tokens_details: output_details,
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct ChatEnvelope {
-    usage: Option<ChatUsage>,
-}
 
 /// Google's OpenAI-compatible surface speaks the dialect the caller already
 /// sent, so the body is relayed rather than translated and only usage is read

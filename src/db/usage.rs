@@ -491,7 +491,10 @@ impl Db {
             "SELECT u.user,
                     COALESCE((SELECT COALESCE(a.label, a.email, 'account#' || a.id)
                               FROM accounts a WHERE a.id = u.account_id), 'none') AS account,
-                    COALESCE(NULLIF(u.stop_reason, ''), 'unknown') AS stop_reason,
+                    COALESCE(NULLIF(u.stop_reason, ''), u.error_kind,
+                             CASE WHEN u.status >= 400
+                                  THEN 'http_' || (u.status / 100) || 'xx' END,
+                             'unrecorded') AS stop_reason,
                     COUNT(*),
                     COALESCE(SUM(u.request_bytes),0), COALESCE(SUM(u.response_bytes),0),
                     COALESCE(SUM(u.turn_index),0), COALESCE(SUM(u.image_count),0),

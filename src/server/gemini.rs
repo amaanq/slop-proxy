@@ -8,6 +8,7 @@ use super::error::{Dialect, error_response, pool_error_response, pool_error_stat
 use super::relay::forwarded_response;
 use super::{AppState, LogGuard, log_error};
 use crate::db::usage::UsageRecord;
+use crate::provider::Provider;
 use crate::gemini::client::GeminiProtocol;
 use crate::gemini::native::NativeStream;
 use crate::gemini::usage::{ChatEnvelope, ChatUsage};
@@ -40,6 +41,7 @@ pub async fn chat_completions(
         meter_id: Some(auth.meter_id),
         token_id: Some(auth.token_id),
         user: auth.user.clone(),
+        provider: Some(Provider::Gemini),
         dialect: "chat",
         requested_model: model.clone(),
         upstream_model: model.clone(),
@@ -261,6 +263,7 @@ pub async fn native(
         meter_id: Some(auth.meter_id),
         token_id: Some(auth.token_id),
         user: auth.user.clone(),
+        provider: Some(Provider::Gemini),
         dialect: "native",
         requested_model: model.to_string(),
         upstream_model: model.to_string(),

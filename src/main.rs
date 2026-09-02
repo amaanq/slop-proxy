@@ -5,6 +5,7 @@ mod codex;
 mod config;
 mod db;
 mod gemini;
+mod glm;
 mod oauth;
 mod pool;
 mod pricing;
@@ -13,6 +14,7 @@ mod server;
 mod stats;
 mod translate;
 mod upstream;
+mod zen;
 
 use eyre::Result;
 use pound::Parse;

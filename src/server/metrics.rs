@@ -12,6 +12,7 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
     let mut accounts = state.codex.snapshot().await;
     accounts.extend(state.anthropic.snapshot().await);
     accounts.extend(state.gemini.snapshot().await);
+    accounts.extend(state.zen.snapshot().await);
 
     let mut out = String::with_capacity(4096);
     render_accounts(&mut out, &accounts);
@@ -241,7 +242,7 @@ fn render_usage(out: &mut String, rows: &[crate::db::usage::MetricsRow]) {
                 quote(&r.provider),
                 quote(&r.requested_model),
                 quote(&r.model),
-                quote(&r.effort),
+                label(&r.effort),
                 quote(&r.dialect),
                 get(r),
             );
@@ -400,14 +401,22 @@ fn usage_line(out: &mut String, name: &str, r: &crate::db::usage::MetricsRow, va
         quote(&r.provider),
         quote(&r.requested_model),
         quote(&r.model),
-        quote(&r.effort),
-        quote(&r.service_tier),
+        label(&r.effort),
+        label(&r.service_tier),
         quote(&r.dialect),
     );
 }
 
 fn bool_label(v: bool) -> &'static str {
     if v { "true" } else { "false" }
+}
+
+/// Prometheus drops a label whose value is empty, so a query grouping on one
+/// gets a different field set per series. Grafana's `organize` transformation
+/// is single-frame, so the merge it depends on then silently does nothing and
+/// the table renders raw `Value #A` columns.
+fn label(s: &str) -> String {
+    quote(if s.is_empty() { "none" } else { s })
 }
 
 fn quote(s: &str) -> String {

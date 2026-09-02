@@ -174,7 +174,11 @@ impl ChatToResponses {
                 }}));
             }
         }
-        if let Some(usage) = chunk.get("usage").filter(|u| !u.is_null()) {
+        if let Some(usage) = chunk
+            .get("usage")
+            .filter(|u| !u.is_null())
+            .and_then(crate::gemini::usage::as_responses)
+        {
             out.push(json!({"type": "response.completed", "response": {"usage": usage}}));
         }
         // `created` and `completed` carry no answer, so they do not count as

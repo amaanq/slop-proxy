@@ -51,6 +51,8 @@ pub fn as_responses(usage: &serde_json::Value) -> Option<serde_json::Value> {
     Some(serde_json::json!({
         "input_tokens": u.input_tokens,
         "output_tokens": u.output_tokens,
+        // Codex refuses a completed event without it.
+        "total_tokens": u.input_tokens + u.output_tokens,
         "input_tokens_details": {"cached_tokens": u.input_tokens_details.cached_tokens},
         "output_tokens_details": {"reasoning_tokens": u.output_tokens_details.reasoning_tokens},
     }))
@@ -68,6 +70,7 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(out["input_tokens"], 3);
+        assert_eq!(out["total_tokens"], 71);
         assert_eq!(out["output_tokens"], 68);
         assert_eq!(out["output_tokens_details"]["reasoning_tokens"], 66);
     }

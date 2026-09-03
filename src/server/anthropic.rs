@@ -157,7 +157,13 @@ pub async fn messages(
 
     let capture = UsageCapture::default();
     let events = if gemini {
-        gemini_bridge::event_stream(resp, protocol, &upstream_req.model, Default::default())
+        gemini_bridge::event_stream(
+            resp,
+            protocol,
+            &upstream_req.model,
+            Default::default(),
+            capture.clone(),
+        )
     } else {
         event_stream(resp)
     };

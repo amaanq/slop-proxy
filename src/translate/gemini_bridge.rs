@@ -493,6 +493,7 @@ pub fn event_stream(
     protocol: crate::gemini::client::GeminiProtocol,
     model: &str,
     custom: BTreeSet<String>,
+    capture: crate::translate::UsageCapture,
 ) -> crate::codex::sse::EventStream {
     use crate::gemini::client::GeminiProtocol;
     use eventsource_stream::Eventsource;
@@ -500,10 +501,17 @@ pub fn event_stream(
 
     let mut native = (protocol == GeminiProtocol::Native)
         .then(|| crate::gemini::native::NativeStream::new(model));
+    let head = capture.clone();
     let chat_bytes = resp.bytes_stream().flat_map(move |item| {
         let frames = match (&mut native, item) {
-            (Some(native), Ok(bytes)) => native.feed(&bytes),
-            (None, Ok(bytes)) => vec![bytes.to_vec()],
+            (Some(native), Ok(bytes)) => {
+                head.note_upstream_head(&bytes);
+                native.feed(&bytes)
+            }
+            (None, Ok(bytes)) => {
+                head.note_upstream_head(&bytes);
+                vec![bytes.to_vec()]
+            }
             (_, Err(e)) => {
                 tracing::warn!("gemini stream error: {e}");
                 Vec::new()
@@ -515,9 +523,13 @@ pub fn event_stream(
     let mut bridge = ChatToResponses::with_custom(custom);
     let stream = chat_bytes.eventsource().flat_map(move |ev| {
         let events = match ev {
-            Ok(ev) if ev.data != "[DONE]" => serde_json::from_str::<ChatChunk>(&ev.data)
-                .map(|chunk| bridge.feed(&chunk))
-                .unwrap_or_default(),
+            Ok(ev) if ev.data != "[DONE]" => match serde_json::from_str::<ChatChunk>(&ev.data) {
+                Ok(chunk) => bridge.feed(&chunk),
+                Err(error) => {
+                    tracing::warn!(%error, frame = %ev.data, "gemini chunk did not parse");
+                    Vec::new()
+                }
+            },
             Ok(_) => Vec::new(),
             Err(e) => {
                 tracing::warn!("gemini SSE parse error: {e}");

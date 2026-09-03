@@ -61,6 +61,9 @@ pub struct CapturedUsage {
     pub stop_reason: Option<String>,
     /// Names only. An argument is the caller's shell command or source.
     pub tools_called: Vec<String>,
+    /// What upstream opened with, the only evidence left when a 200 yields
+    /// no events at all.
+    pub upstream_head: Option<String>,
 }
 
 #[derive(Default, Clone)]
@@ -100,6 +103,13 @@ impl UsageCapture {
         let mut c = self.0.lock().unwrap();
         if !c.tools_called.iter().any(|t| t == name) {
             c.tools_called.push(name.to_string());
+        }
+    }
+
+    pub fn note_upstream_head(&self, bytes: &[u8]) {
+        let mut c = self.0.lock().unwrap();
+        if c.upstream_head.is_none() {
+            c.upstream_head = Some(String::from_utf8_lossy(bytes).chars().take(400).collect());
         }
     }
 

@@ -608,6 +608,7 @@ async fn gemini_responses(
         upstream.protocol,
         &model,
         custom,
+        capture.clone(),
     );
 
     if client_streams {

@@ -284,6 +284,7 @@ impl Drop for LogGuard {
                 model = %record.upstream_model,
                 kind = record.error_kind.as_deref().unwrap_or("?"),
                 last_event = cap.last_event.as_deref().unwrap_or("none"),
+                upstream_head = cap.upstream_head.as_deref().unwrap_or(""),
                 after_ms = self.start.elapsed().as_millis() as i64,
                 "stream ended without usage"
             );

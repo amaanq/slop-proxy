@@ -379,7 +379,9 @@ pub fn log_error(db: &Db, mut record: UsageRecord, status: i64, kind: &str) {
 }
 
 pub fn log_usage(db: &Db, prices: &Arc<Prices>, mut record: UsageRecord) {
-    record.cost_usd = prices.cost(&record.upstream_model, billable(&record));
+    let billable = billable(&record);
+    record.cost_usd = prices.cost(&record.upstream_model, billable);
+    record.list_cost_usd = prices.table().list_cost(&record.upstream_model, billable);
     write_usage(db, record);
 }
 

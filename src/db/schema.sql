@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS usage_log (
   cache_write_tokens INTEGER NOT NULL DEFAULT 0,
   reasoning_tokens  INTEGER NOT NULL DEFAULT 0,
   cost_usd          REAL    NOT NULL DEFAULT 0,
+  list_cost_usd     REAL    NOT NULL DEFAULT 0,
   status            INTEGER NOT NULL,
   error_kind        TEXT,
   duration_ms       INTEGER,

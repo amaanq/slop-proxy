@@ -27,6 +27,8 @@ pub struct UsageRecord {
     pub cache_write_tokens: i64,
     pub reasoning_tokens: i64,
     pub cost_usd: f64,
+    /// The same tokens at list price, so a free tier can be valued.
+    pub list_cost_usd: f64,
     pub status: i64,
     pub error_kind: Option<String>,
     pub duration_ms: Option<i64>,
@@ -140,10 +142,10 @@ impl Db {
         let tx = conn.transaction()?;
         tx.execute(
             "INSERT INTO usage_log (token_id, user, account_id, provider, dialect, requested_model, upstream_model, effort, service_tier,
-               input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, cost_usd, status, error_kind, duration_ms,
+               input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, cost_usd, list_cost_usd, status, error_kind, duration_ms,
                session_key, turn_index, tools_declared, tools_called, thinking_budget, image_count, request_bytes, response_bytes, ttft_ms, stop_reason)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                     ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)",
+                     ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29)",
             params![
                 r.token_id,
                 r.user,
@@ -160,6 +162,7 @@ impl Db {
                 r.cache_write_tokens,
                 r.reasoning_tokens,
                 r.cost_usd,
+                r.list_cost_usd,
                 r.status,
                 r.error_kind,
                 r.duration_ms,
@@ -381,6 +384,7 @@ pub struct MetricsRow {
     pub cache_write_tokens: i64,
     pub reasoning_tokens: i64,
     pub cost_usd: f64,
+    pub list_cost_usd: f64,
     pub duration_ms: i64,
 }
 
@@ -405,6 +409,7 @@ impl Db {
                     COALESCE(SUM(u.input_tokens),0), COALESCE(SUM(u.output_tokens),0),
                     COALESCE(SUM(u.cache_read_tokens),0), COALESCE(SUM(u.cache_write_tokens),0),
                     COALESCE(SUM(u.reasoning_tokens),0), COALESCE(SUM(u.cost_usd),0),
+                    COALESCE(SUM(u.list_cost_usd),0),
                     COALESCE(SUM(u.duration_ms),0)
              FROM usage_log u
              GROUP BY u.user, account, provider, u.requested_model, u.upstream_model,
@@ -428,7 +433,8 @@ impl Db {
                 cache_write_tokens: r.get(13)?,
                 reasoning_tokens: r.get(14)?,
                 cost_usd: r.get(15)?,
-                duration_ms: r.get(16)?,
+                list_cost_usd: r.get(16)?,
+                duration_ms: r.get(17)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)

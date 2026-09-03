@@ -41,6 +41,7 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     ("accounts", "http_referer", "TEXT"),
     ("accounts", "auth_mode", "TEXT NOT NULL DEFAULT 'oauth'"),
     ("usage_log", "provider", "TEXT NOT NULL DEFAULT ''"),
+    ("usage_log", "list_cost_usd", "REAL NOT NULL DEFAULT 0"),
     ("usage_log", "service_tier", "TEXT NOT NULL DEFAULT ''"),
     ("usage_log", "session_key", "TEXT NOT NULL DEFAULT ''"),
     ("usage_log", "turn_index", "INTEGER NOT NULL DEFAULT 0"),

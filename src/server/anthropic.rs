@@ -107,6 +107,7 @@ pub async fn messages(
                 .execute(
                     Route {
                         session_key: &session_key,
+                model: &req.model,
                         prefer_trusted: false,
                     },
                     crate::pool::gemini::Call::OpenAi(Box::new(chat)),
@@ -122,6 +123,7 @@ pub async fn messages(
             .execute(
                 Route {
                     session_key: &session_key,
+                model: &req.model,
                     prefer_trusted: false,
                 },
                 req_bytes.clone(),
@@ -134,6 +136,7 @@ pub async fn messages(
             .execute(
                 Route {
                     session_key: &session_key,
+                model: &req.model,
                     prefer_trusted: auth.prefer_trusted,
                 },
                 req_bytes.clone(),
@@ -146,7 +149,7 @@ pub async fn messages(
         Err(e) => {
             let status = pool_error_status(&e);
             log_error(&state, record, status, "pool");
-            return pool_error_response(DIALECT, e);
+            return pool_error_response(DIALECT, &state.cfg.models, e);
         }
     };
     let mut record = record;

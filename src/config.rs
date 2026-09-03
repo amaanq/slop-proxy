@@ -217,14 +217,13 @@ impl ModelsConfig {
     /// Which backend serves this model. The most specific pattern wins, and a
     /// tie goes to whichever backend is listed first here.
     pub fn route(&self, model: &str) -> Provider {
-        let sets = [
-            (Provider::Anthropic, &self.anthropic_patterns),
-            (Provider::Gemini, &self.gemini_patterns),
-            (Provider::Zen, &self.zen_patterns),
-            (Provider::Glm, &self.glm_patterns),
-        ];
-        let mut best: Option<(usize, Provider)> = None;
-        for (provider, patterns) in sets {
+        self.matched(model).unwrap_or(Provider::OpenAi)
+    }
+
+    /// None when nothing claimed the name and codex took it as the default.
+    pub fn matched(&self, model: &str) -> Option<Provider> {
+        let mut best = Option::<(usize, Provider)>::None;
+        for (provider, patterns) in self.sets() {
             let Some(score) = patterns
                 .iter()
                 .filter_map(|p| pattern_specificity(p, model))
@@ -236,7 +235,33 @@ impl ModelsConfig {
                 best = Some((score, provider));
             }
         }
-        best.map_or(Provider::OpenAi, |(_, provider)| provider)
+        best.map(|(_, provider)| provider)
+    }
+
+    fn sets(&self) -> [(Provider, &Vec<String>); 4] {
+        [
+            (Provider::Anthropic, &self.anthropic_patterns),
+            (Provider::Gemini, &self.gemini_patterns),
+            (Provider::Zen, &self.zen_patterns),
+            (Provider::Glm, &self.glm_patterns),
+        ]
+    }
+
+    /// The name meant when a backend prefix was dropped, `fable-5-1` for
+    /// `claude-fable-5-1`.
+    pub fn suggest(&self, model: &str) -> Option<String> {
+        self.sets()
+            .into_iter()
+            .flat_map(|(_, patterns)| patterns)
+            .filter_map(|p| p.strip_suffix('*'))
+            .filter(|prefix| !model.starts_with(*prefix))
+            .find_map(|prefix| {
+                let kept = (1..prefix.len())
+                    .rev()
+                    .filter(|n| prefix.is_char_boundary(*n))
+                    .find(|n| model.starts_with(&prefix[*n..]))?;
+                Some(format!("{}{model}", &prefix[..kept]))
+            })
     }
 }
 
@@ -442,5 +467,22 @@ mod zen_tests {
             ]
         );
         std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod suggest_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_dropped_prefix_earns_a_suggestion() {
+        let cfg = ModelsConfig {
+            anthropic_patterns: vec!["claude-opus-*".into(), "claude-fable-*".into()],
+            ..ModelsConfig::default()
+        };
+        assert_eq!(cfg.suggest("fable-5-1").as_deref(), Some("claude-fable-5-1"));
+        assert_eq!(cfg.suggest("gpt-5.6-sol"), None);
+        assert_eq!(cfg.matched("fable-5-1"), None);
+        assert_eq!(cfg.matched("claude-fable-5-1"), Some(Provider::Anthropic));
     }
 }

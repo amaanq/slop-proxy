@@ -244,6 +244,7 @@ pub async fn messages(
         .execute(
             Route {
                 session_key: &key,
+                model: &peek.model,
                 prefer_trusted: false,
             },
             AnthropicRelay {
@@ -257,7 +258,7 @@ pub async fn messages(
         Ok(r) => r,
         Err(e) => {
             log_error(&state, record, pool_error_status(&e), "pool");
-            return pool_error_response(DIALECT, e);
+            return pool_error_response(DIALECT, &state.cfg.models, e);
         }
     };
     let mut record = record;
@@ -360,6 +361,7 @@ pub async fn glm(
         .execute(
             Route {
                 session_key: &key,
+                model: &peek.model,
                 prefer_trusted: false,
             },
             GlmRelay {
@@ -372,7 +374,7 @@ pub async fn glm(
         Ok(r) => r,
         Err(e) => {
             log_error(&state, record, pool_error_status(&e), "pool");
-            return pool_error_response(DIALECT, e);
+            return pool_error_response(DIALECT, &state.cfg.models, e);
         }
     };
     let mut record = record;
@@ -452,6 +454,7 @@ pub async fn count_tokens(
         .execute(
             Route {
                 session_key: &key,
+                model: &peek.model,
                 prefer_trusted: false,
             },
             AnthropicRelay {
@@ -463,7 +466,7 @@ pub async fn count_tokens(
         .await
     {
         Ok((_, r)) => r,
-        Err(e) => return pool_error_response(DIALECT, e),
+        Err(e) => return pool_error_response(DIALECT, &state.cfg.models, e),
     };
     let builder = forwarded_response(&resp);
     match resp.bytes().await {

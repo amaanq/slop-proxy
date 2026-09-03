@@ -3,6 +3,7 @@ use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 
+use crate::config::ModelsConfig;
 use crate::pool::PoolError;
 
 #[derive(Clone, Copy, Debug)]
@@ -59,7 +60,7 @@ pub fn error_response(dialect: Dialect, status: u16, err_type: &str, message: &s
     (status, body).into_response()
 }
 
-pub fn pool_error_response(dialect: Dialect, err: PoolError) -> Response {
+pub fn pool_error_response(dialect: Dialect, models: &ModelsConfig, err: PoolError) -> Response {
     match err {
         PoolError::NoAccounts(provider) => error_response(
             dialect,
@@ -83,14 +84,25 @@ pub fn pool_error_response(dialect: Dialect, err: PoolError) -> Response {
             }
             resp
         }
-        PoolError::BadRequest { provider, body } => {
-            tracing::warn!(%provider, "upstream rejected request: {body}");
-            error_response(
-                dialect,
-                400,
-                "invalid_request_error",
-                &format!("the {provider} backend rejected this request: {body}"),
-            )
+        PoolError::BadRequest {
+            provider,
+            model,
+            body,
+        } => {
+            tracing::warn!(%provider, %model, "upstream rejected request: {body}");
+            let message = match models.matched(&model) {
+                Some(_) => format!("the {provider} backend rejected {model}: {body}"),
+                None => {
+                    let hint = models
+                        .suggest(&model)
+                        .map(|m| format!(", did you mean {m}?"))
+                        .unwrap_or_default();
+                    format!(
+                        "no backend is configured for {model}{hint} it fell through to {provider}, which said: {body}"
+                    )
+                }
+            };
+            error_response(dialect, 400, "invalid_request_error", &message)
         }
         PoolError::Upstream(msg) => error_response(dialect, 502, "api_error", &msg),
     }
@@ -123,3 +135,4 @@ pub fn out_of_scope(dialect: Dialect, provider: crate::provider::Provider) -> Re
         ),
     )
 }
+

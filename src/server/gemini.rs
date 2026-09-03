@@ -62,6 +62,7 @@ pub async fn chat_completions(
         .execute(
             Route {
                 session_key: &session_key,
+                model: &model,
                 prefer_trusted: false,
             },
             crate::pool::gemini::Call::OpenAi(Box::new(body)),
@@ -71,7 +72,7 @@ pub async fn chat_completions(
         Ok(r) => r,
         Err(e) => {
             log_error(&state, record, pool_error_status(&e), "pool");
-            return pool_error_response(DIALECT, e);
+            return pool_error_response(DIALECT, &state.cfg.models, e);
         }
     };
     let protocol = upstream.protocol;
@@ -321,6 +322,7 @@ pub async fn native(
         .execute(
             Route {
                 session_key: &key,
+                model,
                 prefer_trusted: false,
             },
             call,
@@ -330,7 +332,7 @@ pub async fn native(
         Ok(r) => r,
         Err(e) => {
             log_error(&state, record, pool_error_status(&e), "pool");
-            return pool_error_response(DIALECT, e);
+            return pool_error_response(DIALECT, &state.cfg.models, e);
         }
     };
     let resp = upstream.response;

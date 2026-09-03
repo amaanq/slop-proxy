@@ -61,13 +61,35 @@ impl Default for GlmConfig {
 #[serde(default)]
 pub struct ZenConfig {
     pub base_url: String,
+    pub proxy_urls: Vec<String>,
+    pub proxy_urls_file: Option<PathBuf>,
 }
 
 impl Default for ZenConfig {
     fn default() -> Self {
         Self {
             base_url: "https://opencode.ai/zen/v1".into(),
+            proxy_urls: Vec::new(),
+            proxy_urls_file: None,
         }
+    }
+}
+
+impl ZenConfig {
+    pub fn proxy_urls(&self) -> Result<Vec<String>> {
+        let mut urls = self.proxy_urls.clone();
+        if let Some(path) = &self.proxy_urls_file {
+            let contents = std::fs::read_to_string(path)
+                .wrap_err_with(|| format!("reading zen proxy list {}", path.display()))?;
+            urls.extend(
+                contents
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                    .map(str::to_owned),
+            );
+        }
+        Ok(urls)
     }
 }
 
@@ -353,5 +375,35 @@ mod route_tests {
         assert_eq!(c.route("claude-haiku-4-5"), Provider::Zen);
         assert_eq!(c.route("claude-opus-5"), Provider::Anthropic);
         assert_eq!(with_zen(&["claude-*"]).route("claude-opus-5"), Provider::Anthropic);
+    }
+}
+
+#[cfg(test)]
+mod zen_tests {
+    use super::*;
+
+    #[test]
+    fn proxy_urls_merge_inline_and_file_entries() {
+        let path = std::env::temp_dir().join(format!("slop-proxies-{}", uuid::Uuid::new_v4()));
+        std::fs::write(
+            &path,
+            " http://file-one.example:80\n\n# ignored\nhttp://file-two.example:80\n",
+        )
+        .unwrap();
+        let config = ZenConfig {
+            proxy_urls: vec!["http://inline.example:80".into()],
+            proxy_urls_file: Some(path.clone()),
+            ..ZenConfig::default()
+        };
+
+        assert_eq!(
+            config.proxy_urls().unwrap(),
+            [
+                "http://inline.example:80",
+                "http://file-one.example:80",
+                "http://file-two.example:80",
+            ]
+        );
+        std::fs::remove_file(path).unwrap();
     }
 }

@@ -1,44 +1,61 @@
-use std::sync::Arc;
-
 use axum::body::Bytes;
 
-use super::{AccountUsage, PoolError, Slot, Slots, UsageWindow};
+use super::{AccountUsage, AuthPolicy, Backend, Cooldown, Pool, Route, Slot, UsageWindow};
 use crate::codex::client::CodexClient;
 use crate::codex::models::ModelInfo;
-use crate::db::Db;
 use crate::provider::Provider;
 use crate::upstream::SendError;
 
 /// Session-sticky pool over codex accounts, owning the backend client.
-pub struct CodexPool {
-    slots: Slots,
-    client: CodexClient,
-    soft_limit: f64,
+pub type CodexPool = Pool<CodexClient>;
+
+impl Backend for CodexClient {
+    const PROVIDER: Provider = Provider::OpenAi;
+    const RATE_LIMIT: Cooldown = Cooldown {
+        max: 6 * 3600,
+        base: 60,
+    };
+    const ON_AUTH: AuthPolicy = AuthPolicy::RefreshOnce;
+    const TIERED: bool = true;
+    type Request = Bytes;
+    type Response = reqwest::Response;
+
+    fn soft_limit(&self) -> f64 {
+        self.soft_utilization_limit()
+    }
+
+    async fn send(
+        &self,
+        token: &str,
+        slot: &Slot,
+        route: Route<'_>,
+        req: &Self::Request,
+    ) -> Result<Self::Response, SendError> {
+        CodexClient::send(
+            self,
+            token,
+            &slot.provider_account_id,
+            req,
+            &session_uuid(route.session_key),
+        )
+        .await
+    }
+
+    fn retryable_bad_request(&self, body: &str) -> bool {
+        // A preview model can be enabled per account, so "not supported"
+        // describes this key rather than the request, and the next
+        // account may well serve it.
+        body.contains("is not supported")
+    }
+
+    fn usage_from(&self, resp: &Self::Response) -> Option<AccountUsage> {
+        usage_from_headers(resp.headers())
+    }
 }
 
-impl CodexPool {
-    pub async fn load(db: Db, client: CodexClient) -> eyre::Result<Self> {
-        Ok(Self {
-            soft_limit: client.soft_utilization_limit(),
-            slots: Slots::load(db, Provider::OpenAi).await?,
-            client,
-        })
-    }
-
-    pub async fn len(&self) -> usize {
-        self.slots.len().await
-    }
-
-    pub async fn is_empty(&self) -> bool {
-        self.slots.is_empty().await
-    }
-
-    pub async fn reload(&self) -> eyre::Result<()> {
-        self.slots.reload().await
-    }
-
+impl Pool<CodexClient> {
     pub fn client(&self) -> &CodexClient {
-        &self.client
+        self.backend()
     }
 
     /// Averaged across accounts, so a client's figures do not jump when
@@ -68,10 +85,6 @@ impl CodexPool {
             .collect()
     }
 
-    pub async fn snapshot(&self) -> Vec<super::AccountSnapshot> {
-        self.slots.snapshot().await
-    }
-
     /// Reads quota for every account from the usage endpoint, so idle
     /// accounts report current figures instead of whatever they last saw on
     /// a served response.
@@ -80,7 +93,7 @@ impl CodexPool {
             let Ok(token) = self.slots.fresh_token(&slot, false).await else {
                 continue;
             };
-            match self.client.usage(&token, &slot.provider_account_id).await {
+            match self.backend.usage(&token, &slot.provider_account_id).await {
                 Ok(usage) => {
                     let windows = usage
                         .rate_limit
@@ -116,9 +129,22 @@ impl CodexPool {
     /// first, since gated models are absent from an untrusted account's
     /// catalog.
     pub async fn any_active_credentials(&self) -> Option<(String, String)> {
-        let slot = self.next_available(true, "").await?;
-        let access = self.slots.fresh_token(&slot, false).await.ok()?;
-        Some((access, slot.provider_account_id.clone()))
+        for slot in self
+            .ranked(Route {
+                session_key: "",
+                prefer_trusted: true,
+            })
+            .await
+        {
+            if !self.slots.try_claim(&slot).await {
+                continue;
+            }
+            let Ok(access) = self.slots.fresh_token(&slot, false).await else {
+                continue;
+            };
+            return Some((access, slot.provider_account_id.clone()));
+        }
+        None
     }
 
     pub async fn list_models(&self) -> Result<Vec<ModelInfo>, String> {
@@ -126,7 +152,7 @@ impl CodexPool {
             .any_active_credentials()
             .await
             .ok_or_else(|| "no usable account; run `slop-proxy login`".to_string())?;
-        self.client.list_models(&access, &account_id).await
+        self.backend.list_models(&access, &account_id).await
     }
 
     /// The catalog body untouched, for relaying to a codex client verbatim.
@@ -135,7 +161,7 @@ impl CodexPool {
             .any_active_credentials()
             .await
             .ok_or_else(|| "no usable account; run `slop-proxy login`".to_string())?;
-        let (status, body) = self.client.models_raw(&access, &account_id).await?;
+        let (status, body) = self.backend.models_raw(&access, &account_id).await?;
         if !status.is_success() {
             return Err(format!(
                 "{status}: {}",
@@ -143,136 +169,6 @@ impl CodexPool {
             ));
         }
         Ok(body)
-    }
-
-    pub async fn execute(
-        &self,
-        req: &Bytes,
-        prefer_trusted: bool,
-        session_key: &str,
-    ) -> Result<(i64, reqwest::Response), PoolError> {
-        let attempts = self.slots.len().await.min(3);
-        if attempts == 0 {
-            return Err(PoolError::NoAccounts(Provider::OpenAi));
-        }
-        let mut last_err = Option::<SendError>::None;
-        let session_id = session_uuid(session_key);
-
-        for _ in 0..attempts {
-            let Some(slot) = self.next_available(prefer_trusted, session_key).await else {
-                break;
-            };
-            let Ok(creds) = self.slots.fresh_token(&slot, false).await else {
-                continue;
-            };
-
-            match self
-                .client
-                .send(&creds, &slot.provider_account_id, req, &session_id)
-                .await
-            {
-                Ok(resp) => {
-                    self.slots.mark_ok(&slot).await;
-                    if let Some(usage) = usage_from_headers(resp.headers()) {
-                        self.slots.note_usage(&slot, usage).await;
-                    }
-                    return Ok((slot.id, resp));
-                }
-                Err(SendError::Auth(body)) => {
-                    tracing::warn!("account {} got 401, forcing refresh", slot.display);
-                    if let Ok(creds) = self.slots.fresh_token(&slot, true).await {
-                        match self
-                            .client
-                            .send(&creds, &slot.provider_account_id, req, &session_id)
-                            .await
-                        {
-                            Ok(resp) => {
-                                self.slots.mark_ok(&slot).await;
-                                if let Some(usage) = usage_from_headers(resp.headers()) {
-                                    self.slots.note_usage(&slot, usage).await;
-                                }
-                                return Ok((slot.id, resp));
-                            }
-                            Err(e) => {
-                                self.slots.cool(&slot, 60, "post-refresh failure").await;
-                                last_err = Some(e);
-                            }
-                        }
-                    } else {
-                        last_err = Some(SendError::Auth(body));
-                    }
-                }
-                Err(SendError::RateLimited { retry_after, body }) => {
-                    self.slots
-                        .cool_rate_limited(&slot, retry_after, 6 * 3600, 60)
-                        .await;
-                    last_err = Some(SendError::RateLimited { retry_after, body });
-                }
-                // A preview model can be enabled per account, so "not supported"
-                // describes this key rather than the request, and the next
-                // account may well serve it.
-                Err(SendError::BadRequest(body)) if body.contains("is not supported") => {
-                    tracing::warn!(
-                        account = %slot.display,
-                        "account cannot serve this model, trying another: {body}"
-                    );
-                    last_err = Some(SendError::BadRequest(body));
-                }
-                Err(SendError::BadRequest(body)) => {
-                    return Err(PoolError::BadRequest(body));
-                }
-                Err(e) => {
-                    self.slots.cool_failure(&slot).await;
-                    last_err = Some(e);
-                }
-            }
-        }
-
-        match last_err {
-            Some(SendError::BadRequest(body)) => Err(PoolError::BadRequest(body)),
-            Some(SendError::RateLimited { .. }) | None => Err(PoolError::AllCoolingDown {
-                retry_after: self.slots.min_cooldown().await.max(30),
-            }),
-            Some(e) => Err(PoolError::Upstream(e.to_string())),
-        }
-    }
-
-    /// Candidates are tried with capacity ahead of preference, so an account
-    /// with room left beats a preferred one that is nearly spent, and only
-    /// then does the token's trusted preference break the tie. Within a group
-    /// a session sticks to one account, since a prompt cache lives on the
-    /// account that built it and scattering re-bills the whole prefix.
-    async fn next_available(&self, prefer_trusted: bool, session_key: &str) -> Option<Arc<Slot>> {
-        let mut banded = Vec::<(super::Band, Arc<Slot>)>::new();
-        for slot in self.slots.list().await {
-            banded.push((self.slots.band(&slot, self.soft_limit).await, slot));
-        }
-        banded.sort_by_key(|(band, _)| *band);
-        let groups = banded.chunk_by(|(a, _), (b, _)| a == b);
-        for group in groups.map(|g| g.iter().map(|(_, s)| s.clone()).collect::<Vec<_>>()) {
-            let (preferred, rest): (Vec<_>, Vec<_>) =
-                group.into_iter().partition(|s| s.trusted == prefer_trusted);
-            for candidates in [preferred, rest] {
-                if let Some(slot) = self.claim_ranked(candidates, session_key).await {
-                    return Some(slot);
-                }
-            }
-        }
-        None
-    }
-
-    async fn claim_ranked(
-        &self,
-        mut slots: Vec<Arc<Slot>>,
-        session_key: &str,
-    ) -> Option<Arc<Slot>> {
-        slots.sort_by_key(|s| std::cmp::Reverse(super::rendezvous_score(session_key, s.id)));
-        for slot in &slots {
-            if self.slots.try_claim(slot).await {
-                return Some(slot.clone());
-            }
-        }
-        None
     }
 }
 

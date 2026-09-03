@@ -19,33 +19,30 @@ use axum::middleware;
 use axum::routing::{get, post};
 use eyre::{Result, WrapErr};
 
-use crate::anthropic::client::AnthropicClient;
-use crate::codex::client::CodexClient;
 use crate::codex::models::ModelInfo;
 use crate::config::Config;
 use crate::db::Db;
 use crate::db::usage::UsageRecord;
-use crate::gemini::client::GeminiClient;
-use crate::pool::anthropic::AnthropicPool;
-use crate::pool::codex::CodexPool;
-use crate::pool::gemini::GeminiPool;
-use crate::pool::glm::GlmPool;
-use crate::pool::zen::ZenPool;
+use crate::pool::Pools;
 use crate::pricing::{Prices, Tokens};
 use crate::translate::UsageCapture;
-use crate::zen::client::ZenClient;
 
 #[derive(Clone)]
-pub struct AppState {
+pub struct AppState(Arc<Inner>);
+
+pub struct Inner {
     pub db: Db,
-    pub codex: Arc<CodexPool>,
-    pub anthropic: Arc<AnthropicPool>,
-    pub gemini: Arc<GeminiPool>,
-    pub zen: Arc<ZenPool>,
-    pub glm: Arc<GlmPool>,
-    pub cfg: Arc<Config>,
-    pub models: Arc<ModelCache>,
-    pub prices: Arc<Prices>,
+    pub cfg: Config,
+    pub prices: Prices,
+    pub models: ModelCache,
+    pub pools: Pools,
+}
+
+impl std::ops::Deref for AppState {
+    type Target = Inner;
+    fn deref(&self) -> &Inner {
+        &self.0
+    }
 }
 
 impl AppState {
@@ -54,7 +51,7 @@ impl AppState {
         if let Some(cached) = self.models.get() {
             return Some(cached);
         }
-        match self.codex.models_raw().await {
+        match self.pools.codex.models_raw().await {
             Ok(body) => {
                 self.models.put(body.clone());
                 Some(body)
@@ -110,50 +107,16 @@ impl Default for ModelCache {
 }
 
 pub async fn serve(db: Db, cfg: Config, bind: &str) -> Result<()> {
-    let codex = CodexPool::load(db.clone(), CodexClient::new(cfg.codex.clone())).await?;
-    if codex.is_empty().await {
-        tracing::warn!("no codex accounts in the database; run `slop-proxy login`");
-    } else {
-        tracing::info!("loaded {} codex account(s)", codex.len().await);
-    }
-    let anthropic =
-        AnthropicPool::load(db.clone(), AnthropicClient::new(cfg.anthropic.clone())).await?;
-    if anthropic.is_empty().await {
-        tracing::warn!(
-            "no anthropic accounts in the database; run `slop-proxy login --provider anthropic`"
-        );
-    } else {
-        tracing::info!("loaded {} anthropic account(s)", anthropic.len().await);
-    }
-
-    let gemini = GeminiPool::load(db.clone(), GeminiClient::new(cfg.gemini.clone())).await?;
-    if !gemini.is_empty().await {
-        tracing::info!("loaded {} gemini account(s)", gemini.len().await);
-    }
-
-    let zen = ZenPool::load(db.clone(), ZenClient::new(cfg.zen.clone())?).await?;
-    if zen.len().await > 0 {
-        tracing::info!("loaded {} zen account(s)", zen.len().await);
-    }
-
-    let glm = GlmPool::load(db.clone(), cfg.glm.clone()).await?;
-    if glm.len().await > 0 {
-        tracing::info!("loaded {} glm account(s)", glm.len().await);
-    }
-
-    let prices = Arc::new(Prices::new(&cfg.db_path, cfg.pricing.url.clone()));
+    let pools = Pools::load(&db, &cfg).await?;
+    let prices = Prices::new(&cfg.db_path, cfg.pricing.url.clone());
     prices.load().await;
-    let state = AppState {
+    let state = AppState(Arc::new(Inner {
         db,
-        codex: Arc::new(codex),
-        anthropic: Arc::new(anthropic),
-        gemini: Arc::new(gemini),
-        zen: Arc::new(zen),
-        glm: Arc::new(glm),
-        cfg: Arc::new(cfg),
-        models: Arc::new(ModelCache::new()),
+        cfg,
         prices,
-    };
+        models: ModelCache::new(),
+        pools,
+    }));
     price_history(&state).await;
     let price_state = state.clone();
     tokio::spawn(async move {
@@ -172,23 +135,8 @@ pub async fn serve(db: Db, cfg: Config, bind: &str) -> Result<()> {
         tick.tick().await;
         loop {
             tick.tick().await;
-            if let Err(e) = reload_state.codex.reload().await {
-                tracing::warn!("reloading codex accounts: {e}");
-            }
-            if let Err(e) = reload_state.anthropic.reload().await {
-                tracing::warn!("reloading anthropic accounts: {e}");
-            }
-            if let Err(e) = reload_state.gemini.reload().await {
-                tracing::warn!("reloading gemini accounts: {e}");
-            }
-            if let Err(e) = reload_state.zen.reload().await {
-                tracing::warn!("reloading zen accounts: {e}");
-            }
-            if let Err(e) = reload_state.glm.reload().await {
-                tracing::warn!("reloading glm accounts: {e}");
-            }
-            reload_state.codex.poll_usage().await;
-            reload_state.anthropic.poll_usage().await;
+            reload_state.pools.reload().await;
+            reload_state.pools.poll_usage().await;
         }
     });
 
@@ -280,8 +228,7 @@ fn billable(r: &UsageRecord) -> Tokens {
 
 /// Logs the request on drop, so client disconnects mid-stream still get a row.
 pub struct LogGuard {
-    db: Db,
-    prices: Arc<Prices>,
+    state: AppState,
     capture: UsageCapture,
     record: UsageRecord,
     start: Instant,
@@ -292,15 +239,13 @@ impl LogGuard {
     /// begin after the upstream response headers, hiding the wait that time
     /// to first byte exists to measure.
     pub fn new(
-        db: Db,
-        prices: Arc<Prices>,
+        state: AppState,
         capture: UsageCapture,
         record: UsageRecord,
         started: Instant,
     ) -> Self {
         Self {
-            db,
-            prices,
+            state,
             capture,
             record,
             start: started,
@@ -342,8 +287,11 @@ impl Drop for LogGuard {
             );
         }
         record.duration_ms = Some(self.start.elapsed().as_millis() as i64);
-        record.cost_usd = self.prices.cost(&record.upstream_model, billable(&record));
-        let db = self.db.clone();
+        record.cost_usd = self
+            .state
+            .prices
+            .cost(&record.upstream_model, billable(&record));
+        let db = self.state.db.clone();
         tokio::spawn(async move {
             if let Err(e) = db.log_usage(&record).await {
                 tracing::error!("writing usage log: {e}");
@@ -354,9 +302,9 @@ impl Drop for LogGuard {
 
 /// A request rejected before dispatch has already spent the caller's
 /// admission, so without a row it burns their limit invisibly.
-pub fn log_rejected(db: &Db, auth: &auth::AuthInfo, dialect: &'static str, model: &str) {
+pub fn log_rejected(state: &AppState, auth: &auth::AuthInfo, dialect: &'static str, model: &str) {
     log_error(
-        db,
+        state,
         UsageRecord {
             meter_id: Some(auth.meter_id),
             token_id: Some(auth.token_id),
@@ -372,17 +320,20 @@ pub fn log_rejected(db: &Db, auth: &auth::AuthInfo, dialect: &'static str, model
 
 /// A rejected request served no tokens, so it is written without consulting
 /// the price table.
-pub fn log_error(db: &Db, mut record: UsageRecord, status: i64, kind: &str) {
+pub fn log_error(state: &AppState, mut record: UsageRecord, status: i64, kind: &str) {
     record.status = status;
     record.error_kind = Some(kind.to_string());
-    write_usage(db, record);
+    write_usage(&state.db, record);
 }
 
-pub fn log_usage(db: &Db, prices: &Arc<Prices>, mut record: UsageRecord) {
+pub fn log_usage(state: &AppState, mut record: UsageRecord) {
     let billable = billable(&record);
-    record.cost_usd = prices.cost(&record.upstream_model, billable);
-    record.list_cost_usd = prices.table().list_cost(&record.upstream_model, billable);
-    write_usage(db, record);
+    record.cost_usd = state.prices.cost(&record.upstream_model, billable);
+    record.list_cost_usd = state
+        .prices
+        .table()
+        .list_cost(&record.upstream_model, billable);
+    write_usage(&state.db, record);
 }
 
 fn write_usage(db: &Db, record: UsageRecord) {

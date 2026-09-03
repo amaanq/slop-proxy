@@ -14,6 +14,7 @@ use super::error::{Dialect, pool_error_response, pool_error_status, translation_
 use super::{AppState, LogGuard, cache_key, log_error, log_rejected, log_usage};
 use crate::codex::sse::{EventStream, event_stream};
 use crate::db::usage::UsageRecord;
+use crate::pool::Route;
 use crate::provider::Provider;
 use crate::translate::anthropic_req::{self, AnthropicRequest};
 use crate::translate::anthropic_stream::{AnthropicStream, render_aggregated};
@@ -37,7 +38,7 @@ pub async fn messages(
         .models
         .route(&crate::translate::model_map::resolve(&state.cfg.models, &peek.model).model);
     if !auth.may_use(provider) {
-        log_rejected(&state.db, &auth, "messages", &peek.model);
+        log_rejected(&state, &auth, "messages", &peek.model);
         return super::error::out_of_scope(DIALECT, provider);
     }
     match provider {
@@ -56,14 +57,14 @@ pub async fn messages(
     let req = match serde_json::from_slice::<AnthropicRequest>(&body) {
         Ok(r) => r,
         Err(e) => {
-            log_rejected(&state.db, &auth, "messages", &peek.model);
+            log_rejected(&state, &auth, "messages", &peek.model);
             return translation_error(DIALECT, &format!("invalid request: {e}"));
         }
     };
     let mut upstream_req = match anthropic_req::to_responses(&req, &state.cfg) {
         Ok(r) => r,
         Err(e) => {
-            log_rejected(&state.db, &auth, "messages", &req.model);
+            log_rejected(&state, &auth, "messages", &req.model);
             return translation_error(DIALECT, &e);
         }
     };
@@ -90,7 +91,7 @@ pub async fn messages(
     let req_bytes = match serde_json::to_vec(&upstream_req) {
         Ok(v) => Bytes::from(v),
         Err(e) => {
-            log_error(&state.db, record, 400, "invalid_request");
+            log_error(&state, record, 400, "invalid_request");
             return translation_error(DIALECT, &format!("serializing request: {e}"));
         }
     };
@@ -101,35 +102,50 @@ pub async fn messages(
         Provider::Gemini => {
             let chat = gemini_bridge::to_chat(&upstream_req);
             state
+                .pools
                 .gemini
-                .execute(crate::pool::gemini::Call::OpenAi(&chat), &session_key)
+                .execute(
+                    Route {
+                        session_key: &session_key,
+                        prefer_trusted: false,
+                    },
+                    crate::pool::gemini::Call::OpenAi(Box::new(chat)),
+                )
                 .await
-                .map(|(id, upstream)| (Some(id), upstream.protocol, upstream.response))
+                .map(|(id, upstream)| (id, upstream.protocol, upstream.response))
         }
         // Zen already speaks the Responses API, so the body it is handed is
         // the one codex would have received.
         Provider::Zen => state
+            .pools
             .zen
-            .execute(&req_bytes, &session_key)
+            .execute(
+                Route {
+                    session_key: &session_key,
+                    prefer_trusted: false,
+                },
+                req_bytes.clone(),
+            )
             .await
             .map(|(id, resp)| (id, crate::gemini::client::GeminiProtocol::OpenAi, resp)),
         _ => state
+            .pools
             .codex
-            .execute(&req_bytes, auth.prefer_trusted, &session_key)
+            .execute(
+                Route {
+                    session_key: &session_key,
+                    prefer_trusted: auth.prefer_trusted,
+                },
+                req_bytes.clone(),
+            )
             .await
-            .map(|(id, resp)| {
-                (
-                    Some(id),
-                    crate::gemini::client::GeminiProtocol::OpenAi,
-                    resp,
-                )
-            }),
+            .map(|(id, resp)| (id, crate::gemini::client::GeminiProtocol::OpenAi, resp)),
     };
     let (account_id, protocol, resp) = match dispatched {
         Ok(r) => r,
         Err(e) => {
             let status = pool_error_status(&e);
-            log_error(&state.db, record, status, "pool");
+            log_error(&state, record, status, "pool");
             return pool_error_response(DIALECT, e);
         }
     };
@@ -147,13 +163,7 @@ pub async fn messages(
     if req.stream.unwrap_or(false) {
         let translator =
             AnthropicStream::new(req.model.clone(), est_input, emit_thinking, capture.clone());
-        let guard = LogGuard::new(
-            state.db.clone(),
-            state.prices.clone(),
-            capture,
-            record,
-            started,
-        );
+        let guard = LogGuard::new(state.clone(), capture, record, started);
         stream_response(events, translator, guard)
     } else {
         let agg = aggregate(events, &capture).await;
@@ -166,11 +176,11 @@ pub async fn messages(
             let msg = agg
                 .error_message
                 .unwrap_or_else(|| "upstream failure".into());
-            log_error(&state.db, record, 502, "upstream_failed");
+            log_error(&state, record, 502, "upstream_failed");
             return super::error::error_response(DIALECT, 502, "api_error", &msg);
         }
         record.error_kind = snap.error_kind;
-        log_usage(&state.db, &state.prices, record);
+        log_usage(&state, record);
         Json(render_aggregated(&agg, &req.model, emit_thinking)).into_response()
     }
 }

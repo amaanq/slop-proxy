@@ -9,11 +9,7 @@ use crate::pool::AccountSnapshot;
 use crate::provider::Provider;
 
 pub async fn metrics(State(state): State<AppState>) -> Response {
-    let mut accounts = state.codex.snapshot().await;
-    accounts.extend(state.anthropic.snapshot().await);
-    accounts.extend(state.gemini.snapshot().await);
-    accounts.extend(state.zen.snapshot().await);
-    accounts.extend(state.glm.snapshot().await);
+    let accounts = state.pools.snapshots().await;
 
     let mut out = String::with_capacity(4096);
     render_accounts(&mut out, &accounts);
@@ -313,7 +309,12 @@ fn render_sessions(out: &mut String, rows: &[crate::db::usage::SessionRow]) {
         "Distinct conversations seen. Divide slop_requests_total by it for turns per session",
     );
     for r in rows {
-        let _ = writeln!(out, "slop_sessions{{user={}}} {}", quote(&r.user), r.sessions);
+        let _ = writeln!(
+            out,
+            "slop_sessions{{user={}}} {}",
+            quote(&r.user),
+            r.sessions
+        );
     }
     gauge_header(
         out,
@@ -362,15 +363,45 @@ fn render_sessions(out: &mut String, rows: &[crate::db::usage::SessionRow]) {
 
 type InsightGetter = fn(&crate::db::usage::InsightRow) -> i64;
 const INSIGHTS: [(&str, &str, InsightGetter); 9] = [
-    ("slop_stop_reason_total", "Requests by how the turn ended", |r| r.requests),
-    ("slop_request_bytes_total", "Request bodies as the handler parsed them", |r| r.request_bytes),
-    ("slop_response_bytes_total", "Response bytes relayed", |r| r.response_bytes),
-    ("slop_turns_total", "Messages carried in, summed. Divide by requests for conversation depth", |r| r.turns),
+    (
+        "slop_stop_reason_total",
+        "Requests by how the turn ended",
+        |r| r.requests,
+    ),
+    (
+        "slop_request_bytes_total",
+        "Request bodies as the handler parsed them",
+        |r| r.request_bytes,
+    ),
+    ("slop_response_bytes_total", "Response bytes relayed", |r| {
+        r.response_bytes
+    }),
+    (
+        "slop_turns_total",
+        "Messages carried in, summed. Divide by requests for conversation depth",
+        |r| r.turns,
+    ),
     ("slop_images_total", "Image parts carried in", |r| r.images),
-    ("slop_thinking_budget_total", "Thinking tokens asked for, against reasoning tokens actually spent", |r| r.thinking_budget),
-    ("slop_tools_declared_total", "Tools offered to the model, summed. Every one costs prompt on every turn", |r| r.tools_declared),
-    ("slop_ttft_ms_total", "Time to first byte, summed. Divide by slop_ttft_samples_total", |r| r.ttft_ms),
-    ("slop_ttft_samples_total", "Requests that produced a first byte", |r| r.ttft_samples),
+    (
+        "slop_thinking_budget_total",
+        "Thinking tokens asked for, against reasoning tokens actually spent",
+        |r| r.thinking_budget,
+    ),
+    (
+        "slop_tools_declared_total",
+        "Tools offered to the model, summed. Every one costs prompt on every turn",
+        |r| r.tools_declared,
+    ),
+    (
+        "slop_ttft_ms_total",
+        "Time to first byte, summed. Divide by slop_ttft_samples_total",
+        |r| r.ttft_ms,
+    ),
+    (
+        "slop_ttft_samples_total",
+        "Requests that produced a first byte",
+        |r| r.ttft_samples,
+    ),
 ];
 
 type TokenGetter = fn(&crate::db::usage::MetricsRow) -> i64;

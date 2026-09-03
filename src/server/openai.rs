@@ -415,7 +415,13 @@ pub async fn responses_passthrough(
         .clone()
         .unwrap_or_else(|| auth.user.clone());
 
-    let typed = serde_json::from_slice::<ResponsesRequest>(&body).ok();
+    let typed = match serde_json::from_slice::<ResponsesRequest>(&body) {
+        Ok(typed) => Some(typed),
+        Err(error) => {
+            tracing::warn!(%error, "responses body did not type for the bridge");
+            None
+        }
+    };
     let facts = typed
         .as_ref()
         .map(|t| super::facts::RequestFacts::from_responses(t, &headers))
@@ -446,7 +452,10 @@ pub async fn responses_passthrough(
     if provider == Provider::Gemini {
         let Some(typed) = typed else {
             log_error(&state.db, record, 400, "invalid_request");
-            return translation_error(DIALECT, "this request cannot be bridged to gemini");
+            return translation_error(
+                DIALECT,
+                "this request cannot be bridged to gemini; see the proxy log for the field that failed",
+            );
         };
         return gemini_responses(state, record, typed, session_key, client_streams, started).await;
     }

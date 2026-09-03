@@ -6,6 +6,7 @@ use serde_json::Value;
 pub struct ResponsesRequest {
     pub model: String,
     pub instructions: String,
+    #[serde(deserialize_with = "input_items")]
     pub input: Vec<InputItem>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<ToolDef>,
@@ -58,13 +59,54 @@ pub struct ReasoningConfig {
     pub summary: String,
 }
 
+/// The Responses API takes `input` as either a plain string or a list of
+/// items, and an item omits `type` when it is a message.
+fn input_items<'de, D>(deserializer: D) -> Result<Vec<InputItem>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    match Value::deserialize(deserializer)? {
+        Value::String(text) => Ok(vec![InputItem::Message {
+            role: "user".into(),
+            content: vec![ContentPart::InputText { text }],
+        }]),
+        Value::Array(items) => items
+            .into_iter()
+            .map(|mut item| {
+                if let Some(object) = item.as_object_mut()
+                    && !object.contains_key("type")
+                {
+                    object.insert("type".into(), Value::String("message".into()));
+                }
+                serde_json::from_value(item).map_err(D::Error::custom)
+            })
+            .collect(),
+        other => Err(D::Error::custom(format!(
+            "input must be a string or a list, got {other}"
+        ))),
+    }
+}
+
+/// A message's content is a bare string as often as it is a list of parts.
+fn content_parts<'de, D>(deserializer: D) -> Result<Vec<ContentPart>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    match Value::deserialize(deserializer)? {
+        Value::String(text) => Ok(vec![ContentPart::InputText { text }]),
+        other => serde_json::from_value(other).map_err(D::Error::custom),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum InputItem {
     #[serde(rename = "message")]
     Message {
         role: String,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "content_parts")]
         content: Vec<ContentPart>,
     },
     #[serde(rename = "function_call")]
@@ -421,4 +463,56 @@ pub enum OutputItem {
     },
     #[serde(other)]
     Other,
+}
+
+#[cfg(test)]
+mod input_shape_tests {
+    use super::*;
+
+    fn parse(body: &str) -> ResponsesRequest {
+        serde_json::from_str(body).expect("should type")
+    }
+
+    fn text_of(req: &ResponsesRequest) -> String {
+        match &req.input[0] {
+            InputItem::Message { content, .. } => match &content[0] {
+                ContentPart::InputText { text } | ContentPart::OutputText { text } => text.clone(),
+                _ => String::new(),
+            },
+            _ => String::new(),
+        }
+    }
+
+    /// Every spelling below is valid to the Responses API, and rejecting any
+    /// of them turned a working request into "cannot be bridged to gemini".
+    #[test]
+    fn a_bare_string_input_becomes_a_user_message() {
+        let req = parse(r#"{"model":"m","instructions":"i","input":"hi"}"#);
+        assert_eq!(req.input.len(), 1);
+        assert_eq!(text_of(&req), "hi");
+    }
+
+    #[test]
+    fn a_bare_string_content_becomes_one_part() {
+        let req = parse(
+            r#"{"model":"m","instructions":"i","input":[{"type":"message","role":"user","content":"hi"}]}"#,
+        );
+        assert_eq!(text_of(&req), "hi");
+    }
+
+    #[test]
+    fn an_item_without_a_type_is_a_message() {
+        let req = parse(
+            r#"{"model":"m","instructions":"i","input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}"#,
+        );
+        assert_eq!(text_of(&req), "hi");
+    }
+
+    #[test]
+    fn the_explicit_shape_still_types() {
+        let req = parse(
+            r#"{"model":"m","instructions":"i","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}"#,
+        );
+        assert_eq!(text_of(&req), "hi");
+    }
 }

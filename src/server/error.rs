@@ -83,13 +83,13 @@ pub fn pool_error_response(dialect: Dialect, err: PoolError) -> Response {
             }
             resp
         }
-        PoolError::BadRequest(body) => {
-            tracing::warn!("upstream rejected request: {body}");
+        PoolError::BadRequest { provider, body } => {
+            tracing::warn!(%provider, "upstream rejected request: {body}");
             error_response(
                 dialect,
                 400,
                 "invalid_request_error",
-                &format!("upstream rejected the translated request: {body}"),
+                &format!("the {provider} backend rejected this request: {body}"),
             )
         }
         PoolError::Upstream(msg) => error_response(dialect, 502, "api_error", &msg),
@@ -105,7 +105,7 @@ pub fn pool_error_status(e: &PoolError) -> i64 {
     match e {
         PoolError::NoAccounts(_) => 503,
         PoolError::AllCoolingDown { .. } => 429,
-        PoolError::BadRequest(_) => 400,
+        PoolError::BadRequest { .. } => 400,
         PoolError::Upstream(_) => 502,
     }
 }

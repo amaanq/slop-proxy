@@ -24,6 +24,10 @@ impl Backend for GlmClient {
     type Request = Relay;
     type Response = reqwest::Response;
 
+    fn reason(body: String) -> String {
+        crate::translate::chat::ChatError::reason(body)
+    }
+
     async fn send(
         &self,
         token: &str,

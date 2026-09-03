@@ -32,6 +32,7 @@ pub struct GeminiConfig {
     /// `Referer` here, and some deployments key on `x-goog-api-client`.
     pub headers: BTreeMap<String, String>,
     pub soft_utilization_limit: f64,
+    pub retry_budget_secs: u64,
 }
 
 impl Default for GeminiConfig {
@@ -40,6 +41,7 @@ impl Default for GeminiConfig {
             base_url: "https://generativelanguage.googleapis.com/v1beta/openai".into(),
             headers: BTreeMap::new(),
             soft_utilization_limit: 0.9,
+            retry_budget_secs: 90,
         }
     }
 }
@@ -406,7 +408,10 @@ mod route_tests {
         let c = with_zen(&["claude-haiku-*"]);
         assert_eq!(c.route("claude-haiku-4-5"), Provider::Zen);
         assert_eq!(c.route("claude-opus-5"), Provider::Anthropic);
-        assert_eq!(with_zen(&["claude-*"]).route("claude-opus-5"), Provider::Anthropic);
+        assert_eq!(
+            with_zen(&["claude-*"]).route("claude-opus-5"),
+            Provider::Anthropic
+        );
     }
 }
 

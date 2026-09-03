@@ -51,6 +51,10 @@ impl Backend for GeminiClient {
         self.soft_utilization_limit()
     }
 
+    fn retry_budget(&self) -> std::time::Duration {
+        GeminiClient::retry_budget(self)
+    }
+
     async fn send(
         &self,
         token: &str,

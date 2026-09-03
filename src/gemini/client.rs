@@ -38,6 +38,10 @@ impl GeminiClient {
         self.cfg.soft_utilization_limit
     }
 
+    pub fn retry_budget(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.cfg.retry_budget_secs)
+    }
+
     /// Google's OpenAI-compatible surface drops `Referer` before API-key
     /// validation, so origin-restricted keys have to use the native surface.
     pub async fn send(

@@ -65,6 +65,9 @@ pub trait Backend: Send + Sync + 'static {
     fn soft_limit(&self) -> f64 {
         1.0
     }
+    fn retry_budget(&self) -> Duration {
+        Duration::ZERO
+    }
     async fn send(
         &self,
         token: &str,
@@ -148,15 +151,46 @@ impl<B: Backend> Pool<B> {
         resp
     }
 
+    /// Google refills a token bucket in 20-40s and the whole pool empties at
+    /// once, so a sweep repeats until the budget is spent. The wait is
+    /// jittered to stop a queue waking together and draining the refill.
     pub async fn execute(
         &self,
         route: Route<'_>,
         req: B::Request,
     ) -> Result<(Option<i64>, B::Response), PoolError> {
+        let budget = self.backend.retry_budget();
+        let deadline = std::time::Instant::now() + budget;
+        loop {
+            let err = match self.sweep(route, &req).await {
+                Err(e @ PoolError::AllCoolingDown { .. }) if !budget.is_zero() => e,
+                other => return other,
+            };
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return Err(err);
+            }
+            let wait = Duration::from_secs(self.slots.min_cooldown().await.max(1) as u64)
+                .min(left)
+                .saturating_add(Duration::from_millis(rand::random::<u64>() % 1500));
+            tracing::info!(
+                provider = %B::PROVIDER,
+                wait_ms = wait.as_millis() as u64,
+                "pool is empty, holding the request rather than returning a 429"
+            );
+            tokio::time::sleep(wait).await;
+        }
+    }
+
+    async fn sweep(
+        &self,
+        route: Route<'_>,
+        req: &B::Request,
+    ) -> Result<(Option<i64>, B::Response), PoolError> {
         let ranked = self.ranked(route).await;
         if ranked.is_empty() {
             if B::ANONYMOUS {
-                return match self.backend.send_anonymous(&req).await {
+                return match self.backend.send_anonymous(req).await {
                     Ok(r) => Ok((None, r)),
                     Err(SendError::BadRequest(b)) => Err(PoolError::BadRequest(b)),
                     Err(SendError::RateLimited { retry_after, .. }) => {
@@ -195,7 +229,7 @@ impl<B: Backend> Pool<B> {
             let Ok(token) = self.slots.fresh_token(&slot, false).await else {
                 continue;
             };
-            match self.backend.send(&token, &slot, route, &req).await {
+            match self.backend.send(&token, &slot, route, req).await {
                 Ok(resp) => return Ok((Some(slot.id), self.served(&slot, resp).await)),
                 Err(SendError::Auth(text)) => match B::ON_AUTH {
                     AuthPolicy::CoolKey(secs) => {
@@ -205,7 +239,7 @@ impl<B: Backend> Pool<B> {
                     AuthPolicy::RefreshOnce => {
                         tracing::warn!("account {} got 401, forcing refresh", slot.display);
                         if let Ok(token) = self.slots.fresh_token(&slot, true).await {
-                            match self.backend.send(&token, &slot, route, &req).await {
+                            match self.backend.send(&token, &slot, route, req).await {
                                 Ok(resp) => {
                                     return Ok((Some(slot.id), self.served(&slot, resp).await));
                                 }
@@ -846,7 +880,10 @@ pub(crate) fn test_slots(db: Db, provider: Provider, ids: &[(i64, bool)]) -> Slo
                         provider_account_id: format!("acct-{id}"),
                         display: format!("a{id}"),
                         trusted,
-                        auth_mode: AuthMode::OAuth,
+                        auth_mode: match provider {
+                            Provider::OpenAi | Provider::Anthropic => AuthMode::OAuth,
+                            _ => AuthMode::ApiKey,
+                        },
                         plan: None,
                         http_referer: None,
                         state: Mutex::new(SlotState {
@@ -1024,5 +1061,84 @@ mod idle_window_tests {
             observed_at: 0,
         };
         assert_eq!(u.band(0.9, now), Band::Spent);
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    struct Flaky {
+        calls: AtomicUsize,
+        frees_after: usize,
+        budget: Duration,
+    }
+
+    impl Backend for Flaky {
+        const PROVIDER: Provider = Provider::Gemini;
+        const RATE_LIMIT: Cooldown = Cooldown { max: 1, base: 1 };
+        const ON_AUTH: AuthPolicy = AuthPolicy::CoolKey(60);
+        type Request = ();
+        type Response = usize;
+
+        fn retry_budget(&self) -> Duration {
+            self.budget
+        }
+
+        async fn send(
+            &self,
+            _token: &str,
+            _slot: &Slot,
+            _route: Route<'_>,
+            _req: &Self::Request,
+        ) -> Result<Self::Response, SendError> {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if n <= self.frees_after {
+                return Err(SendError::RateLimited {
+                    retry_after: None,
+                    body: "quota".into(),
+                });
+            }
+            Ok(n)
+        }
+    }
+
+    async fn pool(frees_after: usize, budget: Duration) -> Pool<Flaky> {
+        let db_path = std::env::temp_dir().join(format!("slop-retry-{}.db", uuid::Uuid::new_v4()));
+        let db = Db::open(&db_path).await.unwrap();
+        Pool {
+            slots: test_slots(db, Provider::Gemini, &[(1, false)]),
+            backend: Flaky {
+                calls: AtomicUsize::new(0),
+                frees_after,
+                budget,
+            },
+        }
+    }
+
+    fn route() -> Route<'static> {
+        Route {
+            session_key: "s",
+            prefer_trusted: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_rate_limited_pool_is_waited_out_rather_than_handed_back() {
+        let pool = pool(1, Duration::from_secs(10)).await;
+        let (_, calls) = pool.execute(route(), ()).await.unwrap();
+        assert_eq!(calls, 2, "the second sweep should have been served");
+    }
+
+    #[tokio::test]
+    async fn no_budget_keeps_the_old_behaviour() {
+        let pool = pool(usize::MAX, Duration::ZERO).await;
+        assert!(matches!(
+            pool.execute(route(), ()).await,
+            Err(PoolError::AllCoolingDown { .. })
+        ));
+        assert_eq!(pool.backend.calls.load(Ordering::SeqCst), 1);
     }
 }

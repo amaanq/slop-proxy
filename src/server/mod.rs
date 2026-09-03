@@ -272,6 +272,8 @@ impl Drop for LogGuard {
         if !cap.completed && record.error_kind.is_none() {
             record.error_kind = Some(if cap.upstream_eof {
                 "upstream_eof".into()
+            } else if record.status >= 400 {
+                "upstream_rejected".into()
             } else {
                 "client_disconnect".into()
             });

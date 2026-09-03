@@ -82,7 +82,10 @@ pub async fn chat_completions(
 
     let builder = forwarded_response(&resp);
     let ok = resp.status().is_success();
-    if streaming && ok && protocol == GeminiProtocol::Native {
+    if !ok {
+        return upstream_rejected(&state, record, builder, resp, started).await;
+    }
+    if streaming && protocol == GeminiProtocol::Native {
         let capture = UsageCapture::default();
         let guard = LogGuard::new(state.clone(), capture.clone(), record, started);
         let mut native = NativeStream::new(&model);
@@ -131,7 +134,7 @@ pub async fn chat_completions(
             return error_response(DIALECT, 502, "api_error", &e.to_string());
         }
     };
-    let bytes = if ok && protocol == GeminiProtocol::Native {
+    let bytes = if protocol == GeminiProtocol::Native {
         match crate::gemini::native::response(&bytes, &model)
             .and_then(|c| serde_json::to_vec(&c).map_err(|e| e.to_string()))
         {
@@ -144,8 +147,7 @@ pub async fn chat_completions(
     } else {
         bytes
     };
-    if ok
-        && let Ok(env) = serde_json::from_slice::<ChatEnvelope>(&bytes)
+    if let Ok(env) = serde_json::from_slice::<ChatEnvelope>(&bytes)
         && let Some(u) = env.usage
     {
         let capture = UsageCapture::default();
@@ -157,6 +159,33 @@ pub async fn chat_completions(
         record.reasoning_tokens = snap.reasoning_tokens;
     }
     super::log_usage(&state, record);
+    builder
+        .body(Body::from(bytes))
+        .unwrap_or_else(|e| error_response(DIALECT, 502, "api_error", &e.to_string()))
+}
+
+/// A non-2xx carries no SSE frames, so the usage scanner logged a phantom
+/// `client_disconnect` and dropped the body.
+async fn upstream_rejected(
+    state: &AppState,
+    mut record: UsageRecord,
+    builder: axum::http::response::Builder,
+    resp: reqwest::Response,
+    started: std::time::Instant,
+) -> Response {
+    let bytes = resp.bytes().await.unwrap_or_default();
+    tracing::warn!(
+        user = %record.user,
+        model = %record.requested_model,
+        dialect = record.dialect,
+        status = record.status,
+        body = %String::from_utf8_lossy(&bytes).chars().take(2000).collect::<String>(),
+        "gemini rejected the request"
+    );
+    record.error_kind = Some("upstream_rejected".into());
+    record.response_bytes = bytes.len() as i64;
+    record.duration_ms = Some(started.elapsed().as_millis() as i64);
+    super::log_usage(state, record);
     builder
         .body(Body::from(bytes))
         .unwrap_or_else(|e| error_response(DIALECT, 502, "api_error", &e.to_string()))
@@ -310,6 +339,9 @@ pub async fn native(
     record.status = resp.status().as_u16() as i64;
     let ok = resp.status().is_success();
     let builder = forwarded_response(&resp);
+    if !ok {
+        return upstream_rejected(&state, record, builder, resp, started).await;
+    }
 
     if streaming {
         let capture = UsageCapture::default();
@@ -334,7 +366,7 @@ pub async fn native(
             return error_response(DIALECT, 502, "api_error", &e.to_string());
         }
     };
-    if ok && let Ok(v) = serde_json::from_slice::<GenerateContentResponse>(&bytes) {
+    if let Ok(v) = serde_json::from_slice::<GenerateContentResponse>(&bytes) {
         if let Some(reason) = finish_reason(&v) {
             record.stop_reason = reason.to_string();
         }

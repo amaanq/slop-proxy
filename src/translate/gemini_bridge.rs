@@ -2,7 +2,6 @@
 //! chat completions.
 
 use std::collections::{BTreeSet, HashMap};
-use std::sync::{LazyLock, Mutex};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -17,27 +16,12 @@ use crate::translate::chat::{
     ChatToolDef, ExtraContent, FunctionBody, FunctionDef, ImageRef, StreamOptions,
 };
 
-/// Gemini refuses a replayed function call whose part carries no
-/// thought_signature, and the signature it issues survives nowhere in the
-/// Responses item codex hands back, so it is held here against the call id.
-/// See https://ai.google.dev/gemini-api/docs/thought-signatures.
-static SIGNATURES: LazyLock<Mutex<HashMap<String, String>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-/// Long enough for any live conversation, bounded so a long-running proxy does
-/// not grow without limit.
-const MAX_SIGNATURES: usize = 4096;
-
 fn remember_signature(call_id: &str, signature: &str) {
-    let mut map = SIGNATURES.lock().unwrap();
-    if map.len() >= MAX_SIGNATURES {
-        map.clear();
-    }
-    map.insert(call_id.to_string(), signature.to_string());
+    crate::gemini::signatures::put(crate::gemini::signatures::call_id_key(call_id), signature);
 }
 
 fn signature_for(call_id: &str) -> Option<String> {
-    SIGNATURES.lock().unwrap().get(call_id).cloned()
+    crate::gemini::signatures::get(crate::gemini::signatures::call_id_key(call_id))
 }
 
 fn tool_call_message(call_id: &str, name: &str, arguments: String) -> ChatMessage {

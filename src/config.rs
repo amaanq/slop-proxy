@@ -377,6 +377,19 @@ mod route_tests {
         }
     }
 
+    /// The suffix is how a caller asks for an effort level, so it reaches
+    /// route() attached to the model and must not decide the backend.
+    #[test]
+    fn an_effort_suffix_does_not_change_the_backend() {
+        let c = with_zen(&["muse-spark-1.3-contributor-free"]);
+        let resolve = |m: &str| crate::translate::model_map::resolve(&c, m).model;
+        assert_eq!(
+            c.route(&resolve("muse-spark-1.3-contributor-free:high")),
+            Provider::Zen
+        );
+        assert_eq!(c.route(&resolve("gemini-3.8-flash:low")), Provider::Gemini);
+    }
+
     #[test]
     fn zen_takes_the_models_it_names() {
         let c = with_zen(&["muse-spark-*", "big-pickle"]);

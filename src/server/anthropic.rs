@@ -29,7 +29,13 @@ pub async fn messages(
 ) -> Response {
     let started = std::time::Instant::now();
     let peek = super::relay::Peek::from_body(&body);
-    let provider = state.cfg.models.route(&peek.model);
+    // An effort suffix is part of what the caller typed, not part of the model
+    // name a pattern matches, so routing the raw string sent muse:high to
+    // codex and burned the pool on a model it cannot serve.
+    let provider = state
+        .cfg
+        .models
+        .route(&crate::translate::model_map::resolve(&state.cfg.models, &peek.model).model);
     if !auth.may_use(provider) {
         log_rejected(&state.db, &auth, "messages", &peek.model);
         return super::error::out_of_scope(DIALECT, provider);

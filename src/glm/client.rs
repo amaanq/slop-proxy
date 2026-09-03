@@ -1,7 +1,7 @@
 //! Z.ai publishes an Anthropic-compatible endpoint, so a GLM request is the
 //! one the caller already sent and the reply needs no translation.
 
-use serde_json::Value;
+use axum::body::Bytes;
 
 use crate::config::GlmConfig;
 use crate::upstream::{SendError, retry_after_secs};
@@ -25,7 +25,7 @@ impl GlmClient {
         &self,
         key: &str,
         path: &str,
-        body: &Value,
+        body: &Bytes,
     ) -> Result<reqwest::Response, SendError> {
         let resp = self
             .http
@@ -33,7 +33,8 @@ impl GlmClient {
             .header("x-api-key", key)
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")
-            .json(body)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body.clone())
             .send()
             .await
             .map_err(|e| SendError::Network(e.to_string()))?;

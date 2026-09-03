@@ -1,13 +1,13 @@
 use std::collections::VecDeque;
 use std::convert::Infallible;
 
+use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use futures_util::StreamExt;
-use serde_json::Value;
 
 use super::auth::AuthInfo;
 use super::error::{Dialect, pool_error_response, pool_error_status, translation_error};
@@ -25,10 +25,10 @@ pub async fn messages(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthInfo>,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    body: Bytes,
 ) -> Response {
     let started = std::time::Instant::now();
-    let peek = super::relay::Peek::from_body(&body);
+    let peek = super::relay::Peek::from_slice(&body);
     // An effort suffix is part of what the caller typed, not part of the model
     // name a pattern matches, so routing the raw string sent muse:high to
     // codex and burned the pool on a model it cannot serve.
@@ -53,7 +53,7 @@ pub async fn messages(
         Provider::Zen => {}
         Provider::OpenAi => {}
     }
-    let req = match serde_json::from_value::<AnthropicRequest>(body) {
+    let req = match serde_json::from_slice::<AnthropicRequest>(&body) {
         Ok(r) => r,
         Err(e) => {
             log_rejected(&state.db, &auth, "messages", &peek.model);
@@ -87,8 +87,8 @@ pub async fn messages(
         ..Default::default()
     };
 
-    let req_value = match serde_json::to_value(&upstream_req) {
-        Ok(v) => v,
+    let req_bytes = match serde_json::to_vec(&upstream_req) {
+        Ok(v) => Bytes::from(v),
         Err(e) => {
             log_error(&state.db, record, 400, "invalid_request");
             return translation_error(DIALECT, &format!("serializing request: {e}"));
@@ -99,7 +99,7 @@ pub async fn messages(
     let gemini = route == Provider::Gemini;
     let dispatched = match route {
         Provider::Gemini => {
-            let chat = gemini_bridge::to_chat(&req_value);
+            let chat = gemini_bridge::to_chat(&upstream_req);
             state
                 .gemini
                 .execute(crate::pool::gemini::Call::OpenAi(&chat), &session_key)
@@ -110,14 +110,20 @@ pub async fn messages(
         // the one codex would have received.
         Provider::Zen => state
             .zen
-            .execute(&req_value, &session_key)
+            .execute(&req_bytes, &session_key)
             .await
             .map(|(id, resp)| (id, crate::gemini::client::GeminiProtocol::OpenAi, resp)),
         _ => state
             .codex
-            .execute(&req_value, auth.prefer_trusted, &session_key)
+            .execute(&req_bytes, auth.prefer_trusted, &session_key)
             .await
-            .map(|(id, resp)| (Some(id), crate::gemini::client::GeminiProtocol::OpenAi, resp)),
+            .map(|(id, resp)| {
+                (
+                    Some(id),
+                    crate::gemini::client::GeminiProtocol::OpenAi,
+                    resp,
+                )
+            }),
     };
     let (account_id, protocol, resp) = match dispatched {
         Ok(r) => r,
@@ -141,7 +147,13 @@ pub async fn messages(
     if req.stream.unwrap_or(false) {
         let translator =
             AnthropicStream::new(req.model.clone(), est_input, emit_thinking, capture.clone());
-        let guard = LogGuard::new(state.db.clone(), state.prices.clone(), capture, record, started);
+        let guard = LogGuard::new(
+            state.db.clone(),
+            state.prices.clone(),
+            capture,
+            record,
+            started,
+        );
         stream_response(events, translator, guard)
     } else {
         let agg = aggregate(events, &capture).await;
@@ -214,9 +226,9 @@ pub async fn count_tokens(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthInfo>,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    body: Bytes,
 ) -> Response {
-    let peek = super::relay::Peek::from_body(&body);
+    let peek = super::relay::Peek::from_slice(&body);
     let provider = state.cfg.models.route(&peek.model);
     if !auth.may_use(provider) {
         return super::error::out_of_scope(DIALECT, provider);
@@ -230,7 +242,7 @@ pub async fn count_tokens(
         Provider::Glm => {}
         Provider::OpenAi => {}
     }
-    let req = match serde_json::from_value::<AnthropicRequest>(body) {
+    let req = match serde_json::from_slice::<AnthropicRequest>(&body) {
         Ok(r) => r,
         Err(e) => return translation_error(DIALECT, &format!("invalid request: {e}")),
     };

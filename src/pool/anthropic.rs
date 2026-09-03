@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use serde_json::Value;
+use axum::body::Bytes;
 
 use super::{AccountUsage, ModelWindow, PoolError, Slot, Slots, UsageWindow};
 use crate::anthropic::client::{AnthropicClient, RelayHeaders};
@@ -142,7 +142,7 @@ impl AnthropicPool {
     pub async fn execute(
         &self,
         path: &str,
-        body: &Value,
+        body: &Bytes,
         hdrs: &RelayHeaders,
         session_key: &str,
     ) -> Result<(i64, reqwest::Response), PoolError> {

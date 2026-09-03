@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use serde_json::Value;
+use axum::body::Bytes;
 
 use super::{AccountUsage, PoolError, Slot, Slots, UsageWindow};
 use crate::codex::client::CodexClient;
@@ -147,7 +147,7 @@ impl CodexPool {
 
     pub async fn execute(
         &self,
-        req: &Value,
+        req: &Bytes,
         prefer_trusted: bool,
         session_key: &str,
     ) -> Result<(i64, reqwest::Response), PoolError> {

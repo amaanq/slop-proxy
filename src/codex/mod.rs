@@ -80,7 +80,7 @@ pub async fn debug_ping(
         cfg.codex.base_url, account.id
     );
     let client = client::CodexClient::new(cfg.codex.clone());
-    let req = serde_json::to_value(&req)?;
+    let req = axum::body::Bytes::from(serde_json::to_vec(&req)?);
     let mut stream = match client
         .send(
             &account.access_token,

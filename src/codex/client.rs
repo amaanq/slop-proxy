@@ -1,4 +1,5 @@
-use serde_json::Value;
+use axum::body::Bytes;
+use serde::{Deserialize, Serialize};
 
 use crate::config::CodexConfig;
 use crate::upstream::{SendError, retry_after_secs};
@@ -43,6 +44,15 @@ pub struct CodexClient {
     cfg: CodexConfig,
 }
 
+/// The one field the retry strips; everything else goes back out untouched.
+#[derive(Serialize, Deserialize)]
+struct Retry {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_output_tokens: Option<u64>,
+    #[serde(flatten)]
+    rest: serde_json::Map<String, serde_json::Value>,
+}
+
 impl CodexClient {
     pub fn new(cfg: CodexConfig) -> Self {
         let http = reqwest::Client::builder()
@@ -59,7 +69,7 @@ impl CodexClient {
         &self,
         access_token: &str,
         chatgpt_account_id: &str,
-        req: &Value,
+        req: &Bytes,
         session_id: &str,
     ) -> Result<reqwest::Response, SendError> {
         match self
@@ -67,13 +77,19 @@ impl CodexClient {
             .await
         {
             Err(SendError::BadRequest(body))
-                if body.contains("max_output_tokens") && req.get("max_output_tokens").is_some() =>
+                if body.contains("max_output_tokens")
+                    && let Ok(mut retry) = serde_json::from_slice::<Retry>(req)
+                    && retry.max_output_tokens.take().is_some()
+                    && let Ok(retry) = serde_json::to_vec(&retry) =>
             {
                 tracing::debug!("upstream rejected max_output_tokens; retrying without it");
-                let mut retry = req.clone();
-                retry.as_object_mut().map(|o| o.remove("max_output_tokens"));
-                self.send_once(access_token, chatgpt_account_id, &retry, session_id)
-                    .await
+                self.send_once(
+                    access_token,
+                    chatgpt_account_id,
+                    &Bytes::from(retry),
+                    session_id,
+                )
+                .await
             }
             // Cloudflare occasionally 403s fresh headless clients; the cookie
             // jar picks up clearance on the first response, so retry once.
@@ -162,7 +178,7 @@ impl CodexClient {
         &self,
         access_token: &str,
         chatgpt_account_id: &str,
-        req: &Value,
+        req: &Bytes,
         session_id: &str,
     ) -> Result<reqwest::Response, SendError> {
         let resp = self
@@ -178,7 +194,8 @@ impl CodexClient {
             .header("session_id", session_id)
             .header("session-id", session_id)
             .header("Accept", "text/event-stream")
-            .json(req)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(req.clone())
             .send()
             .await
             .map_err(|e| SendError::Network(e.to_string()))?;

@@ -1,4 +1,4 @@
-use serde_json::Value;
+use axum::body::Bytes;
 
 use super::{PoolError, Slots};
 use crate::config::GlmConfig;
@@ -36,7 +36,7 @@ impl GlmPool {
     pub async fn execute(
         &self,
         path: &str,
-        body: &Value,
+        body: &Bytes,
         session_key: &str,
     ) -> Result<(i64, reqwest::Response), PoolError> {
         let mut ranked = self.slots.list().await;

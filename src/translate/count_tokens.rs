@@ -16,13 +16,22 @@ pub fn estimate(req: &ResponsesRequest) -> i64 {
                             chars += text.len()
                         }
                         ContentPart::InputImage { .. } => image_tokens += 1000,
+                        ContentPart::Other => {}
                     }
                 }
             }
             InputItem::FunctionCall {
                 name, arguments, ..
             } => chars += name.len() + arguments.len(),
-            InputItem::FunctionCallOutput { output, .. } => chars += output.len(),
+            InputItem::FunctionCallOutput { output, .. }
+            | InputItem::CustomToolCallOutput { output, .. } => chars += output.text().len(),
+            InputItem::CustomToolCall { name, input, .. } => chars += name.len() + input.len(),
+            InputItem::AdditionalTools { tools, .. } => {
+                for tool in tools {
+                    chars += serde_json::to_string(tool).map(|s| s.len()).unwrap_or(0);
+                }
+            }
+            InputItem::Other => {}
             InputItem::Reasoning { summary, .. } => {
                 for crate::codex::types::SummaryPart::SummaryText { text } in summary {
                     chars += text.len();

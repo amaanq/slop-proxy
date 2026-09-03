@@ -1,4 +1,4 @@
-use serde_json::Value;
+use axum::body::Bytes;
 
 use crate::config::AnthropicConfig;
 use crate::upstream::{SendError, retry_after_secs};
@@ -188,7 +188,7 @@ impl AnthropicClient {
         &self,
         access_token: &str,
         path: &str,
-        body: &Value,
+        body: &Bytes,
         hdrs: &RelayHeaders,
     ) -> Result<reqwest::Response, SendError> {
         let beta = match &hdrs.beta {
@@ -205,7 +205,8 @@ impl AnthropicClient {
                 hdrs.version.as_deref().unwrap_or("2023-06-01"),
             )
             .header("anthropic-beta", beta)
-            .json(body);
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body.clone());
         if let Some(ua) = &hdrs.user_agent {
             req = req.header("user-agent", ua);
         }

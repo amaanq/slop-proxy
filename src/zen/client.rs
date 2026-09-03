@@ -4,7 +4,7 @@
 
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 
-use serde_json::Value;
+use axum::body::Bytes;
 
 use crate::config::ZenConfig;
 use crate::upstream::{SendError, retry_after_secs};
@@ -66,7 +66,7 @@ impl ZenClient {
     pub async fn send(
         &self,
         key: Option<&str>,
-        req: &Value,
+        req: &Bytes,
     ) -> Result<reqwest::Response, SendError> {
         let anonymous = key.is_none_or(str::is_empty);
         let mut rate_limit_body = None;
@@ -92,7 +92,7 @@ impl ZenClient {
         &self,
         index: usize,
         key: Option<&str>,
-        req: &Value,
+        req: &Bytes,
     ) -> Result<reqwest::Response, SendError> {
         let mut builder = self.egresses[index]
             .http
@@ -102,7 +102,8 @@ impl ZenClient {
             builder = builder.bearer_auth(key);
         }
         let response = builder
-            .json(req)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(req.clone())
             .send()
             .await
             .map_err(|error| SendError::Network(error.to_string()))?;
@@ -321,7 +322,7 @@ mod tests {
 
         assert_eq!(client.models().await.unwrap(), ["muse-test"]);
         client
-            .send(None, &serde_json::json!({ "model": "muse-test" }))
+            .send(None, &Bytes::from_static(br#"{"model":"muse-test"}"#))
             .await
             .unwrap();
 
@@ -347,11 +348,11 @@ mod tests {
         .unwrap();
 
         client
-            .send(None, &serde_json::json!({ "model": "muse-test" }))
+            .send(None, &Bytes::from_static(br#"{"model":"muse-test"}"#))
             .await
             .unwrap();
         client
-            .send(None, &serde_json::json!({ "model": "muse-test" }))
+            .send(None, &Bytes::from_static(br#"{"model":"muse-test"}"#))
             .await
             .unwrap();
 

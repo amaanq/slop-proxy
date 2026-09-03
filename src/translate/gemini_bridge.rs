@@ -4,7 +4,18 @@
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{LazyLock, Mutex};
 
-use serde_json::{Map, Value, json};
+use serde::Serialize;
+use serde_json::Value;
+
+use crate::codex::types::{
+    ContentPart, InputItem, OutputContentPart, OutputItem, ResponseObj, ResponsesEvent,
+    ResponsesRequest, ToolChoice, Usage,
+};
+use crate::translate::anthropic_req::{ObjectSchema, empty_schema};
+use crate::translate::chat::{
+    ChatChunk, ChatContent, ChatMessage, ChatPart, ChatRequest, ChatToolCall, ChatToolChoice,
+    ChatToolDef, ExtraContent, FunctionBody, FunctionDef, ImageRef, StreamOptions,
+};
 
 /// Gemini refuses a replayed function call whose part carries no
 /// thought_signature, and the signature it issues survives nowhere in the
@@ -29,123 +40,133 @@ fn signature_for(call_id: &str) -> Option<String> {
     SIGNATURES.lock().unwrap().get(call_id).cloned()
 }
 
-fn tool_call_message(call_id: &Value, name: &Value, arguments: String) -> Value {
-    let mut call = json!({
-        "id": call_id,
-        "type": "function",
-        "function": {"name": name, "arguments": arguments},
-    });
-    if let Some(sig) = call_id.as_str().and_then(signature_for) {
-        call["extra_content"] = json!({"google": {"thought_signature": sig}});
+fn tool_call_message(call_id: &str, name: &str, arguments: String) -> ChatMessage {
+    let call = ChatToolCall {
+        id: Some(call_id.to_string()),
+        kind: Some("function".into()),
+        function: FunctionBody {
+            name: Some(name.to_string()),
+            arguments: Some(arguments),
+        },
+        extra_content: signature_for(call_id)
+            .as_deref()
+            .map(ExtraContent::with_signature),
+        ..Default::default()
+    };
+    ChatMessage {
+        role: "assistant".into(),
+        tool_calls: Some(vec![call]),
+        ..Default::default()
     }
-    json!({"role": "assistant", "content": Value::Null, "tool_calls": [call]})
 }
-
 
 /// Codex's shell tool is a grammar-constrained freeform tool taking raw text.
 /// Chat completions has no way to say that, so those are offered as a function
 /// over a single string and their calls are turned back on the way out.
-pub fn custom_tools(req: &Value) -> BTreeSet<String> {
-    req["tools"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|t| t["type"] == "custom")
-        .filter_map(|t| t["name"].as_str().map(String::from))
+pub fn custom_tools(req: &ResponsesRequest) -> BTreeSet<String> {
+    req.tools
+        .iter()
+        .filter(|t| t.kind == "custom")
+        .map(|t| t.name.clone())
         .collect()
 }
 
 /// The single argument a custom tool is presented as taking.
 const FREEFORM_ARG: &str = "input";
 
-/// Takes the serialized request rather than the struct, so the responses
-/// surface can hand over a body it received instead of one it built.
-pub fn to_chat(req: &Value) -> Value {
-    let mut messages = vec![json!({"role": "system", "content": req["instructions"]})];
-    for item in req["input"].as_array().into_iter().flatten() {
-        match item["type"].as_str() {
-            Some("message") => messages.push(json!({
-                "role": chat_role(item["role"].as_str().unwrap_or("user")),
-                "content": parts(&item["content"]),
-            })),
-            Some("function_call") => messages.push(tool_call_message(
-                &item["call_id"],
-                &item["name"],
-                item["arguments"].as_str().unwrap_or("{}").to_string(),
-            )),
-            Some("function_call_output") | Some("custom_tool_call_output") => {
-                messages.push(json!({
-                    "role": "tool",
-                    "tool_call_id": item["call_id"],
-                    "content": tool_output(&item["output"]),
-                }))
-            }
-            Some("custom_tool_call") => messages.push(tool_call_message(
-                &item["call_id"],
-                &item["name"],
-                json!({FREEFORM_ARG: item["input"]}).to_string(),
+#[derive(Serialize)]
+struct Freeform<'a> {
+    input: &'a str,
+}
+
+fn freeform_schema() -> Value {
+    serde_json::to_value(ObjectSchema::one_string(
+        FREEFORM_ARG,
+        "The complete tool input, verbatim.",
+    ))
+    .expect("schema serializes")
+}
+
+pub fn to_chat(req: &ResponsesRequest) -> ChatRequest {
+    let mut messages = vec![ChatMessage {
+        role: "system".into(),
+        content: Some(ChatContent::Text(req.instructions.clone())),
+        ..Default::default()
+    }];
+    for item in &req.input {
+        match item {
+            InputItem::Message { role, content } => messages.push(ChatMessage {
+                role: chat_role(role).to_string(),
+                content: Some(parts(content)),
+                ..Default::default()
+            }),
+            InputItem::FunctionCall {
+                call_id,
+                name,
+                arguments,
+            } => messages.push(tool_call_message(call_id, name, arguments.clone())),
+            InputItem::FunctionCallOutput { call_id, output }
+            | InputItem::CustomToolCallOutput { call_id, output } => messages.push(ChatMessage {
+                role: "tool".into(),
+                tool_call_id: Some(call_id.clone()),
+                content: Some(ChatContent::Text(output.text())),
+                ..Default::default()
+            }),
+            InputItem::CustomToolCall {
+                call_id,
+                name,
+                input,
+            } => messages.push(tool_call_message(
+                call_id,
+                name,
+                serde_json::to_string(&Freeform { input }).unwrap_or_default(),
             )),
             // Gemini rejects an unknown role rather than ignoring it.
-            _ => {}
+            InputItem::Reasoning { .. } | InputItem::AdditionalTools { .. } | InputItem::Other => {}
         }
     }
 
-    let stream = req["stream"].as_bool().unwrap_or(true);
-    let mut body = Map::new();
-    body.insert("model".into(), req["model"].clone());
-    body.insert("messages".into(), json!(messages));
-    body.insert("stream".into(), json!(stream));
-    if stream {
-        // Without this the terminal chunk carries no usage and the request
-        // bills as zero tokens.
-        body.insert("stream_options".into(), json!({"include_usage": true}));
-    }
-    if let Some(max) = req["max_output_tokens"].as_u64() {
-        body.insert("max_tokens".into(), json!(max));
-    }
-    if let Some(effort) = req["reasoning"]["effort"].as_str() {
-        body.insert("reasoning_effort".into(), json!(gemini_effort(effort)));
-    }
-    let tools: Vec<Value> = req["tools"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|t| {
-            let name = t.get("name")?;
-            let parameters = match t.get("parameters") {
-                Some(p) if t["type"] != "custom" => p.clone(),
-                _ => json!({
-                    "type": "object",
-                    "properties": {FREEFORM_ARG: {
-                        "type": "string",
-                        "description": "The complete tool input, verbatim.",
-                    }},
-                    "required": [FREEFORM_ARG],
-                }),
+    let tools: Vec<ChatToolDef> = req
+        .tools
+        .iter()
+        .filter(|t| !t.name.is_empty())
+        .map(|t| {
+            let parameters = if t.kind == "custom" {
+                freeform_schema()
+            } else {
+                t.parameters.clone().unwrap_or_else(empty_schema)
             };
-            Some(json!({"type": "function", "function": {
-                "name": name,
-                "description": t.get("description").cloned().unwrap_or(Value::Null),
-                "parameters": parameters,
-            }}))
+            ChatToolDef::function(FunctionDef {
+                name: Some(t.name.clone()),
+                description: t.description.clone(),
+                parameters: Some(parameters),
+                strict: None,
+            })
         })
         .collect();
-    if !tools.is_empty() {
-        body.insert("tools".into(), json!(tools));
+
+    ChatRequest {
+        model: req.model.clone(),
+        messages,
+        stream: Some(req.stream),
+        // Without this the terminal chunk carries no usage and the request
+        // bills as zero tokens.
+        stream_options: req.stream.then_some(StreamOptions {
+            include_usage: true,
+        }),
+        max_tokens: req.max_output_tokens,
+        reasoning_effort: req
+            .reasoning
+            .as_ref()
+            .filter(|r| !r.effort.is_empty())
+            .map(|r| gemini_effort(&r.effort).to_string()),
+        tools: (!tools.is_empty()).then_some(tools),
+        tool_choice: req.tool_choice.as_ref().map(|c| match c {
+            ToolChoice::Mode(mode) => ChatToolChoice::Mode(mode.clone()),
+            ToolChoice::Function { name, .. } => ChatToolChoice::function(name.clone()),
+        }),
+        ..Default::default()
     }
-    match &req["tool_choice"] {
-        Value::String(mode) => {
-            body.insert("tool_choice".into(), json!(mode));
-        }
-        Value::Object(o) if o.contains_key("name") => {
-            body.insert(
-                "tool_choice".into(),
-                json!({"type": "function", "function": {"name": o["name"]}}),
-            );
-        }
-        _ => {}
-    }
-    Value::Object(body)
 }
 
 /// Gemini takes none, low, medium or high and rejects anything else outright,
@@ -159,21 +180,6 @@ fn gemini_effort(effort: &str) -> &str {
     }
 }
 
-/// Codex returns a tool result as the content array it received, but chat
-/// completions takes a plain string on a `tool` message and rejects the whole
-/// request otherwise, which comes back as an empty stream.
-fn tool_output(output: &Value) -> String {
-    match output {
-        Value::String(s) => s.clone(),
-        Value::Array(parts) => parts
-            .iter()
-            .filter_map(|p| p["text"].as_str().or_else(|| p.as_str()))
-            .collect::<Vec<_>>()
-            .join(""),
-        other => other.to_string(),
-    }
-}
-
 /// Chat completions has no `developer` role.
 fn chat_role(role: &str) -> &str {
     match role {
@@ -182,18 +188,22 @@ fn chat_role(role: &str) -> &str {
     }
 }
 
-fn parts(content: &Value) -> Value {
-    json!(
+fn parts(content: &[ContentPart]) -> ChatContent {
+    ChatContent::Parts(
         content
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(|p| match p["type"].as_str() {
-                Some("input_image") =>
-                    json!({"type": "image_url", "image_url": {"url": p["image_url"]}}),
-                _ => json!({"type": "text", "text": p["text"]}),
+            .iter()
+            .map(|p| match p {
+                ContentPart::InputImage { image_url } => ChatPart::ImageUrl {
+                    image_url: ImageRef::Url(image_url.clone()),
+                },
+                ContentPart::InputText { text } | ContentPart::OutputText { text } => {
+                    ChatPart::Text { text: text.clone() }
+                }
+                ContentPart::Other => ChatPart::Text {
+                    text: String::new(),
+                },
             })
-            .collect::<Vec<_>>()
+            .collect(),
     )
 }
 
@@ -206,9 +216,9 @@ pub struct ChatToResponses {
     calls: Vec<OpenCall>,
     text: String,
     msg_id: Option<String>,
-    next_index: usize,
+    next_index: u64,
     finished: bool,
-    usage: Option<Value>,
+    usage: Option<Usage>,
     completed: bool,
     frames: usize,
     emitted: usize,
@@ -235,7 +245,7 @@ struct OpenCall {
     item_id: String,
     name: String,
     arguments: String,
-    index: usize,
+    index: u64,
     announced: bool,
 }
 
@@ -246,46 +256,72 @@ impl ChatToResponses {
         b
     }
 
-    pub fn feed(&mut self, chunk: &Value) -> Vec<Value> {
+    pub fn feed(&mut self, chunk: &ChatChunk) -> Vec<ResponsesEvent> {
         self.frames += 1;
         if self.first_frame.is_none() {
-            self.first_frame = Some(chunk.to_string().chars().take(400).collect());
+            self.first_frame = Some(
+                serde_json::to_string(chunk)
+                    .unwrap_or_default()
+                    .chars()
+                    .take(400)
+                    .collect(),
+            );
         }
+        let response_id = (!chunk.id.is_empty()).then(|| chunk.id.clone());
         let mut out = Vec::new();
         if !self.opened {
             self.opened = true;
-            out.push(json!({"type": "response.created", "response": {"id": chunk.get("id")}}));
+            out.push(ResponsesEvent::Created {
+                response: ResponseObj {
+                    id: response_id.clone(),
+                    ..Default::default()
+                },
+            });
         }
-        let delta = chunk.pointer("/choices/0/delta");
-        if let Some(text) = delta.and_then(|d| d.get("content")).and_then(Value::as_str)
+        let first = chunk.choices.first();
+        let delta = first.map(|c| &c.delta);
+        if let Some(text) = delta.and_then(|d| d.content.as_deref())
             && !text.is_empty()
         {
             // Codex attaches a delta to an item by id, so text streamed before
             // the item is announced is parsed and then dropped.
-            let id = self.msg_id.get_or_insert_with(|| {
-                format!("msg_{}", uuid::Uuid::new_v4().simple())
-            });
+            let id = self
+                .msg_id
+                .get_or_insert_with(|| format!("msg_{}", uuid::Uuid::new_v4().simple()))
+                .clone();
             if self.text.is_empty() {
-                out.push(json!({"type": "response.output_item.added",
-                    "output_index": 0,
-                    "item": {"type": "message", "id": id, "role": "assistant", "content": []}}));
-                out.push(json!({"type": "response.content_part.added",
-                    "item_id": id, "output_index": 0, "content_index": 0,
-                    "part": {"type": "output_text", "text": ""}}));
+                out.push(ResponsesEvent::OutputItemAdded {
+                    output_index: 0,
+                    item: OutputItem::Message {
+                        id: Some(id.clone()),
+                        role: Some("assistant".into()),
+                        status: None,
+                        content: Some(Vec::new()),
+                    },
+                });
+                out.push(ResponsesEvent::ContentPartAdded {
+                    item_id: Some(id.clone()),
+                    output_index: 0,
+                    content_index: 0,
+                    part: Some(OutputContentPart::OutputText {
+                        text: String::new(),
+                    }),
+                });
             }
-            out.push(json!({"type": "response.output_text.delta",
-                "item_id": id, "output_index": 0, "content_index": 0, "delta": text}));
+            out.push(ResponsesEvent::OutputTextDelta {
+                item_id: Some(id),
+                output_index: 0,
+                content_index: 0,
+                delta: text.to_string(),
+            });
             self.text.push_str(text);
         }
-        if let Some(calls) = delta.and_then(|d| d.get("tool_calls")).and_then(Value::as_array) {
+        if let Some(calls) = delta.and_then(|d| d.tool_calls.as_ref()) {
             for call in calls {
                 out.extend(self.tool_call(call));
             }
         }
-        if chunk
-            .pointer("/choices/0/finish_reason")
-            .is_some_and(|f| !f.is_null())
-        {
+        if first.is_some_and(|c| c.finish_reason.is_some()) {
             self.finished = true;
             for call in &self.calls {
                 if !call.announced {
@@ -294,32 +330,42 @@ impl ChatToResponses {
                 // A freeform tool takes raw text, so the single string it was
                 // offered as is unwrapped before the item is handed back.
                 if self.custom.contains(&call.name) {
-                    let input = serde_json::from_str::<Value>(&call.arguments)
+                    let input = serde_json::from_str::<HashMap<String, String>>(&call.arguments)
                         .ok()
-                        .and_then(|a| a[FREEFORM_ARG].as_str().map(String::from))
+                        .and_then(|mut a| a.remove(FREEFORM_ARG))
                         .unwrap_or_else(|| call.arguments.clone());
-                    out.push(json!({"type": "response.custom_tool_call_input.done",
-                        "item_id": call.item_id, "output_index": call.index,
-                        "input": input}));
-                    out.push(json!({"type": "response.output_item.done",
-                        "output_index": call.index,
-                        "item": {
-                            "type": "custom_tool_call", "id": call.item_id,
-                            "call_id": call.id, "name": call.name, "input": input,
-                            "status": "completed",
-                        }}));
+                    out.push(ResponsesEvent::CustomToolCallInputDone {
+                        item_id: Some(call.item_id.clone()),
+                        output_index: call.index,
+                        input: input.clone(),
+                    });
+                    out.push(ResponsesEvent::OutputItemDone {
+                        output_index: call.index,
+                        item: OutputItem::CustomToolCall {
+                            id: Some(call.item_id.clone()),
+                            call_id: call.id.clone(),
+                            name: call.name.clone(),
+                            input,
+                            status: Some("completed".into()),
+                        },
+                    });
                     continue;
                 }
-                out.push(json!({"type": "response.function_call_arguments.done",
-                    "item_id": call.item_id, "output_index": call.index,
-                    "arguments": call.arguments}));
-                out.push(json!({"type": "response.output_item.done",
-                    "output_index": call.index,
-                    "item": {
-                        "type": "function_call", "id": call.item_id, "call_id": call.id,
-                        "name": call.name, "arguments": call.arguments,
-                        "status": "completed",
-                    }}));
+                out.push(ResponsesEvent::FunctionCallArgumentsDone {
+                    item_id: Some(call.item_id.clone()),
+                    output_index: call.index,
+                    arguments: call.arguments.clone(),
+                });
+                out.push(ResponsesEvent::OutputItemDone {
+                    output_index: call.index,
+                    item: OutputItem::FunctionCall {
+                        id: Some(call.item_id.clone()),
+                        call_id: call.id.clone(),
+                        name: call.name.clone(),
+                        arguments: Some(call.arguments.clone()),
+                        status: Some("completed".into()),
+                    },
+                });
             }
             self.calls.clear();
             // The streaming translator reads text deltas, but `aggregate`
@@ -328,22 +374,25 @@ impl ChatToResponses {
             if !self.text.is_empty() {
                 let id = self.msg_id.clone().unwrap_or_default();
                 let text = std::mem::take(&mut self.text);
-                out.push(json!({"type": "response.output_text.done",
-                    "item_id": id, "output_index": 0, "content_index": 0, "text": text}));
-                out.push(json!({"type": "response.output_item.done",
-                    "output_index": 0,
-                    "item": {
-                        "type": "message", "id": id, "role": "assistant", "status": "completed",
-                        "content": [{"type": "output_text", "text": text}],
-                    }}));
+                out.push(ResponsesEvent::OutputTextDone {
+                    item_id: Some(id.clone()),
+                    output_index: 0,
+                    content_index: 0,
+                    text: text.clone(),
+                });
+                out.push(ResponsesEvent::OutputItemDone {
+                    output_index: 0,
+                    item: OutputItem::Message {
+                        id: Some(id),
+                        role: Some("assistant".into()),
+                        status: Some("completed".into()),
+                        content: Some(vec![OutputContentPart::OutputText { text }]),
+                    },
+                });
             }
         }
-        if let Some(usage) = chunk
-            .get("usage")
-            .filter(|u| !u.is_null())
-            .and_then(crate::gemini::usage::as_responses)
-        {
-            self.usage = Some(usage);
+        if let Some(usage) = &chunk.usage {
+            self.usage = Some(Usage::from(usage.clone()));
         }
         // Gemini reports usage on a chunk of its own, often before the one
         // carrying finish_reason, so emitting on usage alone closed the
@@ -353,9 +402,14 @@ impl ChatToResponses {
             && let Some(usage) = self.usage.take()
         {
             self.completed = true;
-            out.push(json!({"type": "response.completed", "response": {
-                "id": chunk.get("id"), "status": "completed", "usage": usage,
-            }}));
+            out.push(ResponsesEvent::Completed {
+                response: ResponseObj {
+                    id: response_id,
+                    status: Some("completed".into()),
+                    usage: Some(usage),
+                    error: None,
+                },
+            });
         }
         // `created` and `completed` carry no answer, so they do not count as
         // content when deciding whether the bridge produced anything.
@@ -363,30 +417,28 @@ impl ChatToResponses {
             .iter()
             .filter(|e| {
                 !matches!(
-                    e["type"].as_str(),
-                    Some("response.created") | Some("response.completed")
+                    e,
+                    ResponsesEvent::Created { .. } | ResponsesEvent::Completed { .. }
                 )
             })
             .count();
         out
     }
 
-    fn tool_call(&mut self, call: &Value) -> Vec<Value> {
-        let idx = call.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+    fn tool_call(&mut self, call: &ChatToolCall) -> Vec<ResponsesEvent> {
+        let idx = call.index.unwrap_or(0) as usize;
         if self.calls.len() <= idx {
             self.calls.resize_with(idx + 1, OpenCall::default);
         }
         let mut out = Vec::new();
         let slot = &mut self.calls[idx];
-        if let Some(id) = call.get("id").and_then(Value::as_str) {
-            slot.id = id.to_string();
+        if let Some(id) = &call.id {
+            slot.id = id.clone();
         }
-        if let Some(name) = call.pointer("/function/name").and_then(Value::as_str) {
-            slot.name = name.to_string();
+        if let Some(name) = &call.function.name {
+            slot.name = name.clone();
         }
-        if let Some(sig) = call
-            .pointer("/extra_content/google/thought_signature")
-            .and_then(Value::as_str)
+        if let Some(sig) = call.thought_signature()
             && !slot.id.is_empty()
         {
             remember_signature(&slot.id, sig);
@@ -397,23 +449,38 @@ impl ChatToResponses {
             slot.index = self.next_index;
             self.next_index += 1;
             let slot = &self.calls[idx];
-            let kind = if self.custom.contains(&slot.name) {
-                json!({"type": "custom_tool_call", "id": slot.item_id,
-                       "call_id": slot.id, "name": slot.name, "input": ""})
+            let item = if self.custom.contains(&slot.name) {
+                OutputItem::CustomToolCall {
+                    id: Some(slot.item_id.clone()),
+                    call_id: slot.id.clone(),
+                    name: slot.name.clone(),
+                    input: String::new(),
+                    status: None,
+                }
             } else {
-                json!({"type": "function_call", "id": slot.item_id,
-                       "call_id": slot.id, "name": slot.name, "arguments": ""})
+                OutputItem::FunctionCall {
+                    id: Some(slot.item_id.clone()),
+                    call_id: slot.id.clone(),
+                    name: slot.name.clone(),
+                    arguments: Some(String::new()),
+                    status: None,
+                }
             };
-            out.push(json!({"type": "response.output_item.added",
-                "output_index": slot.index, "item": kind}));
+            out.push(ResponsesEvent::OutputItemAdded {
+                output_index: slot.index,
+                item,
+            });
         }
         let slot = &mut self.calls[idx];
-        if let Some(args) = call.pointer("/function/arguments").and_then(Value::as_str)
+        if let Some(args) = call.function.arguments.as_deref()
             && !args.is_empty()
         {
             slot.arguments.push_str(args);
-            out.push(json!({"type": "response.function_call_arguments.delta",
-                "item_id": slot.item_id, "output_index": slot.index, "delta": args}));
+            out.push(ResponsesEvent::FunctionCallArgumentsDelta {
+                item_id: Some(slot.item_id.clone()),
+                output_index: slot.index,
+                delta: args.to_string(),
+            });
         }
         out
     }
@@ -421,15 +488,12 @@ impl ChatToResponses {
 
 /// A referer-restricted key is served over the native surface, which answers
 /// in Gemini's own frames, so that protocol is normalised before parsing.
-/// The bridge's frames as Responses-shaped JSON, before anything parses them
-/// into `ResponsesEvent`. The responses surface relays frames rather than
-/// events, so it needs them in this form.
-pub fn value_stream(
+pub fn event_stream(
     resp: reqwest::Response,
     protocol: crate::gemini::client::GeminiProtocol,
     model: &str,
     custom: BTreeSet<String>,
-) -> impl futures_util::Stream<Item = Value> + Send + use<> {
+) -> crate::codex::sse::EventStream {
     use crate::gemini::client::GeminiProtocol;
     use eventsource_stream::Eventsource;
     use futures_util::StreamExt;
@@ -449,9 +513,9 @@ pub fn value_stream(
     });
 
     let mut bridge = ChatToResponses::with_custom(custom);
-    chat_bytes.eventsource().flat_map(move |ev| {
+    let stream = chat_bytes.eventsource().flat_map(move |ev| {
         let events = match ev {
-            Ok(ev) if ev.data != "[DONE]" => serde_json::from_str::<Value>(&ev.data)
+            Ok(ev) if ev.data != "[DONE]" => serde_json::from_str::<ChatChunk>(&ev.data)
                 .map(|chunk| bridge.feed(&chunk))
                 .unwrap_or_default(),
             Ok(_) => Vec::new(),
@@ -461,33 +525,41 @@ pub fn value_stream(
             }
         };
         futures_util::stream::iter(events)
-    })
-}
-
-pub fn event_stream(
-    resp: reqwest::Response,
-    protocol: crate::gemini::client::GeminiProtocol,
-    model: &str,
-    custom: BTreeSet<String>,
-) -> crate::codex::sse::EventStream {
-    use futures_util::StreamExt;
-    let stream = value_stream(resp, protocol, model, custom)
-        .map(|e| {
-            serde_json::from_value(e).unwrap_or(crate::codex::types::ResponsesEvent::Other)
-        })
-        .boxed();
+    });
     Box::pin(stream)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    fn chunk(v: Value) -> ChatChunk {
+        serde_json::from_value(v).unwrap()
+    }
+
+    fn request(v: Value) -> ResponsesRequest {
+        serde_json::from_value(v).unwrap()
+    }
+
+    fn kinds(events: &[ResponsesEvent]) -> Vec<String> {
+        events
+            .iter()
+            .map(|e| {
+                serde_json::to_value(e).unwrap()["type"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect()
+    }
 
     fn feed(b: &mut ChatToResponses, v: Value) -> Vec<String> {
-        b.feed(&v)
-            .iter()
-            .map(|e| e["type"].as_str().unwrap().to_string())
-            .collect()
+        kinds(&b.feed(&chunk(v)))
+    }
+
+    fn item(event: &ResponsesEvent) -> Value {
+        serde_json::to_value(event).unwrap()["item"].clone()
     }
 
     #[test]
@@ -496,8 +568,12 @@ mod tests {
         let first = feed(&mut b, json!({"choices": [{"delta": {"content": "hi"}}]}));
         assert_eq!(
             first,
-            ["response.created", "response.output_item.added",
-             "response.content_part.added", "response.output_text.delta"]
+            [
+                "response.created",
+                "response.output_item.added",
+                "response.content_part.added",
+                "response.output_text.delta"
+            ]
         );
         let next = feed(&mut b, json!({"choices": [{"delta": {"content": "!"}}]}));
         assert_eq!(next, ["response.output_text.delta"]);
@@ -506,33 +582,43 @@ mod tests {
     #[test]
     fn a_tool_call_split_across_chunks_opens_once() {
         let mut b = ChatToResponses::default();
-        b.feed(&json!({"choices": [{"delta": {"tool_calls": [
-            {"index": 0, "id": "c1", "function": {"name": "Read", "arguments": "{\"p"}}]}}]}));
+        b.feed(&chunk(json!({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "id": "c1", "function": {"name": "Read", "arguments": "{\"p"}}]}}]})));
         let more = feed(
             &mut b,
             json!({"choices": [{"delta": {"tool_calls": [
                 {"index": 0, "function": {"arguments": "ath\":1}"}}]}}]}),
         );
         assert_eq!(more, ["response.function_call_arguments.delta"]);
-        let done = feed(&mut b, json!({"choices": [{"finish_reason": "tool_calls"}]}));
+        let done = feed(
+            &mut b,
+            json!({"choices": [{"finish_reason": "tool_calls"}]}),
+        );
         assert_eq!(
             done,
-            ["response.function_call_arguments.done", "response.output_item.done"]
+            [
+                "response.function_call_arguments.done",
+                "response.output_item.done"
+            ]
         );
         // An item done without its arguments is a call the client cannot run.
-        let last = b.feed(&json!({"choices": [{"finish_reason": "tool_calls"}]}));
+        let last = b.feed(&chunk(
+            json!({"choices": [{"finish_reason": "tool_calls"}]}),
+        ));
         assert!(last.is_empty(), "the turn closed twice: {last:?}");
     }
 
     #[test]
     fn a_finished_tool_call_carries_its_arguments() {
         let mut b = ChatToResponses::default();
-        b.feed(&json!({"choices": [{"delta": {"tool_calls": [
-            {"index": 0, "id": "c1", "function": {"name": "Read", "arguments": "{\"p"}}]}}]}));
-        b.feed(&json!({"choices": [{"delta": {"tool_calls": [
-            {"index": 0, "function": {"arguments": "ath\":1}"}}]}}]}));
-        let done = b.feed(&json!({"choices": [{"finish_reason": "tool_calls"}]}));
-        let item = &done[1]["item"];
+        b.feed(&chunk(json!({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "id": "c1", "function": {"name": "Read", "arguments": "{\"p"}}]}}]})));
+        b.feed(&chunk(json!({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "function": {"arguments": "ath\":1}"}}]}}]})));
+        let done = b.feed(&chunk(
+            json!({"choices": [{"finish_reason": "tool_calls"}]}),
+        ));
+        let item = item(&done[1]);
         assert_eq!(item["arguments"], "{\"path\":1}");
         assert_eq!(item["call_id"], "c1");
         assert_eq!(item["name"], "Read");
@@ -547,31 +633,48 @@ mod tests {
         let mut b = ChatToResponses::default();
         assert_eq!(
             feed(&mut b, json!({"choices": [{"delta": {"content": "hi"}}]})),
-            ["response.created", "response.output_item.added",
-             "response.content_part.added", "response.output_text.delta"]
+            [
+                "response.created",
+                "response.output_item.added",
+                "response.content_part.added",
+                "response.output_text.delta"
+            ]
         );
         assert_eq!(
-            feed(&mut b, json!({"choices": [{"delta": {}}], "usage": {"prompt_tokens": 1}})),
+            feed(
+                &mut b,
+                json!({"choices": [{"delta": {}}], "usage": {"prompt_tokens": 1}})
+            ),
             Vec::<String>::new()
         );
         assert_eq!(
-            feed(&mut b, json!({"choices": [{"delta": {}, "finish_reason": "stop"}]})),
-            ["response.output_text.done", "response.output_item.done", "response.completed"]
+            feed(
+                &mut b,
+                json!({"choices": [{"delta": {}, "finish_reason": "stop"}]})
+            ),
+            [
+                "response.output_text.done",
+                "response.output_item.done",
+                "response.completed"
+            ]
         );
         assert_eq!(
-            feed(&mut b, json!({"choices": [{"delta": {}}], "usage": {"prompt_tokens": 1}})),
+            feed(
+                &mut b,
+                json!({"choices": [{"delta": {}}], "usage": {"prompt_tokens": 1}})
+            ),
             Vec::<String>::new()
         );
     }
 
     #[test]
     fn the_developer_role_survives_as_system() {
-        let req = json!({
+        let req = request(json!({
             "model": "gemini-3.8-flash", "instructions": "sys", "stream": true,
             "input": [{"type": "message", "role": "developer",
                        "content": [{"type": "input_text", "text": "ctx"}]}],
-        });
-        let body = to_chat(&req);
+        }));
+        let body = serde_json::to_value(to_chat(&req)).unwrap();
         assert_eq!(body["messages"][1]["role"], "system");
         assert_eq!(body["messages"][1]["content"][0]["text"], "ctx");
     }
@@ -581,13 +684,12 @@ mod tests {
     #[test]
     fn an_unsupported_effort_clamps_instead_of_failing() {
         let with = |e: &str| {
-            to_chat(&json!({
+            to_chat(&request(json!({
                 "model": "gemini-3.8-flash", "instructions": "s", "stream": true,
                 "input": [], "reasoning": {"effort": e},
-            }))["reasoning_effort"]
-                .as_str()
-                .unwrap()
-                .to_string()
+            })))
+            .reasoning_effort
+            .unwrap()
         };
         assert_eq!(with("xhigh"), "high");
         assert_eq!(with("minimal"), "none");
@@ -600,23 +702,28 @@ mod tests {
     /// schema and codex refused the arguments it invented.
     #[test]
     fn a_freeform_tool_round_trips_as_raw_text() {
-        let req = json!({
+        let req = request(json!({
             "model": "gemini-3.8-flash", "instructions": "s", "stream": true, "input": [],
             "tools": [{"type": "custom", "name": "exec",
                        "format": {"type": "grammar", "syntax": "lark"}}],
-        });
+        }));
         let names = custom_tools(&req);
         assert!(names.contains("exec"));
 
-        let schema = &to_chat(&req)["tools"][0]["function"]["parameters"];
+        let body = serde_json::to_value(to_chat(&req)).unwrap();
+        let schema = &body["tools"][0]["function"]["parameters"];
         assert_eq!(schema["properties"]["input"]["type"], "string");
         assert_eq!(schema["required"][0], "input");
 
         let mut b = ChatToResponses::with_custom(names);
-        b.feed(&json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "c1",
-            "function": {"name": "exec", "arguments": "{\"input\":\"ls -la\"}"}}]}}]}));
-        let done = b.feed(&json!({"choices": [{"finish_reason": "tool_calls"}]}));
-        let item = &done[1]["item"];
+        b.feed(&chunk(
+            json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "c1",
+            "function": {"name": "exec", "arguments": "{\"input\":\"ls -la\"}"}}]}}]}),
+        ));
+        let done = b.feed(&chunk(
+            json!({"choices": [{"finish_reason": "tool_calls"}]}),
+        ));
+        let item = item(&done[1]);
         assert_eq!(item["type"], "custom_tool_call");
         assert_eq!(item["input"], "ls -la");
         assert_eq!(item["call_id"], "c1");
@@ -626,13 +733,14 @@ mod tests {
     /// call and its result have to map back onto chat messages.
     #[test]
     fn a_freeform_call_and_its_output_replay_as_messages() {
-        let body = to_chat(&json!({
+        let body = serde_json::to_value(to_chat(&request(json!({
             "model": "g", "instructions": "s", "stream": true,
             "input": [
                 {"type": "custom_tool_call", "call_id": "c1", "name": "exec", "input": "ls"},
                 {"type": "custom_tool_call_output", "call_id": "c1", "output": "a.txt"},
             ],
-        }));
+        }))))
+        .unwrap();
         let call = &body["messages"][1]["tool_calls"][0]["function"];
         assert_eq!(call["name"], "exec");
         assert_eq!(call["arguments"], "{\"input\":\"ls\"}");
@@ -645,21 +753,22 @@ mod tests {
     /// gemini reject the request and answer with an empty stream.
     #[test]
     fn a_tool_result_flattens_to_a_string() {
-        let body = to_chat(&json!({
+        let body = serde_json::to_value(to_chat(&request(json!({
             "model": "g", "instructions": "s", "stream": true,
             "input": [{"type": "custom_tool_call_output", "call_id": "c1", "output": [
                 {"type": "input_text", "text": "Script completed\n"},
                 {"type": "input_text", "text": "mango"},
             ]}],
-        }));
+        }))))
+        .unwrap();
         assert_eq!(body["messages"][1]["content"], "Script completed\nmango");
     }
 
     /// The responses surface forwards a body it received, so tool calls and
-    /// their results have to survive as JSON rather than as typed items.
+    /// their results have to survive the parse as the items codex sent.
     #[test]
-    fn a_tool_round_trip_survives_the_value_form() {
-        let req = json!({
+    fn a_tool_round_trip_survives_the_wire_form() {
+        let req = request(json!({
             "model": "gemini-3.8-flash", "instructions": "sys", "stream": true,
             "input": [
                 {"type": "function_call", "call_id": "c1", "name": "grep", "arguments": "{}"},
@@ -668,21 +777,91 @@ mod tests {
             "tools": [{"type": "function", "name": "grep", "description": "d",
                        "parameters": {"type": "object"}}],
             "tool_choice": "auto",
-        });
-        let body = to_chat(&req);
-        assert_eq!(body["messages"][1]["tool_calls"][0]["function"]["name"], "grep");
+        }));
+        let body = serde_json::to_value(to_chat(&req)).unwrap();
+        assert_eq!(
+            body["messages"][1]["tool_calls"][0]["function"]["name"],
+            "grep"
+        );
         assert_eq!(body["messages"][2]["role"], "tool");
         assert_eq!(body["messages"][2]["content"], "hit");
         assert_eq!(body["tools"][0]["function"]["name"], "grep");
         assert_eq!(body["tool_choice"], "auto");
         assert_eq!(body["stream_options"]["include_usage"], true);
     }
+
+    #[test]
+    fn stream_defaults_on_when_absent() {
+        let out = to_chat(&request(json!({
+            "model": "g", "instructions": "s",
+            "input": [],
+        })));
+        assert_eq!(out.stream, Some(true));
+        assert!(out.stream_options.is_some_and(|o| o.include_usage));
+    }
+
+    #[test]
+    fn a_call_without_arguments_replays_as_an_empty_object() {
+        let body = serde_json::to_value(to_chat(&request(json!({
+            "model": "g", "instructions": "s", "stream": true,
+            "input": [{"type": "function_call", "call_id": "c1", "name": "grep"}],
+        }))))
+        .unwrap();
+        assert_eq!(
+            body["messages"][1]["tool_calls"][0]["function"]["arguments"],
+            "{}"
+        );
+    }
+
+    #[test]
+    fn a_tool_choice_without_a_type_still_names_the_function() {
+        let body = serde_json::to_value(to_chat(&request(json!({
+            "model": "g", "instructions": "s", "stream": true,
+            "input": [], "tool_choice": {"name": "grep"},
+        }))))
+        .unwrap();
+        assert_eq!(body["tool_choice"]["function"]["name"], "grep");
+    }
+
+    #[test]
+    fn an_empty_effort_is_not_forwarded() {
+        let out = to_chat(&request(json!({
+            "model": "g", "instructions": "s", "stream": true,
+            "input": [], "reasoning": {"effort": ""},
+        })));
+        assert!(out.reasoning_effort.is_none());
+    }
+
+    #[test]
+    fn an_unknown_content_part_does_not_sink_the_request() {
+        let req = request(json!({
+            "model": "g", "instructions": "s", "stream": true,
+            "input": [{"type": "message", "role": "user",
+                       "content": [{"type": "input_file", "file_id": "f"},
+                                   {"type": "input_text", "text": "hi"}]}],
+        }));
+        let body = serde_json::to_value(to_chat(&req)).unwrap();
+        let content = body["messages"][1]["content"].as_array().unwrap().clone();
+        assert!(
+            content
+                .iter()
+                .any(|p| p.get("text").is_some_and(|t| t == "hi"))
+        );
+    }
+
+    #[test]
+    fn a_tool_without_a_name_is_dropped() {
+        let out = to_chat(&request(json!({
+            "model": "g", "instructions": "s", "stream": true, "input": [],
+            "tools": [{"type": "function", "parameters": {"type": "object"}}],
+        })));
+        assert!(out.tools.is_none());
+    }
 }
 
 #[cfg(test)]
 mod full_chain {
     use super::*;
-    use crate::codex::types::ResponsesEvent;
     use crate::gemini::native::NativeStream;
 
     /// The whole native path offline: gemini frames in, Responses events out.
@@ -702,16 +881,14 @@ mod full_chain {
                 if data == "[DONE]" {
                     continue;
                 }
-                let Ok(chunk) = serde_json::from_str::<Value>(data) else {
+                let Ok(chunk) = serde_json::from_str::<ChatChunk>(data) else {
                     continue;
                 };
                 for ev in bridge.feed(&chunk) {
-                    let parsed: ResponsesEvent =
-                        serde_json::from_value(ev.clone()).unwrap_or(ResponsesEvent::Other);
-                    if let ResponsesEvent::OutputTextDelta { delta } = &parsed {
+                    if let ResponsesEvent::OutputTextDelta { delta, .. } = &ev {
                         text.push_str(delta);
                     }
-                    kinds.push(ev["type"].as_str().unwrap().to_string());
+                    kinds.push(serde_json::to_value(&ev).unwrap()["type"].to_string());
                 }
             }
         }
@@ -722,27 +899,34 @@ mod full_chain {
 #[cfg(test)]
 mod real_chunk {
     use super::*;
-    use crate::codex::types::ResponsesEvent;
 
     #[test]
     fn a_real_gemini_chunk_survives_deserialisation() {
-        let chunk: Value = serde_json::from_str(r#"{"choices":[{"delta":{"content":"OK.","role":"assistant"},"index":0}],"created":1788373398,"id":"x","model":"gemini-3.8-flash","object":"chat.completion.chunk","usage":{"completion_tokens":2,"prompt_tokens":3,"total_tokens":71}}"#).unwrap();
-        let raw = ChatToResponses::default().feed(&chunk);
-        let kinds: Vec<_> = raw.iter().map(|e| e["type"].as_str().unwrap()).collect();
+        let chunk: ChatChunk = serde_json::from_str(r#"{"choices":[{"delta":{"content":"OK.","role":"assistant"},"index":0}],"created":1788373398,"id":"x","model":"gemini-3.8-flash","object":"chat.completion.chunk","usage":{"completion_tokens":2,"prompt_tokens":3,"total_tokens":71}}"#).unwrap();
+        let events = ChatToResponses::default().feed(&chunk);
+        let kinds: Vec<_> = events
+            .iter()
+            .map(|e| {
+                serde_json::to_value(e).unwrap()["type"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
         assert_eq!(
             kinds,
-            ["response.created", "response.output_item.added",
-             "response.content_part.added", "response.output_text.delta"]
+            [
+                "response.created",
+                "response.output_item.added",
+                "response.content_part.added",
+                "response.output_text.delta"
+            ]
         );
-        let parsed: Vec<ResponsesEvent> = raw
-            .into_iter()
-            .map(|e| serde_json::from_value(e).unwrap_or(ResponsesEvent::Other))
-            .collect();
         assert!(
-            parsed
+            events
                 .iter()
                 .any(|e| matches!(e, ResponsesEvent::OutputTextDelta { .. })),
-            "no text delta survived: {parsed:?}"
+            "no text delta survived: {events:?}"
         );
     }
 }
@@ -750,20 +934,21 @@ mod real_chunk {
 #[cfg(test)]
 mod aggregate_path {
     use super::*;
-    use crate::codex::types::{OutputContentPart, OutputItem, ResponsesEvent};
 
     #[test]
     fn a_finished_turn_restates_its_text_as_an_item() {
         let mut b = ChatToResponses::default();
-        b.feed(&serde_json::json!({"choices": [{"delta": {"content": "ok"}}]}));
-        let done = b.feed(&serde_json::json!({"choices": [{"finish_reason": "stop"}]}));
-        let items: Vec<ResponsesEvent> = done
-            .into_iter()
-            .map(|e| serde_json::from_value(e).unwrap_or(ResponsesEvent::Other))
-            .collect();
-        let text = items.iter().find_map(|e| match e {
+        let chunk = |v| serde_json::from_value::<ChatChunk>(v).unwrap();
+        b.feed(&chunk(
+            serde_json::json!({"choices": [{"delta": {"content": "ok"}}]}),
+        ));
+        let done = b.feed(&chunk(
+            serde_json::json!({"choices": [{"finish_reason": "stop"}]}),
+        ));
+        let text = done.iter().find_map(|e| match e {
             ResponsesEvent::OutputItemDone {
-                item: OutputItem::Message { content },
+                item: OutputItem::Message { content, .. },
+                ..
             } => content.as_ref().and_then(|c| c.first()).map(|p| match p {
                 OutputContentPart::OutputText { text } => text.clone(),
                 OutputContentPart::Other => String::new(),

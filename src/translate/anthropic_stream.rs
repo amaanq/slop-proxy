@@ -197,7 +197,7 @@ impl AnthropicStream {
                 );
                 out.push(AnthEvent::Ping.out());
             }
-            ResponsesEvent::OutputItemAdded { item } => match item {
+            ResponsesEvent::OutputItemAdded { item, .. } => match item {
                 OutputItem::Reasoning { .. } if self.emit_thinking => {
                     self.close_open(&mut out);
                     self.open_block(&mut out, OpenBlock::Thinking);
@@ -244,14 +244,14 @@ impl AnthropicStream {
                     out.push(self.delta(BlockDelta::Thinking { thinking: delta }));
                 }
             }
-            ResponsesEvent::OutputTextDelta { delta } => {
+            ResponsesEvent::OutputTextDelta { delta, .. } => {
                 if self.open != Some(OpenBlock::Text) {
                     self.close_open(&mut out);
                     self.open_block(&mut out, OpenBlock::Text);
                 }
                 out.push(self.delta(BlockDelta::Text { text: delta }));
             }
-            ResponsesEvent::FunctionCallArgumentsDelta { delta } => {
+            ResponsesEvent::FunctionCallArgumentsDelta { delta, .. } => {
                 if self.open == Some(OpenBlock::Tool) {
                     self.tool_args_seen = true;
                     out.push(self.delta(BlockDelta::InputJson {
@@ -259,7 +259,7 @@ impl AnthropicStream {
                     }));
                 }
             }
-            ResponsesEvent::OutputItemDone { item } => match item {
+            ResponsesEvent::OutputItemDone { item, .. } => match item {
                 OutputItem::Reasoning {
                     id,
                     encrypted_content,
@@ -285,7 +285,7 @@ impl AnthropicStream {
                     }
                 }
                 OutputItem::Message { .. } => self.close_open(&mut out),
-                OutputItem::Other => {}
+                OutputItem::Other | OutputItem::CustomToolCall { .. } => {}
             },
             ResponsesEvent::Completed { response } => {
                 self.finish(

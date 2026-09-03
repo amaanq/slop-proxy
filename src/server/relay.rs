@@ -1,17 +1,17 @@
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::http::HeaderMap;
 use axum::response::Response;
 use futures_util::StreamExt;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::value::RawValue;
 
 use super::auth::AuthInfo;
 use super::error::{Dialect, error_response, pool_error_response, pool_error_status};
 use super::{AppState, LogGuard, log_error, log_usage};
 use crate::anthropic::client::RelayHeaders;
 use crate::db::usage::UsageRecord;
-use crate::translate::UsageCapture;
 use crate::provider::Provider;
+use crate::translate::UsageCapture;
 
 const DIALECT: Dialect = Dialect::Anthropic;
 
@@ -21,26 +21,52 @@ pub struct Peek {
     pub model: String,
     pub effort: String,
     user_id: Option<String>,
+    system: Option<Box<RawValue>>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct PeekBody {
+    model: Option<String>,
+    effort: Option<String>,
+    thinking: Option<ThinkingPeek>,
+    metadata: Option<MetadataPeek>,
+    system: Option<Box<RawValue>>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct ThinkingPeek {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct MetadataPeek {
+    user_id: Option<String>,
 }
 
 impl Peek {
-    pub fn from_body(body: &Value) -> Self {
-        let get = |ptr: &str| body.pointer(ptr).and_then(Value::as_str).map(String::from);
+    pub fn from_slice(body: &[u8]) -> Self {
+        let peek: PeekBody = serde_json::from_slice(body).unwrap_or_default();
         Self {
-            model: get("/model").unwrap_or_default(),
+            model: peek.model.unwrap_or_default(),
             // Claude Code sends `effort` only when it is choosing the level
             // itself; with adaptive thinking on, `thinking.type` is what
             // carries the same signal.
-            effort: get("/effort")
-                .or_else(|| get("/thinking/type"))
+            effort: peek
+                .effort
+                .or_else(|| peek.thinking.and_then(|t| t.kind))
                 .unwrap_or_default(),
-            user_id: get("/metadata/user_id"),
+            user_id: peek.metadata.and_then(|m| m.user_id),
+            system: peek.system,
         }
     }
 
     /// Claude Code's metadata.user_id is stable for a session, which is
     /// exactly the granularity upstream prompt caching wants.
-    fn session_key(&self, body: &Value, auth: &AuthInfo) -> String {
+    fn session_key(&self, auth: &AuthInfo) -> String {
         if let Some(uid) = &self.user_id {
             return uid.clone();
         }
@@ -57,7 +83,7 @@ impl Peek {
 
         let mut h = HashWriter(hmac_sha256::Hash::new());
         h.0.update(auth.user.as_bytes());
-        if let Some(system) = body.get("system") {
+        if let Some(system) = &self.system {
             let _ = serde_json::to_writer(&mut h, system);
         }
         let d = h.0.finalize();
@@ -167,16 +193,23 @@ fn not_claude_code(user: &str, headers: &HeaderMap) -> Response {
     )
 }
 
+/// The body goes upstream untouched, so the parse here only feeds the log.
+fn anthropic_facts(body: &[u8], headers: &HeaderMap) -> super::facts::RequestFacts {
+    serde_json::from_slice::<crate::translate::anthropic_req::AnthropicRequest>(body)
+        .map(|r| super::facts::RequestFacts::from_anthropic(&r, headers))
+        .unwrap_or_else(|_| super::facts::RequestFacts::empty(headers))
+}
+
 pub async fn messages(
     state: AppState,
     auth: AuthInfo,
     headers: HeaderMap,
-    body: Value,
+    body: Bytes,
     peek: Peek,
 ) -> Response {
     let started = std::time::Instant::now();
-    let key = peek.session_key(&body, &auth);
-    let facts = super::facts::RequestFacts::extract(&body, &headers);
+    let key = peek.session_key(&auth);
+    let facts = anthropic_facts(&body, &headers);
     let record = UsageRecord {
         meter_id: Some(auth.meter_id),
         token_id: Some(auth.token_id),
@@ -288,12 +321,12 @@ pub async fn glm(
     state: AppState,
     auth: AuthInfo,
     headers: HeaderMap,
-    body: Value,
+    body: Bytes,
     peek: Peek,
 ) -> Response {
     let started = std::time::Instant::now();
-    let key = peek.session_key(&body, &auth);
-    let facts = super::facts::RequestFacts::extract(&body, &headers);
+    let key = peek.session_key(&auth);
+    let facts = anthropic_facts(&body, &headers);
     let record = UsageRecord {
         meter_id: Some(auth.meter_id),
         token_id: Some(auth.token_id),
@@ -388,7 +421,7 @@ pub async fn count_tokens(
     state: AppState,
     auth: AuthInfo,
     headers: HeaderMap,
-    body: Value,
+    body: Bytes,
     peek: Peek,
 ) -> Response {
     if state.cfg.anthropic.require_claude_code && !is_claude_code(&headers) {
@@ -396,7 +429,7 @@ pub async fn count_tokens(
     }
 
     let hdrs = relay_headers(&headers);
-    let key = peek.session_key(&body, &auth);
+    let key = peek.session_key(&auth);
     let resp = match state
         .anthropic
         .execute("/v1/messages/count_tokens", &body, &hdrs, &key)

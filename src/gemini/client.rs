@@ -1,4 +1,6 @@
-use serde_json::Value;
+use axum::body::Bytes;
+
+use crate::translate::chat::ChatRequest;
 
 use crate::config::GeminiConfig;
 use crate::gemini::native;
@@ -42,7 +44,7 @@ impl GeminiClient {
         &self,
         api_key: &str,
         account_referer: Option<&str>,
-        body: &Value,
+        body: &ChatRequest,
     ) -> Result<GeminiResponse, SendError> {
         let configured_referer = self
             .cfg
@@ -121,7 +123,7 @@ impl GeminiClient {
         model: &str,
         action: &str,
         query: Option<&str>,
-        body: &Value,
+        body: &Bytes,
     ) -> Result<reqwest::Response, SendError> {
         let base = self.cfg.base_url.trim_end_matches('/');
         let base = base.strip_suffix("/openai").unwrap_or(base);
@@ -130,7 +132,8 @@ impl GeminiClient {
             .http
             .post(format!("{base}/models/{model}:{action}{query}"))
             .header("x-goog-api-key", api_key)
-            .json(body);
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body.clone());
         let referer = account_referer.or_else(|| {
             self.cfg
                 .headers
@@ -193,16 +196,17 @@ impl GeminiClient {
         if !resp.status().is_success() {
             return Err(resp.status().to_string());
         }
-        let body: Value = resp.json().await.map_err(|e| e.to_string())?;
+        let body: crate::gemini::types::ModelList = resp.json().await.map_err(|e| e.to_string())?;
         // The two surfaces name the array differently, and the native one
         // prefixes every id with `models/`.
-        let ids = body
-            .get("data")
-            .or_else(|| body.get("models"))
-            .and_then(Value::as_array)
-            .ok_or_else(|| "no model array in the catalog".to_string())?
-            .iter()
-            .filter_map(|m| m.get("id").or_else(|| m.get("name"))?.as_str())
+        let entries = if body.data.is_empty() {
+            body.models
+        } else {
+            body.data
+        };
+        let ids = entries
+            .into_iter()
+            .filter_map(|m| m.id.or(m.name))
             .map(|id| id.trim_start_matches("models/").to_string())
             .collect();
         Ok(ids)
@@ -230,7 +234,7 @@ mod tests {
 
     use axum::Json;
     use axum::extract::Request;
-    use axum::routing::post;
+    use axum::routing::{get, post};
     use serde_json::json;
 
     use super::*;
@@ -269,10 +273,11 @@ mod tests {
             .send(
                 "test-key",
                 Some("https://example.test/"),
-                &json!({
+                &serde_json::from_value(json!({
                     "model": "gemini-flash-latest",
                     "messages": [{"role": "user", "content": "hi"}]
-                }),
+                }))
+                .unwrap(),
             )
             .await
             .unwrap();
@@ -285,6 +290,40 @@ mod tests {
         assert_eq!(
             uri.path(),
             "/v1beta/models/gemini-flash-latest:generateContent"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_catalog_is_not_an_error() {
+        let app = axum::Router::new().route("/models", get(|| async { Json(json!({"data": []})) }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let client = GeminiClient::new(GeminiConfig {
+            base_url: format!("http://{address}"),
+            ..GeminiConfig::default()
+        });
+        assert_eq!(client.models("test-key", None).await, Ok(vec![]));
+    }
+
+    #[tokio::test]
+    async fn the_native_catalog_strips_the_models_prefix() {
+        let app = axum::Router::new().route(
+            "/models",
+            get(|| async { Json(json!({"models": [{"name": "models/gemini-x"}]})) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let client = GeminiClient::new(GeminiConfig {
+            base_url: format!("http://{address}"),
+            ..GeminiConfig::default()
+        });
+        assert_eq!(
+            client.models("test-key", None).await,
+            Ok(vec!["gemini-x".to_string()])
         );
     }
 }

@@ -141,7 +141,7 @@ pub async fn serve(db: Db, cfg: Config, bind: &str) -> Result<()> {
         tracing::info!("loaded {} glm account(s)", glm.len().await);
     }
 
-    let prices = Arc::new(Prices::new(&cfg.db_path));
+    let prices = Arc::new(Prices::new(&cfg.db_path, cfg.pricing.url.clone()));
     prices.load().await;
     let state = AppState {
         db,

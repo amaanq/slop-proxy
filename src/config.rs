@@ -20,6 +20,7 @@ pub struct Config {
     pub gemini: GeminiConfig,
     pub zen: ZenConfig,
     pub glm: GlmConfig,
+    pub pricing: PricingConfig,
     pub models: ModelsConfig,
 }
 
@@ -39,6 +40,22 @@ impl Default for GeminiConfig {
             base_url: "https://generativelanguage.googleapis.com/v1beta/openai".into(),
             headers: BTreeMap::new(),
             soft_utilization_limit: 0.9,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct PricingConfig {
+    /// LiteLLM lands price additions on a staging branch and promotes them to
+    /// main on a release cut, so a day-0 model is priced there first.
+    pub url: String,
+}
+
+impl Default for PricingConfig {
+    fn default() -> Self {
+        Self {
+            url: "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json".into(),
         }
     }
 }
@@ -250,6 +267,7 @@ struct FileConfig {
     gemini: Option<GeminiConfig>,
     zen: Option<ZenConfig>,
     glm: Option<GlmConfig>,
+    pricing: Option<PricingConfig>,
     models: Option<ModelsConfig>,
 }
 
@@ -293,6 +311,7 @@ impl Config {
             gemini: file.gemini.unwrap_or_default(),
             zen: file.zen.unwrap_or_default(),
             glm: file.glm.unwrap_or_default(),
+            pricing: file.pricing.unwrap_or_default(),
             models: file.models.unwrap_or_default(),
         })
     }

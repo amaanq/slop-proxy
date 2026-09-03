@@ -67,6 +67,26 @@ slop-proxy accounts add-key \
 Referrer-restricted keys use Google's native Gemini surface because its
 OpenAI-compatible endpoint drops the referrer before validating the key.
 
+## Zen egress proxies
+
+Set `zen.proxy_urls` to send only OpenCode Zen traffic through HTTP proxies.
+Credentials may be included in each URL. Requests rotate across the configured
+egresses. A network failure skips that proxy for 30 seconds, while an anonymous
+`429` honors the upstream cooldown and moves the request to another proxy.
+
+```toml
+[zen]
+proxy_urls = [
+  "http://user:password@proxy-one.example:8080",
+  "http://user:password@proxy-two.example:8080",
+]
+```
+
+`zen.proxy_urls_file` reads one URL per line and may be combined with the inline
+list. Use the file setting when URLs contain credentials that should stay out
+of the config and the Nix store. Configuring either list disables direct Zen
+egress.
+
 ## Per-token limits and metering
 
 Each issued token can carry rolling-window limits. Omitted request or token

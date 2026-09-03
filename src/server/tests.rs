@@ -130,7 +130,7 @@ async fn spawn_proxy_with(models: ModelsConfig, anthropic_base: Option<String>) 
         .unwrap();
     let zen_pool = crate::pool::zen::ZenPool::load(
         db.clone(),
-        crate::zen::client::ZenClient::new(cfg.zen.clone()),
+        crate::zen::client::ZenClient::new(cfg.zen.clone()).unwrap(),
     )
     .await
     .unwrap();
@@ -433,7 +433,7 @@ async fn metrics_render_accounts_and_usage() {
         zen: Arc::new(
             crate::pool::zen::ZenPool::load(
                 db.clone(),
-                crate::zen::client::ZenClient::new(cfg.zen.clone()),
+                crate::zen::client::ZenClient::new(cfg.zen.clone()).unwrap(),
             )
             .await
             .unwrap(),

@@ -33,6 +33,7 @@ use crate::pool::glm::GlmPool;
 use crate::pool::zen::ZenPool;
 use crate::pricing::{Prices, Tokens};
 use crate::translate::UsageCapture;
+use crate::zen::client::ZenClient;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -130,7 +131,7 @@ pub async fn serve(db: Db, cfg: Config, bind: &str) -> Result<()> {
         tracing::info!("loaded {} gemini account(s)", gemini.len().await);
     }
 
-    let zen = ZenPool::load(db.clone(), crate::zen::client::ZenClient::new(cfg.zen.clone())).await?;
+    let zen = ZenPool::load(db.clone(), ZenClient::new(cfg.zen.clone())?).await?;
     if zen.len().await > 0 {
         tracing::info!("loaded {} zen account(s)", zen.len().await);
     }

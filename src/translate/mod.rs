@@ -1,7 +1,8 @@
 pub mod anthropic_req;
-pub mod gemini_bridge;
 pub mod anthropic_stream;
+pub mod chat;
 pub mod count_tokens;
+pub mod gemini_bridge;
 pub mod model_map;
 pub mod openai_req;
 pub mod openai_stream;
@@ -170,7 +171,7 @@ pub async fn aggregate(mut stream: EventStream, capture: &UsageCapture) -> Aggre
                     agg.id = id;
                 }
             }
-            ResponsesEvent::OutputItemDone { item } => match item {
+            ResponsesEvent::OutputItemDone { item, .. } => match item {
                 OutputItem::Message { content, .. } => {
                     let text = content
                         .unwrap_or_default()
@@ -211,7 +212,7 @@ pub async fn aggregate(mut stream: EventStream, capture: &UsageCapture) -> Aggre
                         arguments: arguments.unwrap_or_else(|| "{}".into()),
                     });
                 }
-                OutputItem::Other => {}
+                OutputItem::Other | OutputItem::CustomToolCall { .. } => {}
             },
             ResponsesEvent::Completed { response } => {
                 if let Some(u) = &response.usage {

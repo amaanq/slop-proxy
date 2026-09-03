@@ -53,7 +53,7 @@ debug = "line-tables-only"
 debug = false
 
 [profile.release]
-lto   = false
+lto = false
 strip = true
 
 [dev-dependencies]

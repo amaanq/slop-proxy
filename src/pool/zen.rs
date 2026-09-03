@@ -1,4 +1,4 @@
-use serde_json::Value;
+use axum::body::Bytes;
 
 use super::{PoolError, Slots};
 use crate::db::Db;
@@ -40,7 +40,7 @@ impl ZenPool {
 
     pub async fn execute(
         &self,
-        req: &Value,
+        req: &Bytes,
         session_key: &str,
     ) -> Result<(Option<i64>, reqwest::Response), PoolError> {
         let mut ranked = self.slots.list().await;
@@ -75,7 +75,9 @@ impl ZenPool {
                     last_err = Some(SendError::Auth(text));
                 }
                 Err(SendError::RateLimited { retry_after, body }) => {
-                    self.slots.cool_rate_limited(&slot, retry_after, 3600, 60).await;
+                    self.slots
+                        .cool_rate_limited(&slot, retry_after, 3600, 60)
+                        .await;
                     last_err = Some(SendError::RateLimited { retry_after, body });
                 }
                 Err(SendError::BadRequest(text)) => return Err(PoolError::BadRequest(text)),

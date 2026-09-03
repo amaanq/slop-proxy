@@ -1,12 +1,49 @@
 use axum::Json;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
-use serde_json::json;
+use serde::Serialize;
 
 /// Ten years out. Codex refreshes when it believes the grant is near expiry,
 /// and the refresh would go to OpenAI rather than here, so the claim is dated
 /// far enough ahead that it never fires.
 const LIFETIME_SECS: i64 = 10 * 365 * 24 * 3600;
+
+#[derive(Serialize)]
+struct Claims {
+    #[serde(rename = "https://api.openai.com/auth")]
+    auth: AuthClaim,
+    email: &'static str,
+    iat: i64,
+    exp: i64,
+}
+
+#[derive(Serialize)]
+struct AuthClaim {
+    chatgpt_account_id: &'static str,
+    chatgpt_plan_type: &'static str,
+}
+
+#[derive(Serialize)]
+struct AuthFile {
+    #[serde(rename = "OPENAI_API_KEY")]
+    openai_api_key: Option<()>,
+    tokens: Tokens,
+    last_refresh: String,
+}
+
+#[derive(Serialize)]
+struct Tokens {
+    id_token: String,
+    access_token: String,
+    refresh_token: String,
+    account_id: &'static str,
+}
+
+#[derive(Serialize)]
+struct Header {
+    alg: &'static str,
+    typ: &'static str,
+}
 
 /// Codex only asks a provider for its catalog in ChatGPT-auth mode, which
 /// reads the bearer from `auth.json` rather than `env_key`.
@@ -21,26 +58,26 @@ pub async fn codex_auth(headers: HeaderMap) -> Response {
     };
 
     let now = crate::clock::unix_now();
-    let claims = json!({
-        "https://api.openai.com/auth": {
-            "chatgpt_account_id": "slop-proxy",
-            "chatgpt_plan_type": "pro",
+    let claims = Claims {
+        auth: AuthClaim {
+            chatgpt_account_id: "slop-proxy",
+            chatgpt_plan_type: "pro",
         },
-        "email": "slop-proxy",
-        "iat": now,
-        "exp": now + LIFETIME_SECS,
-    });
+        email: "slop-proxy",
+        iat: now,
+        exp: now + LIFETIME_SECS,
+    };
 
-    Json(json!({
-        "OPENAI_API_KEY": null,
-        "tokens": {
-            "id_token": jwt(&claims),
-            "access_token": token,
-            "refresh_token": token,
-            "account_id": "slop-proxy",
+    Json(AuthFile {
+        openai_api_key: None,
+        tokens: Tokens {
+            id_token: jwt(&claims),
+            access_token: token.clone(),
+            refresh_token: token,
+            account_id: "slop-proxy",
         },
-        "last_refresh": crate::clock::rfc3339(now),
-    }))
+        last_refresh: crate::clock::rfc3339(now),
+    })
     .into_response()
 }
 
@@ -70,13 +107,16 @@ pub async fn codex_config(headers: HeaderMap) -> Response {
 
 /// Unsigned JWT. Codex reads the claims without verifying them, and the proxy
 /// is the only party that ever sees this file.
-fn jwt(claims: &serde_json::Value) -> String {
-    let part =
-        |v: &serde_json::Value| data_encoding::BASE64URL_NOPAD.encode(v.to_string().as_bytes());
+fn jwt<T: Serialize>(claims: &T) -> String {
+    let part = |json: String| data_encoding::BASE64URL_NOPAD.encode(json.as_bytes());
+    let header = Header {
+        alg: "none",
+        typ: "JWT",
+    };
     format!(
         "{}.{}.slop",
-        part(&json!({"alg": "none", "typ": "JWT"})),
-        part(claims)
+        part(serde_json::to_string(&header).unwrap_or_default()),
+        part(serde_json::to_string(claims).unwrap_or_default())
     )
 }
 

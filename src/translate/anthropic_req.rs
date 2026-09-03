@@ -1,9 +1,12 @@
-use serde::Deserialize;
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{decode_signature, model_map};
 use crate::codex::types::{
     ContentPart, InputItem, ReasoningConfig, ResponsesRequest, SummaryPart, ToolChoice, ToolDef,
+    ToolOutput,
 };
 use crate::config::Config;
 
@@ -148,9 +151,9 @@ pub struct AnthToolChoice {
 #[derive(Debug, Deserialize)]
 pub struct ThinkingConfig {
     #[serde(rename = "type", default)]
-    kind: Option<String>,
+    pub kind: Option<String>,
     #[serde(default)]
-    budget_tokens: Option<u64>,
+    pub budget_tokens: Option<u64>,
 }
 
 impl AnthropicRequest {
@@ -163,8 +166,49 @@ impl AnthropicRequest {
     }
 }
 
+#[derive(Serialize)]
+pub struct ObjectSchema {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    properties: BTreeMap<&'static str, PropertySchema>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    required: Vec<&'static str>,
+}
+
+#[derive(Serialize)]
+pub struct PropertySchema {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<&'static str>,
+}
+
+impl ObjectSchema {
+    pub fn empty() -> Self {
+        Self {
+            kind: "object",
+            properties: BTreeMap::new(),
+            required: Vec::new(),
+        }
+    }
+
+    pub fn one_string(name: &'static str, description: &'static str) -> Self {
+        Self {
+            kind: "object",
+            properties: BTreeMap::from([(
+                name,
+                PropertySchema {
+                    kind: "string",
+                    description: Some(description),
+                },
+            )]),
+            required: vec![name],
+        }
+    }
+}
+
 pub fn empty_schema() -> Value {
-    serde_json::json!({"type": "object", "properties": {}})
+    serde_json::to_value(ObjectSchema::empty()).expect("schema serializes")
 }
 
 pub fn to_responses(req: &AnthropicRequest, cfg: &Config) -> Result<ResponsesRequest, String> {
@@ -191,11 +235,11 @@ pub fn to_responses(req: &AnthropicRequest, cfg: &Config) -> Result<ResponsesReq
                 continue;
             };
             out.tools.push(ToolDef {
-                kind: "function",
+                kind: "function".into(),
                 name: name.clone(),
                 description: t.description.clone(),
                 strict: false,
-                parameters: t.input_schema.clone().unwrap_or_else(empty_schema),
+                parameters: Some(t.input_schema.clone().unwrap_or_else(empty_schema)),
             });
         }
     }
@@ -317,7 +361,7 @@ fn convert_message(msg: &AnthMessage, out: &mut Vec<InputItem>) -> Result<(), St
                 }
                 out.push(InputItem::FunctionCallOutput {
                     call_id: tool_use_id.clone(),
-                    output,
+                    output: ToolOutput::Text(output),
                 });
             }
             ContentBlock::Thinking {

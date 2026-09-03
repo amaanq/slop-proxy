@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use serde_json::Value;
+use axum::body::Bytes;
+
+use crate::translate::chat::ChatRequest;
 
 use super::{PoolError, Slot, Slots};
 use crate::db::Db;
@@ -12,12 +14,12 @@ use crate::upstream::SendError;
 /// the translation entirely, but shares the retry and cooldown policy.
 #[derive(Clone, Copy)]
 pub enum Call<'a> {
-    OpenAi(&'a Value),
+    OpenAi(&'a ChatRequest),
     Native {
         model: &'a str,
         action: &'a str,
         query: Option<&'a str>,
-        body: &'a Value,
+        body: &'a Bytes,
     },
 }
 

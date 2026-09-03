@@ -1,18 +1,18 @@
 use axum::body::{Body, Bytes};
 use axum::response::Response;
 use futures_util::{StreamExt, stream};
-use serde_json::Value;
 
 use super::auth::AuthInfo;
 use super::error::{Dialect, error_response, pool_error_response, pool_error_status};
 use super::relay::forwarded_response;
 use super::{AppState, LogGuard, log_error};
 use crate::db::usage::UsageRecord;
-use crate::provider::Provider;
 use crate::gemini::client::GeminiProtocol;
 use crate::gemini::native::NativeStream;
-use crate::gemini::usage::{ChatEnvelope, ChatUsage};
+use crate::gemini::types::{GenerateContentRequest, GenerateContentResponse, UsageMetadata};
+use crate::provider::Provider;
 use crate::translate::UsageCapture;
+use crate::translate::chat::{ChatEnvelope, ChatRequest, StreamOptions};
 
 const DIALECT: Dialect = Dialect::OpenAi;
 
@@ -22,19 +22,18 @@ const DIALECT: Dialect = Dialect::OpenAi;
 pub async fn chat_completions(
     state: AppState,
     auth: AuthInfo,
-    mut body: Value,
+    mut body: ChatRequest,
     model: String,
     facts: super::facts::RequestFacts,
 ) -> Response {
     let started = std::time::Instant::now();
-    let streaming = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
+    let streaming = body.stream.unwrap_or(false);
     // Without this the terminal chunk carries no usage and the request bills
     // as zero tokens.
-    if streaming && let Some(obj) = body.as_object_mut() {
-        obj.insert(
-            "stream_options".into(),
-            serde_json::json!({"include_usage": true}),
-        );
+    if streaming {
+        body.stream_options = Some(StreamOptions {
+            include_usage: true,
+        });
     }
 
     let record = UsageRecord {
@@ -137,7 +136,9 @@ pub async fn chat_completions(
         }
     };
     let bytes = if ok && protocol == GeminiProtocol::Native {
-        match crate::gemini::native::response(&bytes, &model) {
+        match crate::gemini::native::response(&bytes, &model)
+            .and_then(|c| serde_json::to_vec(&c).map_err(|e| e.to_string()))
+        {
             Ok(body) => Bytes::from(body),
             Err(error) => {
                 log_error(&state.db, record, 502, "upstream_decode");
@@ -166,14 +167,10 @@ pub async fn chat_completions(
 }
 
 /// Pins a conversation to one account.
-fn session_key(user: &str, body: &Value) -> String {
+fn session_key(user: &str, body: &ChatRequest) -> String {
     let mut h = hmac_sha256::Hash::new();
     h.update(user.as_bytes());
-    if let Some(first) = body
-        .get("messages")
-        .and_then(Value::as_array)
-        .and_then(|m| m.first())
-    {
+    if let Some(first) = body.messages.first() {
         h.update(serde_json::to_string(first).unwrap_or_default().as_bytes());
     }
     data_encoding::HEXLOWER.encode(&h.finalize())
@@ -225,7 +222,7 @@ pub async fn native(
     axum::extract::Path(spec): axum::extract::Path<String>,
     axum::extract::RawQuery(query): axum::extract::RawQuery,
     headers: axum::http::HeaderMap,
-    axum::Json(body): axum::Json<Value>,
+    body: Bytes,
 ) -> Response {
     let Some((model, action)) = spec.split_once(':') else {
         return error_response(
@@ -257,8 +254,19 @@ pub async fn native(
         return super::error::out_of_scope(DIALECT, crate::provider::Provider::Gemini);
     }
     let streaming = action == "streamGenerateContent";
-    let key = native_session_key(&auth.user, &body);
-    let facts = super::facts::RequestFacts::extract(&body, &headers);
+    let parsed = match serde_json::from_slice::<GenerateContentRequest>(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return error_response(
+                DIALECT,
+                400,
+                "invalid_request_error",
+                &format!("invalid request: {e}"),
+            );
+        }
+    };
+    let key = native_session_key(&auth.user, &parsed);
+    let facts = super::facts::RequestFacts::from_native(&parsed, &headers);
     let record = UsageRecord {
         meter_id: Some(auth.meter_id),
         token_id: Some(auth.token_id),
@@ -325,11 +333,11 @@ pub async fn native(
             return error_response(DIALECT, 502, "api_error", &e.to_string());
         }
     };
-    if ok && let Ok(v) = serde_json::from_slice::<Value>(&bytes) {
+    if ok && let Ok(v) = serde_json::from_slice::<GenerateContentResponse>(&bytes) {
         if let Some(reason) = finish_reason(&v) {
-            record.stop_reason = reason.to_ascii_lowercase();
+            record.stop_reason = reason.to_string();
         }
-        if let Some(u) = v.get("usageMetadata") {
+        if let Some(u) = &v.usage_metadata {
             apply_native_usage(&mut record, u);
         }
     }
@@ -339,19 +347,13 @@ pub async fn native(
         .unwrap_or_else(|e| error_response(DIALECT, 502, "api_error", &e.to_string()))
 }
 
-fn finish_reason(chunk: &Value) -> Option<&str> {
-    chunk
-        .pointer("/candidates/0/finishReason")
-        .and_then(Value::as_str)
+fn finish_reason(chunk: &GenerateContentResponse) -> Option<&'static str> {
+    chunk.candidates.first()?.finish_reason.map(|r| r.as_str())
 }
 
-fn apply_native_usage(record: &mut UsageRecord, usage: &Value) {
-    let Ok(chat) = serde_json::from_value::<ChatUsage>(crate::gemini::native::usage_value(usage))
-    else {
-        return;
-    };
+fn apply_native_usage(record: &mut UsageRecord, usage: &UsageMetadata) {
     let capture = UsageCapture::default();
-    capture.record(&chat.into());
+    capture.record(&crate::gemini::native::chat_usage(usage).into());
     let snap = capture.snapshot();
     record.input_tokens = snap.input_tokens;
     record.output_tokens = snap.output_tokens;
@@ -361,14 +363,10 @@ fn apply_native_usage(record: &mut UsageRecord, usage: &Value) {
 
 /// The native request nests its first turn under `contents`, where the chat
 /// dialect uses `messages`.
-fn native_session_key(user: &str, body: &Value) -> String {
+fn native_session_key(user: &str, body: &GenerateContentRequest) -> String {
     let mut h = hmac_sha256::Hash::new();
     h.update(user.as_bytes());
-    if let Some(first) = body
-        .get("contents")
-        .and_then(Value::as_array)
-        .and_then(|c| c.first())
-    {
+    if let Some(first) = body.contents.first() {
         h.update(serde_json::to_string(first).unwrap_or_default().as_bytes());
     }
     data_encoding::HEXLOWER.encode(&h.finalize())
@@ -399,17 +397,15 @@ impl NativeUsageScan {
                 continue;
             };
             let data = data.strip_prefix(b" ").unwrap_or(data);
-            let Ok(v) = serde_json::from_slice::<Value>(data) else {
+            let Ok(v) = serde_json::from_slice::<GenerateContentResponse>(data) else {
                 continue;
             };
             if let Some(reason) = finish_reason(&v) {
-                self.capture.note_stop_reason(&reason.to_ascii_lowercase());
+                self.capture.note_stop_reason(reason);
             }
-            if let Some(u) = v.get("usageMetadata")
-                && let Ok(chat) =
-                    serde_json::from_value::<ChatUsage>(crate::gemini::native::usage_value(u))
-            {
-                self.capture.record(&chat.into());
+            if let Some(u) = &v.usage_metadata {
+                self.capture
+                    .record(&crate::gemini::native::chat_usage(u).into());
             }
         }
     }

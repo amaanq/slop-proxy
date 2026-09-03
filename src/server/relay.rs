@@ -10,6 +10,9 @@ use super::error::{Dialect, error_response, pool_error_response, pool_error_stat
 use super::{AppState, LogGuard, log_error, log_usage};
 use crate::anthropic::client::RelayHeaders;
 use crate::db::usage::UsageRecord;
+use crate::pool::Route;
+use crate::pool::anthropic::Relay as AnthropicRelay;
+use crate::pool::glm::Relay as GlmRelay;
 use crate::provider::Provider;
 use crate::translate::UsageCapture;
 
@@ -230,24 +233,35 @@ pub async fn messages(
     };
 
     if state.cfg.anthropic.require_claude_code && !is_claude_code(&headers) {
-        log_error(&state.db, record, 403, "not_claude_code");
+        log_error(&state, record, 403, "not_claude_code");
         return not_claude_code(&auth.user, &headers);
     }
 
     let hdrs = relay_headers(&headers);
     let (account_id, resp) = match state
+        .pools
         .anthropic
-        .execute("/v1/messages", &body, &hdrs, &key)
+        .execute(
+            Route {
+                session_key: &key,
+                prefer_trusted: false,
+            },
+            AnthropicRelay {
+                path: "/v1/messages",
+                body: body.clone(),
+                hdrs: hdrs.clone(),
+            },
+        )
         .await
     {
         Ok(r) => r,
         Err(e) => {
-            log_error(&state.db, record, pool_error_status(&e), "pool");
+            log_error(&state, record, pool_error_status(&e), "pool");
             return pool_error_response(DIALECT, e);
         }
     };
     let mut record = record;
-    record.account_id = Some(account_id);
+    record.account_id = account_id;
     record.status = resp.status().as_u16() as i64;
 
     let streaming = resp
@@ -256,19 +270,13 @@ pub async fn messages(
         .and_then(|v| v.to_str().ok())
         .is_some_and(|ct| ct.contains("text/event-stream"));
     let mut builder = forwarded_response(&resp);
-    for (name, value) in pool_rate_limit_headers(&state.anthropic.pool_windows().await) {
+    for (name, value) in pool_rate_limit_headers(&state.pools.anthropic.pool_windows().await) {
         builder = builder.header(name, value);
     }
 
     if streaming {
         let capture = UsageCapture::default();
-        let guard = LogGuard::new(
-            state.db.clone(),
-            state.prices.clone(),
-            capture.clone(),
-            record,
-            started,
-        );
+        let guard = LogGuard::new(state.clone(), capture.clone(), record, started);
         let mut scan = SseScan::new(capture.clone());
         // `chain` only runs if the caller stayed to drain the body.
         let stream = resp
@@ -293,7 +301,7 @@ pub async fn messages(
         let bytes = match resp.bytes().await {
             Ok(b) => b,
             Err(e) => {
-                log_error(&state.db, record, 502, "upstream_read");
+                log_error(&state, record, 502, "upstream_read");
                 return error_response(DIALECT, 502, "api_error", &e.to_string());
             }
         };
@@ -307,7 +315,7 @@ pub async fn messages(
         } else {
             record.error_kind = Some("upstream_error".into());
         }
-        log_usage(&state.db, &state.prices, record);
+        log_usage(&state, record);
         builder
             .body(Body::from(bytes))
             .unwrap_or_else(|e| error_response(DIALECT, 502, "api_error", &e.to_string()))
@@ -346,15 +354,29 @@ pub async fn glm(
         ..Default::default()
     };
 
-    let (account_id, resp) = match state.glm.execute("/v1/messages", &body, &key).await {
+    let (account_id, resp) = match state
+        .pools
+        .glm
+        .execute(
+            Route {
+                session_key: &key,
+                prefer_trusted: false,
+            },
+            GlmRelay {
+                path: "/v1/messages",
+                body: body.clone(),
+            },
+        )
+        .await
+    {
         Ok(r) => r,
         Err(e) => {
-            log_error(&state.db, record, pool_error_status(&e), "pool");
+            log_error(&state, record, pool_error_status(&e), "pool");
             return pool_error_response(DIALECT, e);
         }
     };
     let mut record = record;
-    record.account_id = Some(account_id);
+    record.account_id = account_id;
     record.status = resp.status().as_u16() as i64;
 
     let streaming = resp
@@ -366,13 +388,7 @@ pub async fn glm(
 
     if streaming {
         let capture = UsageCapture::default();
-        let guard = LogGuard::new(
-            state.db.clone(),
-            state.prices.clone(),
-            capture.clone(),
-            record,
-            started,
-        );
+        let guard = LogGuard::new(state.clone(), capture.clone(), record, started);
         let mut scan = SseScan::new(capture.clone());
         let stream = resp
             .bytes_stream()
@@ -397,7 +413,7 @@ pub async fn glm(
     let bytes = match resp.bytes().await {
         Ok(b) => b,
         Err(e) => {
-            log_error(&state.db, record, 502, "upstream_read");
+            log_error(&state, record, 502, "upstream_read");
             return error_response(DIALECT, 502, "api_error", &e.to_string());
         }
     };
@@ -411,7 +427,7 @@ pub async fn glm(
     } else {
         record.error_kind = Some("upstream_error".into());
     }
-    log_usage(&state.db, &state.prices, record);
+    log_usage(&state, record);
     builder
         .body(Body::from(bytes))
         .unwrap_or_else(|e| error_response(DIALECT, 502, "api_error", &e.to_string()))
@@ -431,8 +447,19 @@ pub async fn count_tokens(
     let hdrs = relay_headers(&headers);
     let key = peek.session_key(&auth);
     let resp = match state
+        .pools
         .anthropic
-        .execute("/v1/messages/count_tokens", &body, &hdrs, &key)
+        .execute(
+            Route {
+                session_key: &key,
+                prefer_trusted: false,
+            },
+            AnthropicRelay {
+                path: "/v1/messages/count_tokens",
+                body: body.clone(),
+                hdrs: hdrs.clone(),
+            },
+        )
         .await
     {
         Ok((_, r)) => r,

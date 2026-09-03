@@ -15,6 +15,7 @@ use super::{AppState, LogGuard, cache_key, log_error, log_rejected, log_usage};
 use crate::codex::sse::{EventStream, event_stream};
 use crate::codex::types::{OutputItem, ResponsesEvent, ResponsesRequest, Usage};
 use crate::db::usage::UsageRecord;
+use crate::pool::Route;
 use crate::provider::Provider;
 use crate::translate::chat::ChatRequest;
 use crate::translate::openai_req;
@@ -38,19 +39,19 @@ pub async fn chat_completions(
     let req = match serde_json::from_slice::<ChatRequest>(&body) {
         Ok(r) => r,
         Err(e) => {
-            log_rejected(&state.db, &auth, "chat", "unknown");
+            log_rejected(&state, &auth, "chat", "unknown");
             return translation_error(DIALECT, &format!("invalid request: {e}"));
         }
     };
     let facts = super::facts::RequestFacts::from_chat(&req, &headers);
     let provider = state.cfg.models.route(&req.model);
     if !auth.may_use(provider) {
-        log_rejected(&state.db, &auth, "chat", &req.model);
+        log_rejected(&state, &auth, "chat", &req.model);
         return super::error::out_of_scope(DIALECT, provider);
     }
     match provider {
         Provider::Anthropic => {
-            log_rejected(&state.db, &auth, "chat", &req.model);
+            log_rejected(&state, &auth, "chat", &req.model);
             return translation_error(
                 DIALECT,
                 "this model is relayed to Anthropic and only available on /v1/messages",
@@ -61,7 +62,7 @@ pub async fn chat_completions(
             return super::gemini::chat_completions(state, auth, req, model, facts).await;
         }
         Provider::Glm => {
-            log_rejected(&state.db, &auth, "chat", &req.model);
+            log_rejected(&state, &auth, "chat", &req.model);
             return translation_error(DIALECT, "this model is served over /v1/messages");
         }
         Provider::Zen => {}
@@ -70,7 +71,7 @@ pub async fn chat_completions(
     let mut upstream_req = match openai_req::to_responses(&req, &state.cfg) {
         Ok(r) => r,
         Err(e) => {
-            log_rejected(&state.db, &auth, "chat", &req.model);
+            log_rejected(&state, &auth, "chat", &req.model);
             return translation_error(DIALECT, &e);
         }
     };
@@ -101,24 +102,40 @@ pub async fn chat_completions(
     let req_bytes = match serde_json::to_vec(&upstream_req) {
         Ok(v) => Bytes::from(v),
         Err(e) => {
-            log_error(&state.db, record, 400, "invalid_request");
+            log_error(&state, record, 400, "invalid_request");
             return translation_error(DIALECT, &format!("serializing request: {e}"));
         }
     };
     let session_key = upstream_req.prompt_cache_key.clone().unwrap_or_default();
     let dispatched = if provider == Provider::Zen {
-        state.zen.execute(&req_bytes, &session_key).await
+        state
+            .pools
+            .zen
+            .execute(
+                Route {
+                    session_key: &session_key,
+                    prefer_trusted: false,
+                },
+                req_bytes.clone(),
+            )
+            .await
     } else {
         state
+            .pools
             .codex
-            .execute(&req_bytes, auth.prefer_trusted, &session_key)
+            .execute(
+                Route {
+                    session_key: &session_key,
+                    prefer_trusted: auth.prefer_trusted,
+                },
+                req_bytes.clone(),
+            )
             .await
-            .map(|(id, resp)| (Some(id), resp))
     };
     let (account_id, resp) = match dispatched {
         Ok(r) => r,
         Err(e) => {
-            log_error(&state.db, record, pool_error_status(&e), "pool");
+            log_error(&state, record, pool_error_status(&e), "pool");
             return pool_error_response(DIALECT, e);
         }
     };
@@ -131,13 +148,7 @@ pub async fn chat_completions(
 
     if req.stream.unwrap_or(false) {
         let translator = OpenAiStream::new(req.model.clone(), req.include_usage(), capture.clone());
-        let guard = LogGuard::new(
-            state.db.clone(),
-            state.prices.clone(),
-            capture,
-            record,
-            started,
-        );
+        let guard = LogGuard::new(state.clone(), capture, record, started);
         stream_response(events, translator, guard)
     } else {
         let agg = aggregate(events, &capture).await;
@@ -150,11 +161,11 @@ pub async fn chat_completions(
             let msg = agg
                 .error_message
                 .unwrap_or_else(|| "upstream failure".into());
-            log_error(&state.db, record, 502, "upstream_failed");
+            log_error(&state, record, 502, "upstream_failed");
             return super::error::error_response(DIALECT, 502, "api_error", &msg);
         }
         record.error_kind = snap.error_kind;
-        log_usage(&state.db, &state.prices, record);
+        log_usage(&state, record);
         Json(render_aggregated(&agg, &req.model)).into_response()
     }
 }
@@ -229,7 +240,7 @@ pub async fn models(
     // understands its own. `anthropic-version` is required on every Anthropic
     // API call, so its presence identifies the caller.
     if headers.contains_key("anthropic-version") {
-        return match state.anthropic.models_raw().await {
+        return match state.pools.anthropic.models_raw().await {
             Ok(body) => ([("content-type", "application/json")], body).into_response(),
             Err(e) => super::error::error_response(
                 super::error::Dialect::Anthropic,
@@ -301,7 +312,7 @@ pub async fn models(
         }
     };
 
-    data.extend(state.zen.models().await.into_iter().filter_map(|id| {
+    data.extend(state.pools.zen.models().await.into_iter().filter_map(|id| {
         state
             .cfg
             .models
@@ -316,20 +327,28 @@ pub async fn models(
             })
     }));
 
-    data.extend(state.gemini.models().await.into_iter().filter_map(|id| {
+    data.extend(
         state
-            .cfg
-            .models
-            .route(&id)
-            .eq(&crate::provider::Provider::Gemini)
-            .then_some(ModelEntry {
-                id,
-                object: "model",
-                created,
-                owned_by: "google",
-                context_window: None,
-            })
-    }));
+            .pools
+            .gemini
+            .models()
+            .await
+            .into_iter()
+            .filter_map(|id| {
+                state
+                    .cfg
+                    .models
+                    .route(&id)
+                    .eq(&crate::provider::Provider::Gemini)
+                    .then_some(ModelEntry {
+                        id,
+                        object: "model",
+                        created,
+                        owned_by: "google",
+                        context_window: None,
+                    })
+            }),
+    );
 
     Json(ModelList {
         object: "list",
@@ -451,7 +470,7 @@ pub async fn responses_passthrough(
     };
     if provider == Provider::Gemini {
         let Some(typed) = typed else {
-            log_error(&state.db, record, 400, "invalid_request");
+            log_error(&state, record, 400, "invalid_request");
             return translation_error(
                 DIALECT,
                 "this request cannot be bridged to gemini; see the proxy log for the field that failed",
@@ -460,18 +479,34 @@ pub async fn responses_passthrough(
         return gemini_responses(state, record, typed, session_key, client_streams, started).await;
     }
     let dispatched = if provider == Provider::Zen {
-        state.zen.execute(&body, &session_key).await
+        state
+            .pools
+            .zen
+            .execute(
+                Route {
+                    session_key: &session_key,
+                    prefer_trusted: false,
+                },
+                body.clone(),
+            )
+            .await
     } else {
         state
+            .pools
             .codex
-            .execute(&body, auth.prefer_trusted, &session_key)
+            .execute(
+                Route {
+                    session_key: &session_key,
+                    prefer_trusted: auth.prefer_trusted,
+                },
+                body.clone(),
+            )
             .await
-            .map(|(id, resp)| (Some(id), resp))
     };
     let (account_id, resp) = match dispatched {
         Ok(r) => r,
         Err(e) => {
-            log_error(&state.db, record, pool_error_status(&e), "pool");
+            log_error(&state, record, pool_error_status(&e), "pool");
             return pool_error_response(DIALECT, e);
         }
     };
@@ -480,16 +515,10 @@ pub async fn responses_passthrough(
     let capture = UsageCapture::default();
 
     if client_streams {
-        let limits = rate_limit_headers(&state.codex.pool_windows().await);
+        let limits = rate_limit_headers(&state.pools.codex.pool_windows().await);
         return relay_stream(
             resp,
-            LogGuard::new(
-                state.db.clone(),
-                state.prices.clone(),
-                capture.clone(),
-                record,
-                started,
-            ),
+            LogGuard::new(state.clone(), capture.clone(), record, started),
             capture,
             limits,
         );
@@ -520,7 +549,7 @@ pub async fn responses_passthrough(
         record.output_tokens = snap.output_tokens;
         record.cache_read_tokens = snap.cache_read_tokens;
         record.reasoning_tokens = snap.reasoning_tokens;
-        log_usage(&state.db, &state.prices, record);
+        log_usage(&state, record);
         match final_response {
             Some(v) => {
                 ([("content-type", "application/json")], v.get().to_string()).into_response()
@@ -550,17 +579,24 @@ async fn gemini_responses(
     let custom = crate::translate::gemini_bridge::custom_tools(&req);
     let chat = crate::translate::gemini_bridge::to_chat(&req);
     let (account_id, upstream) = match state
+        .pools
         .gemini
-        .execute(crate::pool::gemini::Call::OpenAi(&chat), &session_key)
+        .execute(
+            Route {
+                session_key: &session_key,
+                prefer_trusted: false,
+            },
+            crate::pool::gemini::Call::OpenAi(Box::new(chat)),
+        )
         .await
     {
         Ok(r) => r,
         Err(e) => {
-            log_error(&state.db, record, pool_error_status(&e), "pool");
+            log_error(&state, record, pool_error_status(&e), "pool");
             return pool_error_response(DIALECT, e);
         }
     };
-    record.account_id = Some(account_id);
+    record.account_id = account_id;
     let capture = UsageCapture::default();
     let mut events = crate::translate::gemini_bridge::event_stream(
         upstream.response,
@@ -570,13 +606,7 @@ async fn gemini_responses(
     );
 
     if client_streams {
-        let guard = LogGuard::new(
-            state.db.clone(),
-            state.prices.clone(),
-            capture.clone(),
-            record,
-            started,
-        );
+        let guard = LogGuard::new(state.clone(), capture.clone(), record, started);
         let stream = events.map(move |event| {
             let _ = &guard;
             if let ResponsesEvent::Completed { response } = &event
@@ -610,7 +640,7 @@ async fn gemini_responses(
     record.output_tokens = snap.output_tokens;
     record.cache_read_tokens = snap.cache_read_tokens;
     record.reasoning_tokens = snap.reasoning_tokens;
-    log_usage(&state.db, &state.prices, record);
+    log_usage(&state, record);
     Json(NonStreamResponse {
         id: format!("resp_{}", uuid::Uuid::new_v4().simple()),
         object: "response",

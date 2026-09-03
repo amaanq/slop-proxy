@@ -1,25 +1,22 @@
-use std::sync::Arc;
-
 use axum::body::Bytes;
 
 use crate::translate::chat::ChatRequest;
 
-use super::{PoolError, Slot, Slots};
-use crate::db::Db;
-use crate::gemini::client::{GeminiClient, GeminiResponse};
+use super::{AuthPolicy, Backend, Cooldown, Pool, Route, Slot};
+use crate::gemini::client::{GeminiClient, GeminiProtocol, GeminiResponse};
 use crate::provider::Provider;
 use crate::upstream::SendError;
 
 /// What to send upstream. A caller already speaking the native dialect skips
 /// the translation entirely, but shares the retry and cooldown policy.
-#[derive(Clone, Copy)]
-pub enum Call<'a> {
-    OpenAi(&'a ChatRequest),
+#[derive(Clone)]
+pub enum Call {
+    OpenAi(Box<ChatRequest>),
     Native {
-        model: &'a str,
-        action: &'a str,
-        query: Option<&'a str>,
-        body: &'a Bytes,
+        model: String,
+        action: String,
+        query: Option<String>,
+        body: Bytes,
     },
 }
 
@@ -35,48 +32,60 @@ const RATE_LIMIT_COOLDOWN_SECS: i64 = 40;
 const STICKY_WAIT_SECS: i64 = RATE_LIMIT_COOLDOWN_SECS;
 
 /// Session-sticky pool over Gemini accounts.
-pub struct GeminiPool {
-    slots: Slots,
-    client: GeminiClient,
-    soft_limit: f64,
+pub type GeminiPool = Pool<GeminiClient>;
+
+impl Backend for GeminiClient {
+    const PROVIDER: Provider = Provider::Gemini;
+    const RATE_LIMIT: Cooldown = Cooldown {
+        max: 3600,
+        base: RATE_LIMIT_COOLDOWN_SECS,
+    };
+    // A static key cannot be refreshed into a working one, so a
+    // rejected key sits out rather than retrying in place.
+    const ON_AUTH: AuthPolicy = AuthPolicy::CoolKey(15 * 60);
+    const STICKY_WAIT_SECS: i64 = STICKY_WAIT_SECS;
+    type Request = Call;
+    type Response = GeminiResponse;
+
+    fn soft_limit(&self) -> f64 {
+        self.soft_utilization_limit()
+    }
+
+    async fn send(
+        &self,
+        token: &str,
+        slot: &Slot,
+        _route: Route<'_>,
+        req: &Self::Request,
+    ) -> Result<Self::Response, SendError> {
+        match req {
+            Call::OpenAi(body) => {
+                GeminiClient::send(self, token, slot.http_referer.as_deref(), body).await
+            }
+            Call::Native {
+                model,
+                action,
+                query,
+                body,
+            } => GeminiClient::send_native(
+                self,
+                token,
+                slot.http_referer.as_deref(),
+                model,
+                action,
+                query.as_deref(),
+                body,
+            )
+            .await
+            .map(|response| GeminiResponse {
+                response,
+                protocol: GeminiProtocol::Native,
+            }),
+        }
+    }
 }
 
-impl GeminiPool {
-    pub async fn load(db: Db, client: GeminiClient) -> eyre::Result<Self> {
-        Ok(Self {
-            soft_limit: client.soft_utilization_limit(),
-            slots: Slots::load(db, Provider::Gemini).await?,
-            client,
-        })
-    }
-
-    pub async fn len(&self) -> usize {
-        self.slots.len().await
-    }
-
-    pub async fn is_empty(&self) -> bool {
-        self.slots.is_empty().await
-    }
-
-    pub async fn reload(&self) -> eyre::Result<()> {
-        self.slots.reload().await
-    }
-
-    pub async fn snapshot(&self) -> Vec<super::AccountSnapshot> {
-        self.slots.snapshot().await
-    }
-
-    async fn ranked(&self, session_key: &str) -> Vec<Arc<Slot>> {
-        let mut scored = Vec::new();
-        for slot in self.slots.list().await {
-            let band = self.slots.band(&slot, self.soft_limit).await;
-            let score = super::rendezvous_score(session_key, slot.id);
-            scored.push((score, band, slot));
-        }
-        scored.sort_by_key(|(score, band, _)| (*band, std::cmp::Reverse(*score)));
-        scored.into_iter().map(|(_, _, s)| s).collect()
-    }
-
+impl Pool<GeminiClient> {
     /// The first account that answers. Every key sees the same catalog, so
     /// there is nothing to merge across accounts.
     pub async fn models(&self) -> Vec<String> {
@@ -84,97 +93,15 @@ impl GeminiPool {
             let Ok(key) = self.slots.fresh_token(&slot, false).await else {
                 continue;
             };
-            match self.client.models(&key, slot.http_referer.as_deref()).await {
+            match self
+                .backend
+                .models(&key, slot.http_referer.as_deref())
+                .await
+            {
                 Ok(ids) => return ids,
                 Err(e) => tracing::debug!("models for {}: {e}", slot.display),
             }
         }
         Vec::new()
-    }
-
-    pub async fn execute(
-        &self,
-        call: Call<'_>,
-        session_key: &str,
-    ) -> Result<(i64, GeminiResponse), PoolError> {
-        let ranked = self.ranked(session_key).await;
-        if ranked.is_empty() {
-            return Err(PoolError::NoAccounts(Provider::Gemini));
-        }
-        let mut last_err = Option::<SendError>::None;
-        let mut attempts = 0;
-
-        if let Some(preferred) = ranked.first() {
-            let left = self.slots.cooldown_left(preferred).await;
-            if (1..=STICKY_WAIT_SECS).contains(&left) {
-                tracing::debug!(
-                    account = %preferred.display,
-                    left,
-                    "waiting for the sticky gemini key rather than losing its cache"
-                );
-                tokio::time::sleep(std::time::Duration::from_secs(left as u64 + 1)).await;
-            }
-        }
-
-        for slot in ranked {
-            if attempts >= 3 {
-                break;
-            }
-            if !self.slots.try_claim(&slot).await {
-                continue;
-            }
-            attempts += 1;
-            let Ok(key) = self.slots.fresh_token(&slot, false).await else {
-                continue;
-            };
-
-            let referer = slot.http_referer.as_deref();
-            let sent = match call {
-                Call::OpenAi(body) => self.client.send(&key, referer, body).await,
-                Call::Native {
-                    model,
-                    action,
-                    query,
-                    body,
-                } => self
-                    .client
-                    .send_native(&key, referer, model, action, query, body)
-                    .await
-                    .map(|response| GeminiResponse {
-                        response,
-                        protocol: crate::gemini::client::GeminiProtocol::Native,
-                    }),
-            };
-            match sent {
-                Ok(resp) => {
-                    self.slots.mark_ok(&slot).await;
-                    return Ok((slot.id, resp));
-                }
-                // A static key cannot be refreshed into a working one, so a
-                // rejected key sits out rather than retrying in place.
-                Err(SendError::Auth(text)) => {
-                    self.slots.cool(&slot, 15 * 60, "key rejected").await;
-                    last_err = Some(SendError::Auth(text));
-                }
-                Err(SendError::RateLimited { retry_after, body }) => {
-                    self.slots
-                        .cool_rate_limited(&slot, retry_after, 3600, RATE_LIMIT_COOLDOWN_SECS)
-                        .await;
-                    last_err = Some(SendError::RateLimited { retry_after, body });
-                }
-                Err(SendError::BadRequest(text)) => return Err(PoolError::BadRequest(text)),
-                Err(e) => {
-                    self.slots.cool_failure(&slot).await;
-                    last_err = Some(e);
-                }
-            }
-        }
-
-        match last_err {
-            Some(SendError::RateLimited { .. }) | None => Err(PoolError::AllCoolingDown {
-                retry_after: self.slots.min_cooldown().await.max(30),
-            }),
-            Some(e) => Err(PoolError::Upstream(e.to_string())),
-        }
     }
 }

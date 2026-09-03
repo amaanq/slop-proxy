@@ -10,6 +10,7 @@ use crate::db::usage::UsageRecord;
 use crate::gemini::client::GeminiProtocol;
 use crate::gemini::native::NativeStream;
 use crate::gemini::types::{GenerateContentRequest, GenerateContentResponse, UsageMetadata};
+use crate::pool::Route;
 use crate::provider::Provider;
 use crate::translate::UsageCapture;
 use crate::translate::chat::{ChatEnvelope, ChatRequest, StreamOptions};
@@ -56,33 +57,34 @@ pub async fn chat_completions(
 
     let session_key = record.session_key.clone();
     let (account_id, upstream) = match state
+        .pools
         .gemini
-        .execute(crate::pool::gemini::Call::OpenAi(&body), &session_key)
+        .execute(
+            Route {
+                session_key: &session_key,
+                prefer_trusted: false,
+            },
+            crate::pool::gemini::Call::OpenAi(Box::new(body)),
+        )
         .await
     {
         Ok(r) => r,
         Err(e) => {
-            log_error(&state.db, record, pool_error_status(&e), "pool");
+            log_error(&state, record, pool_error_status(&e), "pool");
             return pool_error_response(DIALECT, e);
         }
     };
     let protocol = upstream.protocol;
     let resp = upstream.response;
     let mut record = record;
-    record.account_id = Some(account_id);
+    record.account_id = account_id;
     record.status = resp.status().as_u16() as i64;
 
     let builder = forwarded_response(&resp);
     let ok = resp.status().is_success();
     if streaming && ok && protocol == GeminiProtocol::Native {
         let capture = UsageCapture::default();
-        let guard = LogGuard::new(
-            state.db.clone(),
-            state.prices.clone(),
-            capture.clone(),
-            record,
-            started,
-        );
+        let guard = LogGuard::new(state.clone(), capture.clone(), record, started);
         let mut native = NativeStream::new(&model);
         let mut scan = ChatUsageScan::new(capture);
         let stream = resp
@@ -108,13 +110,7 @@ pub async fn chat_completions(
     }
     if streaming && protocol == GeminiProtocol::OpenAi {
         let capture = UsageCapture::default();
-        let guard = LogGuard::new(
-            state.db.clone(),
-            state.prices.clone(),
-            capture.clone(),
-            record,
-            started,
-        );
+        let guard = LogGuard::new(state.clone(), capture.clone(), record, started);
         let mut scan = ChatUsageScan::new(capture);
         let stream = resp.bytes_stream().map(move |item| {
             let _ = &guard;
@@ -131,7 +127,7 @@ pub async fn chat_completions(
     let bytes = match resp.bytes().await {
         Ok(b) => b,
         Err(e) => {
-            log_error(&state.db, record, 502, "upstream_read");
+            log_error(&state, record, 502, "upstream_read");
             return error_response(DIALECT, 502, "api_error", &e.to_string());
         }
     };
@@ -141,7 +137,7 @@ pub async fn chat_completions(
         {
             Ok(body) => Bytes::from(body),
             Err(error) => {
-                log_error(&state.db, record, 502, "upstream_decode");
+                log_error(&state, record, 502, "upstream_decode");
                 return error_response(DIALECT, 502, "api_error", &error);
             }
         }
@@ -160,7 +156,7 @@ pub async fn chat_completions(
         record.cache_read_tokens = snap.cache_read_tokens;
         record.reasoning_tokens = snap.reasoning_tokens;
     }
-    super::log_usage(&state.db, &state.prices, record);
+    super::log_usage(&state, record);
     builder
         .body(Body::from(bytes))
         .unwrap_or_else(|e| error_response(DIALECT, 502, "api_error", &e.to_string()))
@@ -285,34 +281,39 @@ pub async fn native(
         ..Default::default()
     };
     let call = crate::pool::gemini::Call::Native {
-        model,
-        action,
-        query: query.as_deref(),
-        body: &body,
+        model: model.to_string(),
+        action: action.to_string(),
+        query,
+        body,
     };
-    let (account_id, upstream) = match state.gemini.execute(call, &key).await {
+    let (account_id, upstream) = match state
+        .pools
+        .gemini
+        .execute(
+            Route {
+                session_key: &key,
+                prefer_trusted: false,
+            },
+            call,
+        )
+        .await
+    {
         Ok(r) => r,
         Err(e) => {
-            log_error(&state.db, record, pool_error_status(&e), "pool");
+            log_error(&state, record, pool_error_status(&e), "pool");
             return pool_error_response(DIALECT, e);
         }
     };
     let resp = upstream.response;
     let mut record = record;
-    record.account_id = Some(account_id);
+    record.account_id = account_id;
     record.status = resp.status().as_u16() as i64;
     let ok = resp.status().is_success();
     let builder = forwarded_response(&resp);
 
     if streaming {
         let capture = UsageCapture::default();
-        let guard = LogGuard::new(
-            state.db.clone(),
-            state.prices.clone(),
-            capture.clone(),
-            record,
-            started,
-        );
+        let guard = LogGuard::new(state.clone(), capture.clone(), record, started);
         let mut scan = NativeUsageScan::new(capture);
         let stream = resp.bytes_stream().map(move |item| {
             let _ = &guard;
@@ -329,7 +330,7 @@ pub async fn native(
     let bytes = match resp.bytes().await {
         Ok(b) => b,
         Err(e) => {
-            log_error(&state.db, record, 502, "upstream_read");
+            log_error(&state, record, 502, "upstream_read");
             return error_response(DIALECT, 502, "api_error", &e.to_string());
         }
     };
@@ -341,7 +342,7 @@ pub async fn native(
             apply_native_usage(&mut record, u);
         }
     }
-    super::log_usage(&state.db, &state.prices, record);
+    super::log_usage(&state, record);
     builder
         .body(Body::from(bytes))
         .unwrap_or_else(|e| error_response(DIALECT, 502, "api_error", &e.to_string()))

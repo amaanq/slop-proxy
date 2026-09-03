@@ -4,14 +4,22 @@ pub mod gemini;
 pub mod glm;
 pub mod zen;
 
+use std::cmp::Reverse;
 use std::sync::Arc;
+use std::time::Duration;
 
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock};
 
+use self::anthropic::AnthropicPool;
+use self::codex::CodexPool;
+use self::gemini::GeminiPool;
+use self::glm::GlmPool;
+use self::zen::ZenPool;
 use crate::db::Db;
 use crate::oauth::refresh::RefreshError;
 use crate::provider::{AuthMode, Provider};
+use crate::upstream::SendError;
 
 #[derive(Debug, Error)]
 pub enum PoolError {
@@ -25,7 +33,328 @@ pub enum PoolError {
     Upstream(String),
 }
 
-pub(crate) struct Slot {
+pub struct Cooldown {
+    pub max: i64,
+    pub base: i64,
+}
+
+pub enum AuthPolicy {
+    RefreshOnce,
+    CoolKey(i64),
+}
+
+#[derive(Clone, Copy)]
+pub struct Route<'a> {
+    pub session_key: &'a str,
+    pub prefer_trusted: bool,
+}
+
+pub trait Backend: Send + Sync + 'static {
+    const PROVIDER: Provider;
+    const RATE_LIMIT: Cooldown;
+    const ON_AUTH: AuthPolicy;
+    const ATTEMPTS: usize = 3;
+    /// Accounts come in two tiers and a token may prefer one, codex only.
+    const TIERED: bool = false;
+    /// A session waits this long for its own account's cooldown rather than losing the prompt cache.
+    const STICKY_WAIT_SECS: i64 = 0;
+    /// The backend serves without an account, zen's free tier.
+    const ANONYMOUS: bool = false;
+    type Request: Clone + Send + Sync;
+    type Response: Send;
+    fn soft_limit(&self) -> f64 {
+        1.0
+    }
+    async fn send(
+        &self,
+        token: &str,
+        slot: &Slot,
+        route: Route<'_>,
+        req: &Self::Request,
+    ) -> Result<Self::Response, SendError>;
+    async fn send_anonymous(&self, req: &Self::Request) -> Result<Self::Response, SendError> {
+        let _ = req;
+        Err(SendError::Network("no accounts".into()))
+    }
+    /// A 400 that describes this account rather than the request.
+    fn retryable_bad_request(&self, body: &str) -> bool {
+        let _ = body;
+        false
+    }
+    fn usage_from(&self, resp: &Self::Response) -> Option<AccountUsage> {
+        let _ = resp;
+        None
+    }
+}
+
+pub struct Pool<B: Backend> {
+    pub(crate) slots: Slots,
+    pub(crate) backend: B,
+}
+
+impl<B: Backend> Pool<B> {
+    pub async fn load(db: Db, backend: B) -> eyre::Result<Self> {
+        Ok(Self {
+            slots: Slots::load(db, B::PROVIDER).await?,
+            backend,
+        })
+    }
+
+    pub fn backend(&self) -> &B {
+        &self.backend
+    }
+
+    pub async fn len(&self) -> usize {
+        self.slots.len().await
+    }
+
+    pub async fn is_empty(&self) -> bool {
+        self.slots.is_empty().await
+    }
+
+    pub async fn reload(&self) -> eyre::Result<()> {
+        self.slots.reload().await
+    }
+
+    pub async fn snapshot(&self) -> Vec<AccountSnapshot> {
+        self.slots.snapshot().await
+    }
+
+    /// Candidates are tried with capacity ahead of preference, so an account
+    /// with room left beats a preferred one that is nearly spent, and only
+    /// then does the token's trusted preference break the tie. Within a group
+    /// a session sticks to one account, since a prompt cache lives on the
+    /// account that built it and scattering re-bills the whole prefix.
+    pub(crate) async fn ranked(&self, route: Route<'_>) -> Vec<Arc<Slot>> {
+        let mut scored = Vec::new();
+        for slot in self.slots.list().await {
+            let band = self.slots.band(&slot, self.backend.soft_limit()).await;
+            scored.push((
+                band,
+                B::TIERED && slot.trusted != route.prefer_trusted,
+                Reverse(rendezvous_score(route.session_key, slot.id)),
+                slot,
+            ));
+        }
+        scored.sort_by_key(|(band, mismatch, score, _)| (*band, *mismatch, *score));
+        scored.into_iter().map(|(_, _, _, slot)| slot).collect()
+    }
+
+    async fn served(&self, slot: &Arc<Slot>, resp: B::Response) -> B::Response {
+        self.slots.mark_ok(slot).await;
+        if let Some(usage) = self.backend.usage_from(&resp) {
+            self.slots.note_usage(slot, usage).await;
+        }
+        resp
+    }
+
+    pub async fn execute(
+        &self,
+        route: Route<'_>,
+        req: B::Request,
+    ) -> Result<(Option<i64>, B::Response), PoolError> {
+        let ranked = self.ranked(route).await;
+        if ranked.is_empty() {
+            if B::ANONYMOUS {
+                return match self.backend.send_anonymous(&req).await {
+                    Ok(r) => Ok((None, r)),
+                    Err(SendError::BadRequest(b)) => Err(PoolError::BadRequest(b)),
+                    Err(SendError::RateLimited { retry_after, .. }) => {
+                        Err(PoolError::AllCoolingDown {
+                            retry_after: retry_after.unwrap_or(30),
+                        })
+                    }
+                    Err(e) => Err(PoolError::Upstream(e.to_string())),
+                };
+            }
+            return Err(PoolError::NoAccounts(B::PROVIDER));
+        }
+        if B::STICKY_WAIT_SECS > 0
+            && let Some(preferred) = ranked.first()
+        {
+            let left = self.slots.cooldown_left(preferred).await;
+            if (1..=B::STICKY_WAIT_SECS).contains(&left) {
+                tracing::debug!(
+                    account = %preferred.display,
+                    left,
+                    "waiting for the sticky gemini key rather than losing its cache"
+                );
+                tokio::time::sleep(Duration::from_secs(left as u64 + 1)).await;
+            }
+        }
+        let mut last_err = Option::<SendError>::None;
+        let mut attempts = 0;
+        for slot in ranked {
+            if attempts >= B::ATTEMPTS {
+                break;
+            }
+            if !self.slots.try_claim(&slot).await {
+                continue;
+            }
+            attempts += 1;
+            let Ok(token) = self.slots.fresh_token(&slot, false).await else {
+                continue;
+            };
+            match self.backend.send(&token, &slot, route, &req).await {
+                Ok(resp) => return Ok((Some(slot.id), self.served(&slot, resp).await)),
+                Err(SendError::Auth(text)) => match B::ON_AUTH {
+                    AuthPolicy::CoolKey(secs) => {
+                        self.slots.cool(&slot, secs, "key rejected").await;
+                        last_err = Some(SendError::Auth(text));
+                    }
+                    AuthPolicy::RefreshOnce => {
+                        tracing::warn!("account {} got 401, forcing refresh", slot.display);
+                        if let Ok(token) = self.slots.fresh_token(&slot, true).await {
+                            match self.backend.send(&token, &slot, route, &req).await {
+                                Ok(resp) => {
+                                    return Ok((Some(slot.id), self.served(&slot, resp).await));
+                                }
+                                Err(e) => {
+                                    self.slots.cool(&slot, 60, "post-refresh failure").await;
+                                    last_err = Some(e);
+                                }
+                            }
+                        } else {
+                            last_err = Some(SendError::Auth(text));
+                        }
+                    }
+                },
+                Err(SendError::RateLimited { retry_after, body }) => {
+                    self.slots
+                        .cool_rate_limited(
+                            &slot,
+                            retry_after,
+                            B::RATE_LIMIT.max,
+                            B::RATE_LIMIT.base,
+                        )
+                        .await;
+                    last_err = Some(SendError::RateLimited { retry_after, body });
+                }
+                Err(SendError::BadRequest(body)) if self.backend.retryable_bad_request(&body) => {
+                    tracing::warn!(
+                        account = %slot.display,
+                        "account cannot serve this model, trying another: {body}"
+                    );
+                    last_err = Some(SendError::BadRequest(body));
+                }
+                Err(SendError::BadRequest(body)) => {
+                    return Err(PoolError::BadRequest(body));
+                }
+                Err(e) => {
+                    self.slots.cool_failure(&slot).await;
+                    last_err = Some(e);
+                }
+            }
+        }
+        match last_err {
+            Some(SendError::BadRequest(b)) => Err(PoolError::BadRequest(b)),
+            Some(SendError::RateLimited { .. }) | None => Err(PoolError::AllCoolingDown {
+                retry_after: self.slots.min_cooldown().await.max(30),
+            }),
+            Some(e) => Err(PoolError::Upstream(e.to_string())),
+        }
+    }
+}
+
+pub struct Pools {
+    pub codex: CodexPool,
+    pub anthropic: AnthropicPool,
+    pub gemini: GeminiPool,
+    pub zen: ZenPool,
+    pub glm: GlmPool,
+}
+
+impl Pools {
+    pub async fn load(db: &Db, cfg: &crate::config::Config) -> eyre::Result<Self> {
+        let codex = CodexPool::load(
+            db.clone(),
+            crate::codex::client::CodexClient::new(cfg.codex.clone()),
+        )
+        .await?;
+        if codex.is_empty().await {
+            tracing::warn!("no codex accounts in the database; run `slop-proxy login`");
+        } else {
+            tracing::info!("loaded {} codex account(s)", codex.len().await);
+        }
+        let anthropic = AnthropicPool::load(
+            db.clone(),
+            crate::anthropic::client::AnthropicClient::new(cfg.anthropic.clone()),
+        )
+        .await?;
+        if anthropic.is_empty().await {
+            tracing::warn!(
+                "no anthropic accounts in the database; run `slop-proxy login --provider anthropic`"
+            );
+        } else {
+            tracing::info!("loaded {} anthropic account(s)", anthropic.len().await);
+        }
+        let gemini = GeminiPool::load(
+            db.clone(),
+            crate::gemini::client::GeminiClient::new(cfg.gemini.clone()),
+        )
+        .await?;
+        if !gemini.is_empty().await {
+            tracing::info!("loaded {} gemini account(s)", gemini.len().await);
+        }
+        let zen = ZenPool::load(
+            db.clone(),
+            crate::zen::client::ZenClient::new(cfg.zen.clone())?,
+        )
+        .await?;
+        if zen.len().await > 0 {
+            tracing::info!("loaded {} zen account(s)", zen.len().await);
+        }
+        let glm = GlmPool::load(
+            db.clone(),
+            crate::glm::client::GlmClient::new(cfg.glm.clone()),
+        )
+        .await?;
+        if glm.len().await > 0 {
+            tracing::info!("loaded {} glm account(s)", glm.len().await);
+        }
+        Ok(Self {
+            codex,
+            anthropic,
+            gemini,
+            zen,
+            glm,
+        })
+    }
+
+    pub async fn reload(&self) {
+        if let Err(e) = self.codex.reload().await {
+            tracing::warn!("reloading {} accounts: {e}", Provider::OpenAi);
+        }
+        if let Err(e) = self.anthropic.reload().await {
+            tracing::warn!("reloading {} accounts: {e}", Provider::Anthropic);
+        }
+        if let Err(e) = self.gemini.reload().await {
+            tracing::warn!("reloading {} accounts: {e}", Provider::Gemini);
+        }
+        if let Err(e) = self.zen.reload().await {
+            tracing::warn!("reloading {} accounts: {e}", Provider::Zen);
+        }
+        if let Err(e) = self.glm.reload().await {
+            tracing::warn!("reloading {} accounts: {e}", Provider::Glm);
+        }
+    }
+
+    pub async fn poll_usage(&self) {
+        self.codex.poll_usage().await;
+        self.anthropic.poll_usage().await;
+    }
+
+    pub async fn snapshots(&self) -> Vec<AccountSnapshot> {
+        let mut out = self.codex.snapshot().await;
+        out.extend(self.anthropic.snapshot().await);
+        out.extend(self.gemini.snapshot().await);
+        out.extend(self.zen.snapshot().await);
+        out.extend(self.glm.snapshot().await);
+        out
+    }
+}
+
+pub struct Slot {
     pub id: i64,
     pub provider_account_id: String,
     pub display: String,

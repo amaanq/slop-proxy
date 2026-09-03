@@ -4,16 +4,13 @@ use axum::Router;
 use axum::response::IntoResponse;
 use axum::routing::post;
 
-use super::{AppState, router};
-use crate::anthropic::client::AnthropicClient;
+use super::{AppState, Inner, router};
 use crate::codex::client::CodexClient;
 use crate::config::{AnthropicConfig, CodexConfig, Config, ModelsConfig};
 use crate::db::Db;
-use crate::gemini::client::GeminiClient;
 use crate::oauth::TokenSet;
-use crate::pool::anthropic::AnthropicPool;
+use crate::pool::Pools;
 use crate::pool::codex::CodexPool;
-use crate::pool::gemini::GeminiPool;
 use crate::provider::{AuthMode, Provider};
 
 const MOCK_SSE: &str = concat!(
@@ -120,35 +117,17 @@ async fn spawn_proxy_with(models: ModelsConfig, anthropic_base: Option<String>) 
         pricing: Default::default(),
         models,
     };
-    let codex = CodexPool::load(db.clone(), CodexClient::new(cfg.codex.clone()))
-        .await
-        .unwrap();
-    let anthropic = AnthropicPool::load(db.clone(), AnthropicClient::new(cfg.anthropic.clone()))
-        .await
-        .unwrap();
-    let gemini_pool = GeminiPool::load(db.clone(), GeminiClient::new(cfg.gemini.clone()))
-        .await
-        .unwrap();
-    let zen_pool = crate::pool::zen::ZenPool::load(
-        db.clone(),
-        crate::zen::client::ZenClient::new(cfg.zen.clone()).unwrap(),
-    )
-    .await
-    .unwrap();
-    let glm_pool = crate::pool::glm::GlmPool::load(db.clone(), cfg.glm.clone())
-        .await
-        .unwrap();
-    let state = AppState {
+    let pools = Pools::load(&db, &cfg).await.unwrap();
+    let state = AppState(std::sync::Arc::new(Inner {
         db: db.clone(),
-        codex: Arc::new(codex),
-        anthropic: Arc::new(anthropic),
-        gemini: Arc::new(gemini_pool),
-        zen: Arc::new(zen_pool),
-        glm: Arc::new(glm_pool),
-        cfg: Arc::new(cfg),
-        models: Arc::new(super::ModelCache::new()),
-        prices: Arc::new(crate::pricing::Prices::new(&cfg_db_path, crate::config::PricingConfig::default().url)),
-    };
+        cfg,
+        prices: crate::pricing::Prices::new(
+            &cfg_db_path,
+            crate::config::PricingConfig::default().url,
+        ),
+        models: super::ModelCache::new(),
+        pools,
+    }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -415,40 +394,17 @@ async fn metrics_render_accounts_and_usage() {
         pricing: Default::default(),
         models: ModelsConfig::default(),
     };
-    let state = AppState {
+    let pools = Pools::load(&db, &cfg).await.unwrap();
+    let state = AppState(std::sync::Arc::new(Inner {
         db: db.clone(),
-        codex: Arc::new(
-            CodexPool::load(db.clone(), CodexClient::new(cfg.codex.clone()))
-                .await
-                .unwrap(),
+        cfg,
+        prices: crate::pricing::Prices::new(
+            &std::path::PathBuf::new(),
+            crate::config::PricingConfig::default().url,
         ),
-        anthropic: Arc::new(
-            AnthropicPool::load(db.clone(), AnthropicClient::new(cfg.anthropic.clone()))
-                .await
-                .unwrap(),
-        ),
-        gemini: Arc::new(
-            GeminiPool::load(db.clone(), GeminiClient::new(cfg.gemini.clone()))
-                .await
-                .unwrap(),
-        ),
-        zen: Arc::new(
-            crate::pool::zen::ZenPool::load(
-                db.clone(),
-                crate::zen::client::ZenClient::new(cfg.zen.clone()).unwrap(),
-            )
-            .await
-            .unwrap(),
-        ),
-        glm: Arc::new(
-            crate::pool::glm::GlmPool::load(db.clone(), cfg.glm.clone())
-                .await
-                .unwrap(),
-        ),
-        cfg: Arc::new(cfg),
-        models: Arc::new(super::ModelCache::new()),
-        prices: Arc::new(crate::pricing::Prices::new(&std::path::PathBuf::new(), crate::config::PricingConfig::default().url)),
-    };
+        models: super::ModelCache::new(),
+        pools,
+    }));
     let resp = super::metrics::metrics(axum::extract::State(state)).await;
     let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
         .await

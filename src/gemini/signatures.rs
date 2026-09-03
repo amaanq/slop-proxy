@@ -2,16 +2,57 @@
 //! See https://ai.google.dev/gemini-api/docs/thought-signatures.
 
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::sync::{LazyLock, Mutex};
 
 use crate::gemini::types::{Content, FunctionCall, Part};
 
-static SIGNATURES: LazyLock<Mutex<HashMap<u64, String>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Two generations rather than one map, because clearing on overflow drops
+/// every live conversation's signatures at the same instant and breaks all of
+/// them at once.
+struct Cache {
+    current: HashMap<u64, String>,
+    previous: HashMap<u64, String>,
+}
 
 const MAX_SIGNATURES: usize = 8192;
 
-fn key(call: &FunctionCall) -> u64 {
+static CACHE: LazyLock<Mutex<Cache>> = LazyLock::new(|| {
+    Mutex::new(Cache {
+        current: HashMap::new(),
+        previous: HashMap::new(),
+    })
+});
+
+impl Cache {
+    fn put(&mut self, key: u64, signature: String) {
+        if self.current.len() >= MAX_SIGNATURES {
+            self.previous = std::mem::take(&mut self.current);
+        }
+        self.current.insert(key, signature);
+    }
+
+    fn get(&self, key: u64) -> Option<&String> {
+        self.current.get(&key).or_else(|| self.previous.get(&key))
+    }
+}
+
+pub fn put(key: u64, signature: &str) {
+    CACHE.lock().unwrap().put(key, signature.to_string());
+}
+
+pub fn get(key: u64) -> Option<String> {
+    CACHE.lock().unwrap().get(key).cloned()
+}
+
+pub fn call_id_key(call_id: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    call_id.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// The native surface issues no call id, so a call is keyed by what it asks for.
+fn part_key(call: &FunctionCall) -> u64 {
     let mut hash = hmac_sha256::Hash::new();
     hash.update(call.name.as_bytes());
     if let Some(args) = &call.args {
@@ -21,35 +62,25 @@ fn key(call: &FunctionCall) -> u64 {
 }
 
 pub fn remember(parts: &[Part]) {
-    let pairs: Vec<_> = parts
-        .iter()
-        .filter_map(|p| Some((key(p.function_call.as_ref()?), p.thought_signature.clone()?)))
-        .collect();
-    if pairs.is_empty() {
-        return;
+    for part in parts {
+        if let (Some(call), Some(sig)) = (&part.function_call, &part.thought_signature) {
+            put(part_key(call), sig);
+        }
     }
-    let mut map = SIGNATURES.lock().unwrap();
-    if map.len().saturating_add(pairs.len()) > MAX_SIGNATURES {
-        map.clear();
-    }
-    map.extend(pairs);
 }
 
 /// True when one was put back, the only reason to re-encode the body.
 pub fn restore(contents: &mut [Content]) -> bool {
-    let map = SIGNATURES.lock().unwrap();
     let mut patched = false;
     for part in contents.iter_mut().flat_map(|c| c.parts.iter_mut()) {
         if part.thought_signature.is_some() {
             continue;
         }
-        let Some(call) = &part.function_call else {
+        let Some(sig) = part.function_call.as_ref().and_then(|c| get(part_key(c))) else {
             continue;
         };
-        if let Some(sig) = map.get(&key(call)) {
-            part.thought_signature = Some(sig.clone());
-            patched = true;
-        }
+        part.thought_signature = Some(sig);
+        patched = true;
     }
     patched
 }
@@ -85,5 +116,19 @@ mod tests {
             Some("EtUBCtIB")
         );
         assert_eq!(contents[0].parts[1].thought_signature, None);
+    }
+
+    #[test]
+    fn an_overflow_keeps_the_generation_before_it() {
+        let mut cache = Cache {
+            current: HashMap::new(),
+            previous: HashMap::new(),
+        };
+        cache.put(1, "first".into());
+        for k in 0..MAX_SIGNATURES as u64 {
+            cache.put(k + 100, "filler".into());
+        }
+        cache.put(999_999, "after".into());
+        assert_eq!(cache.get(1).map(String::as_str), Some("first"));
     }
 }

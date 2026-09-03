@@ -602,6 +602,14 @@ async fn gemini_responses(
         }
     };
     record.account_id = account_id;
+    if !upstream.response.status().is_success() {
+        let status = upstream.response.status().as_u16() as i64;
+        let body = upstream.response.text().await.unwrap_or_default();
+        let reason = <crate::gemini::client::GeminiClient as crate::pool::Backend>::reason(body);
+        tracing::warn!(status, model = %model, "gemini rejected the request: {reason}");
+        log_error(&state, record, status, "upstream_rejected");
+        return super::error::error_response(DIALECT, 400, "invalid_request_error", &reason);
+    }
     let capture = UsageCapture::default();
     let mut events = crate::translate::gemini_bridge::event_stream(
         upstream.response,

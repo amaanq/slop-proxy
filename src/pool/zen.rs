@@ -21,6 +21,10 @@ impl Backend for ZenClient {
     type Request = Bytes;
     type Response = reqwest::Response;
 
+    fn reason(body: String) -> String {
+        crate::translate::chat::ChatError::reason(body)
+    }
+
     async fn send(
         &self,
         token: &str,

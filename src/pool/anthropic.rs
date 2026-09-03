@@ -27,6 +27,10 @@ impl Backend for AnthropicClient {
     type Request = Relay;
     type Response = reqwest::Response;
 
+    fn reason(body: String) -> String {
+        crate::translate::chat::ChatError::reason(body)
+    }
+
     fn soft_limit(&self) -> f64 {
         self.soft_utilization_limit()
     }

@@ -47,6 +47,10 @@ impl Backend for GeminiClient {
     type Request = Call;
     type Response = GeminiResponse;
 
+    fn reason(body: String) -> String {
+        crate::translate::chat::ChatError::reason(body)
+    }
+
     fn soft_limit(&self) -> f64 {
         self.soft_utilization_limit()
     }

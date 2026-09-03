@@ -452,6 +452,16 @@ pub struct ChatError {
     pub error: ChatErrorBody,
 }
 
+impl ChatError {
+    /// Anthropic, Google and Zen differ only in the sibling fields.
+    pub fn reason(body: String) -> String {
+        match serde_json::from_str::<Self>(&body) {
+            Ok(env) if !env.error.message.is_empty() => env.error.message,
+            _ => body,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ChatErrorBody {

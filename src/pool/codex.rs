@@ -20,6 +20,10 @@ impl Backend for CodexClient {
     type Request = Bytes;
     type Response = reqwest::Response;
 
+    fn reason(body: String) -> String {
+        crate::codex::types::ErrorEnvelope::reason(body)
+    }
+
     fn soft_limit(&self) -> f64 {
         self.soft_utilization_limit()
     }

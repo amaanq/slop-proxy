@@ -390,6 +390,23 @@ pub struct UpstreamError {
     pub message: Option<String>,
 }
 
+/// A ChatGPT account refusing a model answers with a bare `detail`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ErrorEnvelope {
+    pub detail: Option<String>,
+    pub error: UpstreamError,
+}
+
+impl ErrorEnvelope {
+    pub fn reason(body: String) -> String {
+        match serde_json::from_str::<Self>(&body) {
+            Ok(env) => env.detail.or(env.error.message).unwrap_or(body),
+            Err(_) => body,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Usage {

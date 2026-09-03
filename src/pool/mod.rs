@@ -27,8 +27,8 @@ pub enum PoolError {
     NoAccounts(Provider),
     #[error("all upstream accounts are cooling down")]
     AllCoolingDown { retry_after: i64 },
-    #[error("upstream rejected the request: {0}")]
-    BadRequest(String),
+    #[error("the {provider} backend rejected the request: {body}")]
+    BadRequest { provider: Provider, body: String },
     #[error("upstream failure: {0}")]
     Upstream(String),
 }
@@ -83,6 +83,10 @@ pub trait Backend: Send + Sync + 'static {
     fn retryable_bad_request(&self, body: &str) -> bool {
         let _ = body;
         false
+    }
+    /// Each dialect buries its one useful sentence at a different depth.
+    fn reason(body: String) -> String {
+        body
     }
     fn usage_from(&self, resp: &Self::Response) -> Option<AccountUsage> {
         let _ = resp;
@@ -192,7 +196,7 @@ impl<B: Backend> Pool<B> {
             if B::ANONYMOUS {
                 return match self.backend.send_anonymous(req).await {
                     Ok(r) => Ok((None, r)),
-                    Err(SendError::BadRequest(b)) => Err(PoolError::BadRequest(b)),
+                    Err(SendError::BadRequest(body)) => Err(PoolError::BadRequest { provider: B::PROVIDER, body: B::reason(body) }),
                     Err(SendError::RateLimited { retry_after, .. }) => {
                         Err(PoolError::AllCoolingDown {
                             retry_after: retry_after.unwrap_or(30),
@@ -272,7 +276,7 @@ impl<B: Backend> Pool<B> {
                     last_err = Some(SendError::BadRequest(body));
                 }
                 Err(SendError::BadRequest(body)) => {
-                    return Err(PoolError::BadRequest(body));
+                    return Err(PoolError::BadRequest { provider: B::PROVIDER, body: B::reason(body) });
                 }
                 Err(e) => {
                     self.slots.cool_failure(&slot).await;
@@ -281,7 +285,7 @@ impl<B: Backend> Pool<B> {
             }
         }
         match last_err {
-            Some(SendError::BadRequest(b)) => Err(PoolError::BadRequest(b)),
+            Some(SendError::BadRequest(body)) => Err(PoolError::BadRequest { provider: B::PROVIDER, body: B::reason(body) }),
             Some(SendError::RateLimited { .. }) | None => Err(PoolError::AllCoolingDown {
                 retry_after: self.slots.min_cooldown().await.max(30),
             }),
@@ -1140,5 +1144,32 @@ mod retry_tests {
             Err(PoolError::AllCoolingDown { .. })
         ));
         assert_eq!(pool.backend.calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[cfg(test)]
+mod reason_tests {
+    use super::*;
+    use crate::anthropic::client::AnthropicClient;
+    use crate::codex::client::CodexClient;
+    use crate::gemini::client::GeminiClient;
+
+    #[test]
+    fn each_envelope_gives_up_its_one_sentence() {
+        assert_eq!(
+            CodexClient::reason(r#"{"detail":"no such model"}"#.into()),
+            "no such model"
+        );
+        assert_eq!(
+            GeminiClient::reason(r#"{"error":{"code":400,"message":"contents is not specified"}}"#.into()),
+            "contents is not specified"
+        );
+        assert_eq!(
+            AnthropicClient::reason(
+                r#"{"type":"error","error":{"type":"invalid_request_error","message":"max_tokens is too large"}}"#.into()
+            ),
+            "max_tokens is too large"
+        );
+        assert_eq!(CodexClient::reason("502 Bad Gateway".into()), "502 Bad Gateway");
     }
 }

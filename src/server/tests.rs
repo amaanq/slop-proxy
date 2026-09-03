@@ -117,6 +117,7 @@ async fn spawn_proxy_with(models: ModelsConfig, anthropic_base: Option<String>) 
         gemini: Default::default(),
         zen: Default::default(),
         glm: Default::default(),
+        pricing: Default::default(),
         models,
     };
     let codex = CodexPool::load(db.clone(), CodexClient::new(cfg.codex.clone()))
@@ -146,7 +147,7 @@ async fn spawn_proxy_with(models: ModelsConfig, anthropic_base: Option<String>) 
         glm: Arc::new(glm_pool),
         cfg: Arc::new(cfg),
         models: Arc::new(super::ModelCache::new()),
-        prices: Arc::new(crate::pricing::Prices::new(&cfg_db_path)),
+        prices: Arc::new(crate::pricing::Prices::new(&cfg_db_path, crate::config::PricingConfig::default().url)),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -411,6 +412,7 @@ async fn metrics_render_accounts_and_usage() {
         gemini: Default::default(),
         zen: Default::default(),
         glm: Default::default(),
+        pricing: Default::default(),
         models: ModelsConfig::default(),
     };
     let state = AppState {
@@ -445,7 +447,7 @@ async fn metrics_render_accounts_and_usage() {
         ),
         cfg: Arc::new(cfg),
         models: Arc::new(super::ModelCache::new()),
-        prices: Arc::new(crate::pricing::Prices::new(&std::path::PathBuf::new())),
+        prices: Arc::new(crate::pricing::Prices::new(&std::path::PathBuf::new(), crate::config::PricingConfig::default().url)),
     };
     let resp = super::metrics::metrics(axum::extract::State(state)).await;
     let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)

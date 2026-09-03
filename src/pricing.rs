@@ -5,10 +5,6 @@ use std::sync::{Arc, RwLock};
 use eyre::{Result, WrapErr};
 use serde::Deserialize;
 
-/// The table ccusage bills from. Prices are per token, already in USD.
-const LITELLM_URL: &str =
-    "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
-
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Rates {
     pub input: f64,
@@ -196,7 +192,7 @@ pub struct Prices {
 }
 
 impl Prices {
-    pub fn new(db_path: &Path) -> Self {
+    pub fn new(db_path: &Path, url: String) -> Self {
         let cache_path = db_path
             .parent()
             .unwrap_or(Path::new("."))
@@ -204,7 +200,7 @@ impl Prices {
         Self {
             table: RwLock::new(Arc::new(PriceTable::default())),
             cache_path,
-            url: LITELLM_URL.to_string(),
+            url,
         }
     }
 

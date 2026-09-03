@@ -171,7 +171,7 @@ pub fn to_chat(req: &ResponsesRequest) -> ChatRequest {
 
 /// Gemini takes none, low, medium or high and rejects anything else outright,
 /// so codex asking for xhigh would 400 the whole turn.
-fn gemini_effort(effort: &str) -> &str {
+pub fn gemini_effort(effort: &str) -> &str {
     match effort {
         "none" | "minimal" => "none",
         "low" => "low",

@@ -29,6 +29,10 @@ pub async fn chat_completions(
 ) -> Response {
     let started = std::time::Instant::now();
     let streaming = body.stream.unwrap_or(false);
+    if let Some(effort) = &body.reasoning_effort {
+        body.reasoning_effort =
+            Some(crate::translate::gemini_bridge::gemini_effort(effort).to_string());
+    }
     // Without this the terminal chunk carries no usage and the request bills
     // as zero tokens.
     if streaming {
@@ -291,6 +295,14 @@ pub async fn native(
             );
         }
     };
+    let mut parsed = parsed;
+    let body = match crate::gemini::signatures::restore(&mut parsed.contents) {
+        true => match serde_json::to_vec(&parsed) {
+            Ok(patched) => Bytes::from(patched),
+            Err(_) => body,
+        },
+        false => body,
+    };
     let key = native_session_key(&auth.user, &parsed);
     let facts = super::facts::RequestFacts::from_native(&parsed, &headers);
     let record = UsageRecord {
@@ -369,6 +381,9 @@ pub async fn native(
         }
     };
     if let Ok(v) = serde_json::from_slice::<GenerateContentResponse>(&bytes) {
+        for content in v.candidates.iter().filter_map(|c| c.content.as_ref()) {
+            crate::gemini::signatures::remember(&content.parts);
+        }
         if let Some(reason) = finish_reason(&v) {
             record.stop_reason = reason.to_string();
         }
@@ -435,6 +450,9 @@ impl NativeUsageScan {
             let Ok(v) = serde_json::from_slice::<GenerateContentResponse>(data) else {
                 continue;
             };
+            for content in v.candidates.iter().filter_map(|c| c.content.as_ref()) {
+                crate::gemini::signatures::remember(&content.parts);
+            }
             if let Some(reason) = finish_reason(&v) {
                 self.capture.note_stop_reason(reason);
             }

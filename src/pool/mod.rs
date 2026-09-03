@@ -27,8 +27,12 @@ pub enum PoolError {
     NoAccounts(Provider),
     #[error("all upstream accounts are cooling down")]
     AllCoolingDown { retry_after: i64 },
-    #[error("the {provider} backend rejected the request: {body}")]
-    BadRequest { provider: Provider, body: String },
+    #[error("the {provider} backend rejected {model}: {body}")]
+    BadRequest {
+        provider: Provider,
+        model: String,
+        body: String,
+    },
     #[error("upstream failure: {0}")]
     Upstream(String),
 }
@@ -46,6 +50,7 @@ pub enum AuthPolicy {
 #[derive(Clone, Copy)]
 pub struct Route<'a> {
     pub session_key: &'a str,
+    pub model: &'a str,
     pub prefer_trusted: bool,
 }
 
@@ -196,7 +201,7 @@ impl<B: Backend> Pool<B> {
             if B::ANONYMOUS {
                 return match self.backend.send_anonymous(req).await {
                     Ok(r) => Ok((None, r)),
-                    Err(SendError::BadRequest(body)) => Err(PoolError::BadRequest { provider: B::PROVIDER, body: B::reason(body) }),
+                    Err(SendError::BadRequest(body)) => Err(PoolError::BadRequest { provider: B::PROVIDER, model: route.model.into(), body: B::reason(body) }),
                     Err(SendError::RateLimited { retry_after, .. }) => {
                         Err(PoolError::AllCoolingDown {
                             retry_after: retry_after.unwrap_or(30),
@@ -276,7 +281,7 @@ impl<B: Backend> Pool<B> {
                     last_err = Some(SendError::BadRequest(body));
                 }
                 Err(SendError::BadRequest(body)) => {
-                    return Err(PoolError::BadRequest { provider: B::PROVIDER, body: B::reason(body) });
+                    return Err(PoolError::BadRequest { provider: B::PROVIDER, model: route.model.into(), body: B::reason(body) });
                 }
                 Err(e) => {
                     self.slots.cool_failure(&slot).await;
@@ -285,7 +290,7 @@ impl<B: Backend> Pool<B> {
             }
         }
         match last_err {
-            Some(SendError::BadRequest(body)) => Err(PoolError::BadRequest { provider: B::PROVIDER, body: B::reason(body) }),
+            Some(SendError::BadRequest(body)) => Err(PoolError::BadRequest { provider: B::PROVIDER, model: route.model.into(), body: B::reason(body) }),
             Some(SendError::RateLimited { .. }) | None => Err(PoolError::AllCoolingDown {
                 retry_after: self.slots.min_cooldown().await.max(30),
             }),
@@ -1125,6 +1130,7 @@ mod retry_tests {
     fn route() -> Route<'static> {
         Route {
             session_key: "s",
+            model: "m",
             prefer_trusted: false,
         }
     }

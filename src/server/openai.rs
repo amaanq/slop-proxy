@@ -114,6 +114,7 @@ pub async fn chat_completions(
             .execute(
                 Route {
                     session_key: &session_key,
+                model: &req.model,
                     prefer_trusted: false,
                 },
                 req_bytes.clone(),
@@ -126,6 +127,7 @@ pub async fn chat_completions(
             .execute(
                 Route {
                     session_key: &session_key,
+                model: &req.model,
                     prefer_trusted: auth.prefer_trusted,
                 },
                 req_bytes.clone(),
@@ -136,7 +138,7 @@ pub async fn chat_completions(
         Ok(r) => r,
         Err(e) => {
             log_error(&state, record, pool_error_status(&e), "pool");
-            return pool_error_response(DIALECT, e);
+            return pool_error_response(DIALECT, &state.cfg.models, e);
         }
     };
     let mut record = record;
@@ -485,6 +487,7 @@ pub async fn responses_passthrough(
             .execute(
                 Route {
                     session_key: &session_key,
+                model: &record.requested_model,
                     prefer_trusted: false,
                 },
                 body.clone(),
@@ -497,6 +500,7 @@ pub async fn responses_passthrough(
             .execute(
                 Route {
                     session_key: &session_key,
+                model: &record.requested_model,
                     prefer_trusted: auth.prefer_trusted,
                 },
                 body.clone(),
@@ -507,7 +511,7 @@ pub async fn responses_passthrough(
         Ok(r) => r,
         Err(e) => {
             log_error(&state, record, pool_error_status(&e), "pool");
-            return pool_error_response(DIALECT, e);
+            return pool_error_response(DIALECT, &state.cfg.models, e);
         }
     };
     let mut record = record;
@@ -584,6 +588,7 @@ async fn gemini_responses(
         .execute(
             Route {
                 session_key: &session_key,
+                model: &req.model,
                 prefer_trusted: false,
             },
             crate::pool::gemini::Call::OpenAi(Box::new(chat)),
@@ -593,7 +598,7 @@ async fn gemini_responses(
         Ok(r) => r,
         Err(e) => {
             log_error(&state, record, pool_error_status(&e), "pool");
-            return pool_error_response(DIALECT, e);
+            return pool_error_response(DIALECT, &state.cfg.models, e);
         }
     };
     record.account_id = account_id;

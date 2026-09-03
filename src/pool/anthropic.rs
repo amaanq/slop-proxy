@@ -157,6 +157,7 @@ mod tests {
     ) -> Vec<std::sync::Arc<super::super::Slot>> {
         pool.ranked(super::super::Route {
             session_key,
+            model: "",
             prefer_trusted: false,
         })
         .await

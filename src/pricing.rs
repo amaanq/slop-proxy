@@ -86,6 +86,23 @@ impl PriceTable {
             .map_or(0.0, |p| p.cost(t))
     }
 
+    /// What the same tokens would have cost at the model's own list price.
+    /// A free tier is published under the paid name, so the marker is dropped
+    /// before looking it up, which is the only way to value what it saved.
+    pub fn list_cost(&self, model: &str, t: Tokens) -> f64 {
+        let paid = model.strip_suffix("-free").unwrap_or(model);
+        let direct = self.cost(paid, t);
+        if direct > 0.0 {
+            return direct;
+        }
+        // The contributor tier is its own product with its own rates, so the
+        // discount is only visible by pricing the tier rather than the family.
+        match paid.rsplit_once("-contributor") {
+            Some((family, _)) => self.cost(family, t),
+            None => 0.0,
+        }
+    }
+
     fn parse(body: &str) -> Result<Self> {
         let raw: HashMap<String, Entry> =
             serde_json::from_str(body).wrap_err("parsing the price table")?;
@@ -279,6 +296,22 @@ mod tests {
 
     fn table() -> PriceTable {
         PriceTable::parse(SAMPLE).unwrap()
+    }
+
+    /// litellm publishes the contributor tier under its paid name, so the
+    /// free marker has to come off before what it saved can be priced.
+    #[test]
+    fn a_free_tier_prices_against_its_paid_listing() {
+        let t = PriceTable::parse(
+            r#"{"meta/muse-spark-1.3-contributor": {"input_cost_per_token": 1e-7, "output_cost_per_token": 2e-7},
+                "meta/muse-spark-1.3": {"input_cost_per_token": 1.25e-6, "output_cost_per_token": 4.25e-6}}"#,
+        )
+        .unwrap();
+        let tokens = Tokens { input: 1_000_000, output: 1_000_000, ..Tokens::default() };
+        assert_eq!(t.cost("muse-spark-1.3-contributor-free", tokens), 0.0);
+        assert!((t.list_cost("muse-spark-1.3-contributor-free", tokens) - 0.3).abs() < 1e-9);
+        // A paid model lists at what it already costs.
+        assert!((t.list_cost("muse-spark-1.3", tokens) - 5.5).abs() < 1e-9);
     }
 
     #[test]

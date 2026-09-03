@@ -492,3 +492,111 @@ async fn token_request_limit_enforced() {
     assert_eq!(second.status(), 429);
     assert!(second.headers().contains_key("retry-after"));
 }
+
+const GEMINI_REJECTION: &str = "{\n  \"error\": {\n    \"code\": 400,\n    \"message\": \"contents is not specified\",\n    \"status\": \"INVALID_ARGUMENT\"\n  }\n}\n";
+
+async fn spawn_proxy_with_gemini() -> (String, Db) {
+    let app = Router::new().route(
+        "/models/{spec}",
+        post(|| async {
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                [("content-type", "application/json")],
+                GEMINI_REJECTION,
+            )
+                .into_response()
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let db_path = std::env::temp_dir().join(format!("slop-test-{}.db", uuid::Uuid::new_v4()));
+    let db = Db::open(&db_path).await.unwrap();
+    db.create_token("alice", "sp-test", "sp-test")
+        .await
+        .unwrap();
+    db.upsert_account(
+        Provider::Gemini,
+        "gem-1",
+        None,
+        Some("gem1"),
+        None,
+        &fresh_tokens(),
+        AuthMode::ApiKey,
+    )
+    .await
+    .unwrap();
+
+    let cfg_db_path = db_path.clone();
+    let cfg = Config {
+        db_path,
+        bind: String::new(),
+        metrics_bind: None,
+        codex: CodexConfig::default(),
+        anthropic: AnthropicConfig::default(),
+        gemini: crate::config::GeminiConfig {
+            base_url: format!("http://{addr}"),
+            ..Default::default()
+        },
+        zen: Default::default(),
+        glm: Default::default(),
+        pricing: Default::default(),
+        models: ModelsConfig::default(),
+    };
+    let pools = Pools::load(&db, &cfg).await.unwrap();
+    let state = AppState(Arc::new(Inner {
+        db: db.clone(),
+        cfg,
+        prices: crate::pricing::Prices::new(
+            &cfg_db_path,
+            crate::config::PricingConfig::default().url,
+        ),
+        models: super::ModelCache::new(),
+        pools,
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router(state)).await.unwrap();
+    });
+    (format!("http://{addr}"), db)
+}
+
+#[tokio::test]
+async fn a_rejected_gemini_request_keeps_googles_reason() {
+    let (base, db) = spawn_proxy_with_gemini().await;
+    let resp = reqwest::Client::new()
+        .post(format!(
+            "{base}/v1beta/models/gemini-3.8-flash:streamGenerateContent?alt=sse"
+        ))
+        .header("x-goog-api-key", "sp-test")
+        .json(&serde_json::json!({"contents": []}))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 400);
+    assert_eq!(resp.text().await.unwrap(), GEMINI_REJECTION);
+
+    let kinds = loop {
+        let rows = db.error_metrics().await.unwrap();
+        if !rows.is_empty() {
+            break rows;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
+    assert_eq!(kinds[0].kind, "upstream_rejected");
+    assert_eq!(kinds[0].provider, "gemini");
+
+    let logged =
+        db.0.lock()
+            .await
+            .query_row("SELECT response_bytes FROM usage_log", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap();
+    assert_eq!(logged as usize, GEMINI_REJECTION.len());
+}

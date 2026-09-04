@@ -493,18 +493,22 @@ pub async fn responses_passthrough(
         let mut final_response = Option::<Box<serde_json::value::RawValue>>::None;
         while let Some(ev) = raw_events.next().await {
             let Ok(ev) = ev else { break };
-            let terminal = match serde_json::from_str::<TerminalEvent>(&ev.data) {
-                Ok(TerminalEvent::Completed(p))
-                | Ok(TerminalEvent::Incomplete(p))
-                | Ok(TerminalEvent::Failed(p)) => p,
-                _ => continue,
+            let Ok(TerminalEvent {
+                kind,
+                response: Some(response),
+            }) = serde_json::from_str::<TerminalEvent>(&ev.data)
+            else {
+                continue;
             };
+            if !TerminalEvent::is_terminal(&kind) {
+                continue;
+            }
             if let Ok(env) = serde_json::from_str::<UsageEnvelope>(&ev.data)
                 && let Some(usage) = env.response.usage
             {
                 capture.record(&usage);
             }
-            final_response = Some(terminal.response);
+            final_response = Some(response);
         }
         let snap = capture.snapshot();
         record.input_tokens = snap.input_tokens;
@@ -594,23 +598,22 @@ struct NonStreamResponse {
 }
 
 /// The stream's terminal events; `response` stays raw because it is handed
-/// back to the client verbatim.
+/// back to the client verbatim, which rules out a tagged enum since serde
+/// buffers those and `RawValue` cannot be read back out of the buffer.
 #[derive(serde::Deserialize)]
-#[serde(tag = "type")]
-enum TerminalEvent {
-    #[serde(rename = "response.completed")]
-    Completed(TerminalPayload),
-    #[serde(rename = "response.incomplete")]
-    Incomplete(TerminalPayload),
-    #[serde(rename = "response.failed")]
-    Failed(TerminalPayload),
-    #[serde(other)]
-    Other,
+struct TerminalEvent {
+    #[serde(rename = "type")]
+    kind: String,
+    response: Option<Box<serde_json::value::RawValue>>,
 }
 
-#[derive(serde::Deserialize)]
-struct TerminalPayload {
-    response: Box<serde_json::value::RawValue>,
+impl TerminalEvent {
+    fn is_terminal(kind: &str) -> bool {
+        matches!(
+            kind,
+            "response.completed" | "response.incomplete" | "response.failed"
+        )
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -792,6 +795,24 @@ mod passthrough_tests {
         assert_eq!(out["input"], body["input"]);
         assert_eq!(out["tools"], body["tools"]);
         assert_eq!(out["reasoning"], body["reasoning"]);
+    }
+}
+
+#[cfg(test)]
+mod terminal_event_tests {
+    use super::TerminalEvent;
+
+    /// Parsed from the wire, not from a Value, because the bug this pins only
+    /// shows on the streaming deserializer.
+    #[test]
+    fn the_final_response_survives_the_terminal_frame() {
+        let frame = r#"{"type":"response.completed","sequence_number":9,"response":{"id":"resp_1","usage":{"input_tokens":1}}}"#;
+        let event: TerminalEvent = serde_json::from_str(frame).unwrap();
+        assert!(TerminalEvent::is_terminal(&event.kind));
+        assert_eq!(
+            event.response.unwrap().get(),
+            r#"{"id":"resp_1","usage":{"input_tokens":1}}"#
+        );
     }
 }
 

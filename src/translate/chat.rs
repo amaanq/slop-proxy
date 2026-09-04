@@ -273,7 +273,10 @@ pub struct FunctionDef {
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        deserialize_with = "crate::translate::buffered_raw",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub parameters: Option<Box<RawValue>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub strict: Option<bool>,
@@ -484,6 +487,25 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    /// The flat form lands behind a `flatten`, which serde buffers, and a raw
+    /// value cannot be read back out of that buffer without help.
+    #[test]
+    fn a_flat_tool_keeps_its_parameters() {
+        let def: ChatToolDef = serde_json::from_str(
+            r#"{"type":"function","name":"f","parameters":{"type":"object","properties":{}}}"#,
+        )
+        .unwrap();
+        assert_eq!(def.def().name.as_deref(), Some("f"));
+        assert!(
+            def.def()
+                .parameters
+                .as_ref()
+                .unwrap()
+                .get()
+                .contains("properties")
+        );
+    }
 
     #[test]
     fn thinking_is_recovered_from_the_total() {

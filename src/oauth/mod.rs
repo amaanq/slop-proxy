@@ -6,7 +6,8 @@ use eyre::{Result, WrapErr, bail, eyre};
 use serde::Deserialize;
 
 use crate::db::Db;
-use crate::provider::AuthMode;
+use crate::provider::{AuthMode, Provider};
+use refresh::TokenResponse;
 
 /// One shared client so token refreshes reuse connections instead of paying
 /// TLS setup per call (refreshes run while a slot mutex is held).
@@ -30,27 +31,6 @@ pub struct TokenSet {
     pub refresh_token: String,
     pub id_token: Option<String>,
     pub expires_at: Option<i64>,
-}
-
-#[derive(Deserialize)]
-pub(crate) struct TokenResponse {
-    access_token: String,
-    refresh_token: String,
-    id_token: Option<String>,
-    expires_in: Option<i64>,
-}
-
-impl TokenSet {
-    pub(crate) fn from_response(r: TokenResponse) -> Self {
-        let expires_at = jwt::exp(&r.access_token)
-            .or_else(|| r.expires_in.map(|s| crate::clock::unix_now() + s));
-        Self {
-            access_token: r.access_token,
-            refresh_token: r.refresh_token,
-            id_token: r.id_token,
-            expires_at,
-        }
-    }
 }
 
 #[derive(serde::Serialize)]
@@ -89,9 +69,7 @@ struct DeviceTokenResp {
 }
 
 pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
-    let client = reqwest::Client::new();
-
-    let resp = client
+    let resp = http()
         .post(DEVICE_USERCODE_URL)
         .json(&DeviceCodeRequest {
             client_id: CLIENT_ID,
@@ -121,9 +99,9 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
     );
     println!("Waiting for authorization (up to 15 minutes)...");
 
-    let success = poll_for_code(&client, &uc.device_auth_id, &uc.user_code, interval).await?;
+    let success = poll_for_code(http(), &uc.device_auth_id, &uc.user_code, interval).await?;
 
-    let resp = client
+    let resp = http()
         .post(TOKEN_URL)
         .form(&[
             ("grant_type", "authorization_code"),
@@ -135,13 +113,10 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
         .send()
         .await
         .wrap_err("token exchange request failed")?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        bail!("token exchange failed: {status}: {body}");
-    }
-
-    let tokens = TokenSet::from_response(resp.json().await.wrap_err("parsing token response")?);
+    let tokens = exchanged(resp)
+        .await?
+        .into_token_set(None)
+        .ok_or_else(|| eyre!("no refresh_token in token response"))?;
     let id_token = tokens
         .id_token
         .as_deref()
@@ -151,23 +126,43 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
         .chatgpt_account_id
         .ok_or_else(|| eyre!("id_token has no chatgpt account id"))?;
 
-    let db_id = db
-        .upsert_account(
-            crate::provider::Provider::OpenAi,
-            &account_id,
-            info.email.as_deref(),
-            label.as_deref(),
-            info.plan_type.as_deref(),
-            &tokens,
-            AuthMode::OAuth,
-        )
-        .await?;
+    finish_login(
+        db,
+        Provider::OpenAi,
+        &account_id,
+        info.email.as_deref(),
+        label.as_deref(),
+        info.plan_type.as_deref(),
+        &tokens,
+    )
+    .await
+}
 
+async fn exchanged(resp: reqwest::Response) -> Result<TokenResponse> {
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        bail!("token exchange failed: {status}: {body}");
+    }
+    resp.json().await.wrap_err("parsing token response")
+}
+
+async fn finish_login(
+    db: &Db,
+    provider: Provider,
+    id: &str,
+    email: Option<&str>,
+    label: Option<&str>,
+    plan: Option<&str>,
+    tokens: &TokenSet,
+) -> Result<()> {
+    let db_id = db
+        .upsert_account(provider, id, email, label, plan, tokens, AuthMode::OAuth)
+        .await?;
+    let plan = plan.map(|p| format!(", plan {p}")).unwrap_or_default();
     println!(
-        "logged in: account {} ({}, plan {})",
-        db_id,
-        info.email.as_deref().unwrap_or("unknown email"),
-        info.plan_type.as_deref().unwrap_or("unknown")
+        "logged in: {provider} account {db_id} ({}{plan})",
+        email.unwrap_or("unknown email")
     );
     Ok(())
 }

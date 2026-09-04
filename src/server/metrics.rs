@@ -1,11 +1,12 @@
-use std::fmt::Write;
+use std::fmt::{Display, Write};
 
 use axum::extract::State;
 use axum::http::header::CONTENT_TYPE;
 use axum::response::{IntoResponse, Response};
 
 use super::AppState;
-use crate::pool::AccountSnapshot;
+use crate::db::usage::{ErrorRow, InsightRow, MetricsRow, SessionRow, ToolRow};
+use crate::pool::{AccountSnapshot, UsageWindow};
 use crate::provider::Provider;
 
 pub async fn metrics(State(state): State<AppState>) -> Response {
@@ -41,88 +42,37 @@ fn render_accounts(out: &mut String, accounts: &[AccountSnapshot]) {
     // An info metric keeps slow-moving identity off the sampled series while
     // still letting a dashboard group or weight by it, e.g.
     //   slop_account_utilization_ratio * on(account) group_left(plan) slop_account_info
-    gauge_header(
+    gauge(
         out,
         "slop_account_info",
         "Constant 1, carrying the account's plan and trusted access as labels",
     );
     for a in accounts {
         let plan = a.plan.as_deref().unwrap_or("unknown");
-        line(
-            out,
-            "slop_account_info",
-            a,
-            &[("plan", plan), ("trusted", bool_label(a.trusted))],
-            1.0,
-        );
+        let l = [("plan", plan), ("trusted", bool_label(a.trusted))];
+        account(out, "slop_account_info", a, &l, 1.0);
     }
-    gauge_header(
-        out,
-        "slop_account_capacity",
-        "Share of the provider's largest plan this account is worth, for \
-         weighting a pooled average. Emitted only where quota is reported, so \
-         a provider that reports none stays out of the average entirely",
-    );
-    for a in accounts {
-        if a.usage.is_none() {
-            continue;
-        }
-        line(out, "slop_account_capacity", a, &[], plan_capacity(a));
-    }
-    gauge_header(
-        out,
-        "slop_account_status",
-        "Account state: 0 active, 1 cooling down, 2 disabled",
-    );
-    for a in accounts {
-        line(out, "slop_account_status", a, &[], a.status as f64);
-    }
-    gauge_header(
-        out,
-        "slop_account_cooldown_seconds",
-        "Seconds until the account is retried, 0 when active",
-    );
-    for a in accounts {
-        line(
-            out,
-            "slop_account_cooldown_seconds",
-            a,
-            &[],
-            a.cooldown_seconds as f64,
-        );
-    }
-    gauge_header(
-        out,
-        "slop_account_consecutive_fails",
-        "Consecutive upstream failures feeding the backoff",
-    );
-    for a in accounts {
-        line(
-            out,
-            "slop_account_consecutive_fails",
-            a,
-            &[],
-            a.consecutive_fails as f64,
-        );
-    }
-    gauge_header(
-        out,
-        "slop_account_utilization_ratio",
-        "Fraction of the account's rolling limit window consumed",
-    );
-    for a in accounts {
-        let Some(usage) = &a.usage else { continue };
-        for w in &usage.windows {
-            line(
-                out,
-                "slop_account_utilization_ratio",
-                a,
-                &[("window", &w.name)],
-                w.utilization,
-            );
+    let now = crate::clock::unix_now();
+    for (name, help, get) in ACCOUNT_GAUGES {
+        gauge(out, name, help);
+        for a in accounts {
+            if let Some(v) = get(a, now) {
+                account(out, name, a, &[], v);
+            }
         }
     }
-    gauge_header(
+    for (name, help, get) in WINDOW_GAUGES {
+        gauge(out, name, help);
+        for a in accounts {
+            let Some(usage) = &a.usage else { continue };
+            for w in &usage.windows {
+                if let Some(v) = get(w, now) {
+                    account(out, name, a, &[("window", &w.name)], v);
+                }
+            }
+        }
+    }
+    gauge(
         out,
         "slop_account_model_utilization_ratio",
         "Fraction of a model's own sub-limit consumed. Measured against that \
@@ -132,60 +82,15 @@ fn render_accounts(out: &mut String, accounts: &[AccountSnapshot]) {
     for a in accounts {
         let Some(usage) = &a.usage else { continue };
         for w in &usage.model_windows {
-            line(
+            let l = [("window", w.window.as_str()), ("model", w.model.as_str())];
+            account(
                 out,
                 "slop_account_model_utilization_ratio",
                 a,
-                &[("window", &w.window), ("model", &w.model)],
+                &l,
                 w.utilization,
             );
         }
-    }
-    gauge_header(
-        out,
-        "slop_account_window_reset_seconds",
-        "Seconds until the account's limit window rolls over",
-    );
-    let now = crate::clock::unix_now();
-    for a in accounts {
-        let Some(usage) = &a.usage else { continue };
-        for w in &usage.windows {
-            let Some(resets_at) = w.resets_at else {
-                continue;
-            };
-            line(
-                out,
-                "slop_account_window_reset_seconds",
-                a,
-                &[("window", &w.name)],
-                (resets_at - now).max(0) as f64,
-            );
-        }
-    }
-    gauge_header(
-        out,
-        "slop_account_usage_age_seconds",
-        "Age of the quota sample. Codex only reports quota on a served \
-         response, so an idle account's figures stop advancing",
-    );
-    for a in accounts {
-        let Some(usage) = &a.usage else { continue };
-        line(
-            out,
-            "slop_account_usage_age_seconds",
-            a,
-            &[],
-            (now - usage.observed_at).max(0) as f64,
-        );
-    }
-    gauge_header(
-        out,
-        "slop_account_locked",
-        "1 when the provider has locked the account out until a window resets",
-    );
-    for a in accounts {
-        let Some(usage) = &a.usage else { continue };
-        line(out, "slop_account_locked", a, &[], f64::from(usage.locked));
     }
 }
 
@@ -198,170 +103,183 @@ fn plan_capacity(a: &AccountSnapshot) -> f64 {
     }
 }
 
-fn render_usage(out: &mut String, rows: &[crate::db::usage::MetricsRow]) {
-    counter_header(out, "slop_requests_total", "Requests served");
-    for r in rows {
-        usage_line(out, "slop_requests_total", r, r.requests as f64);
+fn render_usage(out: &mut String, rows: &[MetricsRow]) {
+    for (name, help, get) in USAGE_COUNTERS {
+        counter(out, name, help);
+        for r in rows {
+            sample(out, name, &usage_labels(r), get(r));
+        }
     }
-    counter_header(out, "slop_request_errors_total", "Requests that failed");
-    for r in rows {
-        usage_line(out, "slop_request_errors_total", r, r.errors as f64);
-    }
-    counter_header(
-        out,
-        "slop_request_duration_seconds_sum",
-        "Total time served, divide by slop_requests_total for the mean",
-    );
-    for r in rows {
-        usage_line(
-            out,
-            "slop_request_duration_seconds_sum",
-            r,
-            r.duration_ms as f64 / 1000.0,
-        );
-    }
-    counter_header(out, "slop_cost_usd_total", "What the traffic actually cost");
-    for r in rows {
-        usage_line(out, "slop_cost_usd_total", r, r.cost_usd);
-    }
-    counter_header(
-        out,
-        "slop_list_cost_usd_total",
-        "What the same traffic would have cost at the model's list rate, so a \
-         free tier is worth something rather than reading as zero spend",
-    );
-    for r in rows {
-        usage_line(out, "slop_list_cost_usd_total", r, r.list_cost_usd);
-    }
-    counter_header(out, "slop_tokens_total", "Tokens by kind");
+    counter(out, "slop_tokens_total", "Tokens by kind");
     for (kind, get) in TOKEN_KINDS {
         for r in rows {
-            let _ = writeln!(
-                out,
-                "slop_tokens_total{{user={},account={},provider={},requested_model={},model={},effort={},dialect={},kind=\"{kind}\"}} {}",
-                quote(&r.user),
-                quote(&r.account),
-                quote(&r.provider),
-                quote(&r.requested_model),
-                quote(&r.model),
-                label(&r.effort),
-                quote(&r.dialect),
-                get(r),
-            );
+            let l = [
+                ("user", r.user.as_str()),
+                ("account", &r.account),
+                ("provider", &r.provider),
+                ("requested_model", &r.requested_model),
+                ("model", &r.model),
+                ("effort", &r.effort),
+                ("dialect", &r.dialect),
+                ("kind", kind),
+            ];
+            sample(out, "slop_tokens_total", &l, get(r));
         }
     }
 }
 
-fn render_errors(out: &mut String, rows: &[crate::db::usage::ErrorRow]) {
-    counter_header(out, "slop_errors_total", "Failed requests by cause");
+fn usage_labels(r: &MetricsRow) -> [(&'static str, &str); 8] {
+    [
+        ("user", &r.user),
+        ("account", &r.account),
+        ("provider", &r.provider),
+        ("requested_model", &r.requested_model),
+        ("model", &r.model),
+        ("effort", &r.effort),
+        ("service_tier", &r.service_tier),
+        ("dialect", &r.dialect),
+    ]
+}
+
+fn render_errors(out: &mut String, rows: &[ErrorRow]) {
+    counter(out, "slop_errors_total", "Failed requests by cause");
     for r in rows {
-        let _ = writeln!(
-            out,
-            "slop_errors_total{{user={},provider={},kind={}}} {}",
-            quote(&r.user),
-            quote(&r.provider),
-            quote(&r.kind),
-            r.count,
-        );
+        let l = [
+            ("user", r.user.as_str()),
+            ("provider", &r.provider),
+            ("kind", &r.kind),
+        ];
+        sample(out, "slop_errors_total", &l, r.count);
     }
 }
 
-fn render_tools(out: &mut String, rows: &[crate::db::usage::ToolRow]) {
-    counter_header(
+fn render_tools(out: &mut String, rows: &[ToolRow]) {
+    counter(
         out,
         "slop_tool_turns_total",
         "Turns that used each tool. Names only, never their arguments. A turn \
          calling one tool repeatedly counts once",
     );
     for r in rows {
-        let _ = writeln!(
-            out,
-            "slop_tool_turns_total{{user={},tool={}}} {}",
-            quote(&r.user),
-            quote(&r.tool),
-            r.count,
-        );
+        let l = [("user", r.user.as_str()), ("tool", &r.tool)];
+        sample(out, "slop_tool_turns_total", &l, r.count);
     }
 }
 
-fn render_insights(out: &mut String, rows: &[crate::db::usage::InsightRow]) {
-    let line = |out: &mut String, name: &str, r: &crate::db::usage::InsightRow, v: i64| {
-        let _ = writeln!(
-            out,
-            "{name}{{user={},account={},stop_reason={}}} {v}",
-            quote(&r.user),
-            quote(&r.account),
-            quote(&r.stop_reason),
-        );
-    };
+fn render_insights(out: &mut String, rows: &[InsightRow]) {
     for (name, help, get) in INSIGHTS {
-        counter_header(out, name, help);
+        counter(out, name, help);
         for r in rows {
-            line(out, name, r, get(r));
+            let l = [
+                ("user", r.user.as_str()),
+                ("account", &r.account),
+                ("stop_reason", &r.stop_reason),
+            ];
+            sample(out, name, &l, get(r));
         }
     }
 }
 
-fn render_sessions(out: &mut String, rows: &[crate::db::usage::SessionRow]) {
-    gauge_header(
-        out,
-        "slop_sessions",
-        "Distinct conversations seen. Divide slop_requests_total by it for turns per session",
-    );
-    for r in rows {
-        let _ = writeln!(
-            out,
-            "slop_sessions{{user={}}} {}",
-            quote(&r.user),
-            r.sessions
-        );
-    }
-    gauge_header(
-        out,
-        "slop_session_account_switches",
-        "Times a conversation moved to a different account. Each move re-bills \
-         the whole prefix upstream, so this is what a cache hit rate collapse \
-         looks like before the cost shows up",
-    );
-    for r in rows {
-        let _ = writeln!(
-            out,
-            "slop_session_account_switches{{user={}}} {}",
-            quote(&r.user),
-            r.switches
-        );
-    }
-    gauge_header(
-        out,
-        "slop_session_tokens_max",
-        "Tokens the largest single conversation has billed over its life, \
-         counting every turn it ever resent rather than what fits in the \
-         context now. Reasoning is excluded, being a subset of output",
-    );
-    for r in rows {
-        let _ = writeln!(
-            out,
-            "slop_session_tokens_max{{user={}}} {}",
-            quote(&r.user),
-            r.tokens_max
-        );
-    }
-    gauge_header(
-        out,
-        "slop_session_deepest_turn",
-        "Longest conversation seen, in messages carried",
-    );
-    for r in rows {
-        let _ = writeln!(
-            out,
-            "slop_session_deepest_turn{{user={}}} {}",
-            quote(&r.user),
-            r.deepest
-        );
+fn render_sessions(out: &mut String, rows: &[SessionRow]) {
+    for (name, help, get) in SESSION_GAUGES {
+        gauge(out, name, help);
+        for r in rows {
+            sample(out, name, &[("user", &r.user)], get(r));
+        }
     }
 }
 
-type InsightGetter = fn(&crate::db::usage::InsightRow) -> i64;
+type AccountGauge = fn(&AccountSnapshot, i64) -> Option<f64>;
+const ACCOUNT_GAUGES: [(&str, &str, AccountGauge); 6] = [
+    (
+        "slop_account_capacity",
+        "Share of the provider's largest plan this account is worth, for \
+         weighting a pooled average. Emitted only where quota is reported, so \
+         a provider that reports none stays out of the average entirely",
+        |a, _| a.usage.as_ref().map(|_| plan_capacity(a)),
+    ),
+    (
+        "slop_account_status",
+        "Account state: 0 active, 1 cooling down, 2 disabled",
+        |a, _| Some(a.status as f64),
+    ),
+    (
+        "slop_account_cooldown_seconds",
+        "Seconds until the account is retried, 0 when active",
+        |a, _| Some(a.cooldown_seconds as f64),
+    ),
+    (
+        "slop_account_consecutive_fails",
+        "Consecutive upstream failures feeding the backoff",
+        |a, _| Some(a.consecutive_fails as f64),
+    ),
+    (
+        "slop_account_usage_age_seconds",
+        "Age of the quota sample. Codex only reports quota on a served \
+         response, so an idle account's figures stop advancing",
+        |a, now| {
+            a.usage
+                .as_ref()
+                .map(|u| (now - u.observed_at).max(0) as f64)
+        },
+    ),
+    (
+        "slop_account_locked",
+        "1 when the provider has locked the account out until a window resets",
+        |a, _| a.usage.as_ref().map(|u| f64::from(u.locked)),
+    ),
+];
+
+type WindowGauge = fn(&UsageWindow, i64) -> Option<f64>;
+const WINDOW_GAUGES: [(&str, &str, WindowGauge); 2] = [
+    (
+        "slop_account_utilization_ratio",
+        "Fraction of the account's rolling limit window consumed",
+        |w, _| Some(w.utilization),
+    ),
+    (
+        "slop_account_window_reset_seconds",
+        "Seconds until the account's limit window rolls over",
+        |w, now| w.resets_at.map(|t| (t - now).max(0) as f64),
+    ),
+];
+
+type UsageCounter = fn(&MetricsRow) -> f64;
+const USAGE_COUNTERS: [(&str, &str, UsageCounter); 5] = [
+    ("slop_requests_total", "Requests served", |r| {
+        r.requests as f64
+    }),
+    ("slop_request_errors_total", "Requests that failed", |r| {
+        r.errors as f64
+    }),
+    (
+        "slop_request_duration_seconds_sum",
+        "Total time served, divide by slop_requests_total for the mean",
+        |r| r.duration_ms as f64 / 1000.0,
+    ),
+    (
+        "slop_cost_usd_total",
+        "What the traffic actually cost",
+        |r| r.cost_usd,
+    ),
+    (
+        "slop_list_cost_usd_total",
+        "What the same traffic would have cost at the model's list rate, so a \
+         free tier is worth something rather than reading as zero spend",
+        |r| r.list_cost_usd,
+    ),
+];
+
+type TokenGetter = fn(&MetricsRow) -> i64;
+const TOKEN_KINDS: [(&str, TokenGetter); 5] = [
+    ("input", |r| r.input_tokens),
+    ("output", |r| r.output_tokens),
+    ("cache_read", |r| r.cache_read_tokens),
+    ("cache_write", |r| r.cache_write_tokens),
+    ("reasoning", |r| r.reasoning_tokens),
+];
+
+type InsightGetter = fn(&InsightRow) -> i64;
 const INSIGHTS: [(&str, &str, InsightGetter); 9] = [
     (
         "slop_stop_reason_total",
@@ -404,44 +322,71 @@ const INSIGHTS: [(&str, &str, InsightGetter); 9] = [
     ),
 ];
 
-type TokenGetter = fn(&crate::db::usage::MetricsRow) -> i64;
-const TOKEN_KINDS: [(&str, TokenGetter); 5] = [
-    ("input", |r| r.input_tokens),
-    ("output", |r| r.output_tokens),
-    ("cache_read", |r| r.cache_read_tokens),
-    ("cache_write", |r| r.cache_write_tokens),
-    ("reasoning", |r| r.reasoning_tokens),
+type SessionGauge = fn(&SessionRow) -> i64;
+const SESSION_GAUGES: [(&str, &str, SessionGauge); 4] = [
+    (
+        "slop_sessions",
+        "Distinct conversations seen. Divide slop_requests_total by it for turns per session",
+        |r| r.sessions,
+    ),
+    (
+        "slop_session_account_switches",
+        "Times a conversation moved to a different account. Each move re-bills \
+         the whole prefix upstream, so this is what a cache hit rate collapse \
+         looks like before the cost shows up",
+        |r| r.switches,
+    ),
+    (
+        "slop_session_tokens_max",
+        "Tokens the largest single conversation has billed over its life, \
+         counting every turn it ever resent rather than what fits in the \
+         context now. Reasoning is excluded, being a subset of output",
+        |r| r.tokens_max,
+    ),
+    (
+        "slop_session_deepest_turn",
+        "Longest conversation seen, in messages carried",
+        |r| r.deepest,
+    ),
 ];
 
-fn gauge_header(out: &mut String, name: &str, help: &str) {
-    let _ = writeln!(out, "# HELP {name} {help}\n# TYPE {name} gauge");
+fn gauge(out: &mut String, name: &str, help: &str) {
+    family(out, name, "gauge", help);
 }
 
-fn counter_header(out: &mut String, name: &str, help: &str) {
-    let _ = writeln!(out, "# HELP {name} {help}\n# TYPE {name} counter");
+fn counter(out: &mut String, name: &str, help: &str) {
+    family(out, name, "counter", help);
 }
 
-fn line(out: &mut String, name: &str, a: &AccountSnapshot, extra: &[(&str, &str)], value: f64) {
-    let mut labels = format!("provider=\"{}\",account={}", a.provider, quote(&a.display));
-    for (k, v) in extra {
-        let _ = write!(labels, ",{k}={}", quote(v));
+fn family(out: &mut String, name: &str, kind: &str, help: &str) {
+    let _ = writeln!(out, "# HELP {name} {help}\n# TYPE {name} {kind}");
+}
+
+fn account(
+    out: &mut String,
+    name: &str,
+    a: &AccountSnapshot,
+    extra: &[(&str, &str)],
+    value: impl Display,
+) {
+    let mut labels = vec![
+        ("provider", a.provider.as_str()),
+        ("account", a.display.as_str()),
+    ];
+    labels.extend_from_slice(extra);
+    sample(out, name, &labels, value);
+}
+
+fn sample(out: &mut String, name: &str, labels: &[(&str, &str)], value: impl Display) {
+    out.push_str(name);
+    out.push('{');
+    for (i, (k, v)) in labels.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let _ = write!(out, "{k}={}", label(v));
     }
-    let _ = writeln!(out, "{name}{{{labels}}} {value}");
-}
-
-fn usage_line(out: &mut String, name: &str, r: &crate::db::usage::MetricsRow, value: f64) {
-    let _ = writeln!(
-        out,
-        "{name}{{user={},account={},provider={},requested_model={},model={},effort={},service_tier={},dialect={}}} {value}",
-        quote(&r.user),
-        quote(&r.account),
-        quote(&r.provider),
-        quote(&r.requested_model),
-        quote(&r.model),
-        label(&r.effort),
-        label(&r.service_tier),
-        quote(&r.dialect),
-    );
+    let _ = writeln!(out, "}} {value}");
 }
 
 fn bool_label(v: bool) -> &'static str {
@@ -453,9 +398,6 @@ fn bool_label(v: bool) -> &'static str {
 /// is single-frame, so the merge it depends on then silently does nothing and
 /// the table renders raw `Value #A` columns.
 fn label(s: &str) -> String {
-    quote(if s.is_empty() { "none" } else { s })
-}
-
-fn quote(s: &str) -> String {
+    let s = if s.is_empty() { "none" } else { s };
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }

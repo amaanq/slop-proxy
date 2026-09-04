@@ -39,17 +39,28 @@ pub struct AnthMessage {
 pub enum MessageContent {
     Text(String),
     Blocks(Vec<ContentBlock>),
+    Empty,
+}
+
+/// A `null` where the API documents a string, which the API itself accepts.
+fn nullable<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
     Text {
-        #[serde(default)]
+        #[serde(default, deserialize_with = "nullable")]
         text: String,
     },
     Image {
-        source: ImageSource,
+        #[serde(default)]
+        source: Option<ImageSource>,
     },
     ToolUse {
         id: String,
@@ -65,7 +76,7 @@ pub enum ContentBlock {
         is_error: Option<bool>,
     },
     Thinking {
-        #[serde(default)]
+        #[serde(default, deserialize_with = "nullable")]
         thinking: String,
         #[serde(default)]
         signature: Option<String>,
@@ -88,6 +99,8 @@ pub enum ImageSource {
         #[serde(default)]
         url: String,
     },
+    #[serde(other)]
+    Other,
 }
 
 fn default_media_type() -> String {
@@ -313,6 +326,7 @@ fn convert_message(msg: &AnthMessage, out: &mut Vec<InputItem>) -> Result<(), Tr
             &text_block[..]
         }
         MessageContent::Blocks(b) => b.as_slice(),
+        MessageContent::Empty => &[],
     };
 
     let mut parts = Vec::<ContentPart>::new();
@@ -337,10 +351,11 @@ fn convert_message(msg: &AnthMessage, out: &mut Vec<InputItem>) -> Result<(), Tr
             }
             ContentBlock::Image { source } => {
                 let url = match source {
-                    ImageSource::Base64 { media_type, data } => {
+                    Some(ImageSource::Base64 { media_type, data }) => {
                         format!("data:{media_type};base64,{data}")
                     }
-                    ImageSource::Url { url } => url.clone(),
+                    Some(ImageSource::Url { url }) => url.clone(),
+                    Some(ImageSource::Other) | None => continue,
                 };
                 parts.push(ContentPart::InputImage { image_url: url });
             }
@@ -415,5 +430,32 @@ fn tool_result_text(content: Option<&ToolResultContent>) -> String {
             .collect::<Vec<_>>()
             .join("\n"),
         Some(ToolResultContent::Other(other)) => other.get().to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AnthropicRequest;
+
+    fn parse(content: serde_json::Value) -> Result<AnthropicRequest, serde_json::Error> {
+        serde_json::from_value(serde_json::json!({
+            "model": "m", "max_tokens": 1,
+            "messages": [{"role": "user", "content": content}]
+        }))
+    }
+
+    /// A single block the API tolerates used to sink the whole request with
+    /// "did not match any variant of untagged enum MessageContent".
+    #[test]
+    fn a_tolerated_block_does_not_sink_the_request() {
+        for content in [
+            serde_json::Value::Null,
+            serde_json::json!([{"type": "image", "source": {"type": "file", "file_id": "f"}}]),
+            serde_json::json!([{"type": "image"}]),
+            serde_json::json!([{"type": "text", "text": null}]),
+            serde_json::json!([{"type": "thinking", "thinking": null, "signature": "s"}]),
+        ] {
+            parse(content.clone()).unwrap_or_else(|e| panic!("{content}: {e}"));
+        }
     }
 }

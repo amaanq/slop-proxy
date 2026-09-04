@@ -1,15 +1,14 @@
 use axum::body::{Body, Bytes};
 use axum::http::HeaderMap;
 use axum::response::Response;
-use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::value::RawValue;
 
 use super::auth::AuthInfo;
-use super::error::{Dialect, error_response, pool_error_response, pool_error_status};
+use super::error::{Dialect, error_response, pool_error_response};
+use super::pipeline::{dispatch_failed, read_body, relayed};
 use super::{AppState, LogGuard, log_error, log_usage};
 use crate::anthropic::client::RelayHeaders;
-use crate::db::usage::UsageRecord;
 use crate::pool::Route;
 use crate::pool::anthropic::Relay as AnthropicRelay;
 use crate::pool::glm::Relay as GlmRelay;
@@ -213,24 +212,16 @@ pub async fn messages(
     let started = std::time::Instant::now();
     let key = peek.session_key(&auth);
     let facts = anthropic_facts(&body, &headers);
-    let record = UsageRecord {
-        meter_id: Some(auth.meter_id),
-        token_id: Some(auth.token_id),
-        user: auth.user.clone(),
-        provider: Some(Provider::Anthropic),
-        dialect: "messages",
-        requested_model: peek.model.clone(),
-        upstream_model: peek.model.clone(),
-        effort: peek.effort.clone(),
-        status: 200,
-        session_key: key.clone(),
-        turn_index: facts.turn_index,
-        tools_declared: facts.tools_declared,
-        thinking_budget: facts.thinking_budget,
-        image_count: facts.image_count,
-        request_bytes: facts.request_bytes,
-        ..Default::default()
-    };
+    let mut record = super::pipeline::record(
+        &auth,
+        "messages",
+        Provider::Anthropic,
+        peek.model.clone(),
+        peek.model.clone(),
+        facts,
+    );
+    record.effort = peek.effort.clone();
+    record.session_key = key.clone();
 
     if state.cfg.anthropic.require_claude_code && !is_claude_code(&headers) {
         log_error(&state, record, 403, "not_claude_code");
@@ -256,12 +247,8 @@ pub async fn messages(
         .await
     {
         Ok(r) => r,
-        Err(e) => {
-            log_error(&state, record, pool_error_status(&e), "pool");
-            return pool_error_response(DIALECT, &state.cfg.models, e);
-        }
+        Err(e) => return dispatch_failed(&state, record, DIALECT, e),
     };
-    let mut record = record;
     record.account_id = account_id;
     record.status = resp.status().as_u16() as i64;
 
@@ -277,34 +264,24 @@ pub async fn messages(
 
     if streaming {
         let capture = UsageCapture::default();
-        let guard = LogGuard::new(state.clone(), capture.clone(), record, started);
         let mut scan = SseScan::new(capture.clone());
-        // `chain` only runs if the caller stayed to drain the body.
-        let stream = resp
-            .bytes_stream()
-            .map(move |item| {
-                let _ = &guard;
-                match &item {
-                    Ok(bytes) => scan.feed(bytes),
-                    Err(_) => scan.capture().fail("upstream_stream_error"),
-                }
-                item
-            })
-            .chain(futures_util::stream::once(async move {
-                capture.note_upstream_eof();
-                Ok(axum::body::Bytes::new())
-            }));
-        builder
-            .body(Body::from_stream(stream))
-            .unwrap_or_else(|e| error_response(DIALECT, 502, "api_error", &e.to_string()))
+        relayed(
+            builder,
+            resp,
+            LogGuard::new(state, capture.clone(), record, started),
+            capture,
+            DIALECT,
+            move |bytes| {
+                scan.feed(&bytes);
+                bytes
+            },
+            Bytes::new,
+        )
     } else {
         let ok = resp.status().is_success();
-        let bytes = match resp.bytes().await {
+        let bytes = match read_body(&state, &record, DIALECT, resp).await {
             Ok(b) => b,
-            Err(e) => {
-                log_error(&state, record, 502, "upstream_read");
-                return error_response(DIALECT, 502, "api_error", &e.to_string());
-            }
+            Err(r) => return r,
         };
         if ok {
             if let Ok(m) = serde_json::from_slice::<MessageEnvelope>(&bytes) {
@@ -336,24 +313,16 @@ pub async fn glm(
     let started = std::time::Instant::now();
     let key = peek.session_key(&auth);
     let facts = anthropic_facts(&body, &headers);
-    let record = UsageRecord {
-        meter_id: Some(auth.meter_id),
-        token_id: Some(auth.token_id),
-        user: auth.user.clone(),
-        provider: Some(Provider::Glm),
-        dialect: "messages",
-        requested_model: peek.model.clone(),
-        upstream_model: peek.model.clone(),
-        effort: peek.effort.clone(),
-        status: 200,
-        session_key: key.clone(),
-        turn_index: facts.turn_index,
-        tools_declared: facts.tools_declared,
-        thinking_budget: facts.thinking_budget,
-        image_count: facts.image_count,
-        request_bytes: facts.request_bytes,
-        ..Default::default()
-    };
+    let mut record = super::pipeline::record(
+        &auth,
+        "messages",
+        Provider::Glm,
+        peek.model.clone(),
+        peek.model.clone(),
+        facts,
+    );
+    record.effort = peek.effort.clone();
+    record.session_key = key.clone();
 
     let (account_id, resp) = match state
         .pools
@@ -372,12 +341,8 @@ pub async fn glm(
         .await
     {
         Ok(r) => r,
-        Err(e) => {
-            log_error(&state, record, pool_error_status(&e), "pool");
-            return pool_error_response(DIALECT, &state.cfg.models, e);
-        }
+        Err(e) => return dispatch_failed(&state, record, DIALECT, e),
     };
-    let mut record = record;
     record.account_id = account_id;
     record.status = resp.status().as_u16() as i64;
 
@@ -390,34 +355,25 @@ pub async fn glm(
 
     if streaming {
         let capture = UsageCapture::default();
-        let guard = LogGuard::new(state.clone(), capture.clone(), record, started);
         let mut scan = SseScan::new(capture.clone());
-        let stream = resp
-            .bytes_stream()
-            .map(move |item| {
-                let _ = &guard;
-                match &item {
-                    Ok(bytes) => scan.feed(bytes),
-                    Err(_) => scan.capture().fail("upstream_stream_error"),
-                }
-                item
-            })
-            .chain(futures_util::stream::once(async move {
-                capture.note_upstream_eof();
-                Ok(axum::body::Bytes::new())
-            }));
-        return builder
-            .body(Body::from_stream(stream))
-            .unwrap_or_else(|e| error_response(DIALECT, 502, "api_error", &e.to_string()));
+        return relayed(
+            builder,
+            resp,
+            LogGuard::new(state, capture.clone(), record, started),
+            capture,
+            DIALECT,
+            move |bytes| {
+                scan.feed(&bytes);
+                bytes
+            },
+            Bytes::new,
+        );
     }
 
     let ok = resp.status().is_success();
-    let bytes = match resp.bytes().await {
+    let bytes = match read_body(&state, &record, DIALECT, resp).await {
         Ok(b) => b,
-        Err(e) => {
-            log_error(&state, record, 502, "upstream_read");
-            return error_response(DIALECT, 502, "api_error", &e.to_string());
-        }
+        Err(r) => return r,
     };
     if ok {
         if let Ok(m) = serde_json::from_slice::<MessageEnvelope>(&bytes) {
@@ -545,10 +501,6 @@ struct SseScan {
 }
 
 impl SseScan {
-    fn capture(&self) -> &UsageCapture {
-        &self.capture
-    }
-
     fn new(capture: UsageCapture) -> Self {
         Self {
             buf: String::new(),

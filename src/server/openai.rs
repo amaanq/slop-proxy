@@ -1,4 +1,3 @@
-use std::collections::VecDeque;
 use std::convert::Infallible;
 
 use axum::body::Bytes;
@@ -10,9 +9,9 @@ use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
 
 use super::auth::AuthInfo;
-use super::error::{Dialect, pool_error_response, pool_error_status, translation_error};
+use super::error::{Dialect, translation_error};
+use super::pipeline::{self, apply_snapshot, dispatch_failed, translated};
 use super::{AppState, LogGuard, cache_key, log_error, log_rejected, log_usage};
-use crate::codex::sse::EventStream;
 use crate::codex::types::{OutputItem, ResponsesEvent, ResponsesRequest, Usage};
 use crate::db::usage::UsageRecord;
 use crate::pool::Route;
@@ -78,27 +77,19 @@ pub async fn chat_completions(
     };
     upstream_req.prompt_cache_key = Some(cache_key(&auth.user, &upstream_req));
 
-    let record = UsageRecord {
-        meter_id: Some(auth.meter_id),
-        token_id: Some(auth.token_id),
-        user: auth.user.clone(),
-        provider: Some(provider),
-        dialect: "chat",
-        requested_model: req.model.clone(),
-        upstream_model: upstream_req.model.clone(),
-        effort: upstream_req
-            .reasoning
-            .as_ref()
-            .map(|r| r.effort.clone())
-            .unwrap_or_default(),
-        status: 200,
-        turn_index: facts.turn_index,
-        tools_declared: facts.tools_declared,
-        thinking_budget: facts.thinking_budget,
-        image_count: facts.image_count,
-        request_bytes: facts.request_bytes,
-        ..Default::default()
-    };
+    let mut record = pipeline::record(
+        &auth,
+        "chat",
+        provider,
+        req.model.clone(),
+        upstream_req.model.clone(),
+        facts,
+    );
+    record.effort = upstream_req
+        .reasoning
+        .as_ref()
+        .map(|r| r.effort.clone())
+        .unwrap_or_default();
 
     let session_key = upstream_req.prompt_cache_key.clone().unwrap_or_default();
     let route = Route {
@@ -111,12 +102,8 @@ pub async fn chat_completions(
         upstream,
     } = match state.pools.responses(provider, route, &upstream_req).await {
         Ok(d) => d,
-        Err(e) => {
-            log_error(&state, record, pool_error_status(&e), "pool");
-            return pool_error_response(DIALECT, &state.cfg.models, e);
-        }
+        Err(e) => return dispatch_failed(&state, record, DIALECT, e),
     };
-    let mut record = record;
     record.account_id = account_id;
     record.session_key = session_key;
 
@@ -124,16 +111,27 @@ pub async fn chat_completions(
     let events = upstream.events(&upstream_req.model, capture.clone());
 
     if req.stream.unwrap_or(false) {
-        let translator = OpenAiStream::new(req.model.clone(), req.include_usage(), capture.clone());
+        let mut translator =
+            OpenAiStream::new(req.model.clone(), req.include_usage(), capture.clone());
         let guard = LogGuard::new(state.clone(), capture, record, started);
-        stream_response(events, translator, guard)
+        translated(events, guard, move |ev| {
+            let (chunks, done) = match ev {
+                Some(ev) => (translator.handle(ev), false),
+                None => (translator.finalize(), true),
+            };
+            let mut out: Vec<Event> = chunks
+                .into_iter()
+                .map(|chunk| Event::default().data(chunk))
+                .collect();
+            if done {
+                out.push(Event::default().data("[DONE]"));
+            }
+            out
+        })
     } else {
         let agg = aggregate(events, &capture).await;
         let snap = capture.snapshot();
-        record.input_tokens = snap.input_tokens;
-        record.output_tokens = snap.output_tokens;
-        record.cache_read_tokens = snap.cache_read_tokens;
-        record.reasoning_tokens = snap.reasoning_tokens;
+        apply_snapshot(&mut record, &snap);
         if agg.stop == StopKind::Error {
             let msg = agg
                 .error_message
@@ -145,55 +143,6 @@ pub async fn chat_completions(
         log_usage(&state, record);
         Json(render_aggregated(&agg, &req.model)).into_response()
     }
-}
-
-fn stream_response(upstream: EventStream, translator: OpenAiStream, guard: LogGuard) -> Response {
-    struct St {
-        upstream: EventStream,
-        translator: OpenAiStream,
-        queue: VecDeque<Event>,
-        finished: bool,
-        done_sent: bool,
-        _guard: LogGuard,
-    }
-    let st = St {
-        upstream,
-        translator,
-        queue: VecDeque::new(),
-        finished: false,
-        done_sent: false,
-        _guard: guard,
-    };
-    let stream = futures_util::stream::unfold(st, |mut st| async move {
-        loop {
-            if let Some(ev) = st.queue.pop_front() {
-                return Some((Ok::<_, Infallible>(ev), st));
-            }
-            if st.finished {
-                if !st.done_sent {
-                    st.done_sent = true;
-                    return Some((Ok(Event::default().data("[DONE]")), st));
-                }
-                return None;
-            }
-            match st.upstream.next().await {
-                Some(ev) => {
-                    for chunk in st.translator.handle(ev) {
-                        st.queue.push_back(Event::default().data(chunk));
-                    }
-                }
-                None => {
-                    st.finished = true;
-                    for chunk in st.translator.finalize() {
-                        st.queue.push_back(Event::default().data(chunk));
-                    }
-                }
-            }
-        }
-    });
-    Sse::new(stream)
-        .keep_alive(KeepAlive::default())
-        .into_response()
 }
 
 /// Codex opens a WebSocket to this path before falling back to HTTP, and only
@@ -423,29 +372,21 @@ pub async fn responses_passthrough(
         .as_ref()
         .map(|t| super::facts::RequestFacts::from_responses(t, &headers))
         .unwrap_or_default();
-    let record = UsageRecord {
-        meter_id: Some(auth.meter_id),
-        token_id: Some(auth.token_id),
-        user: auth.user.clone(),
-        provider: Some(provider),
-        dialect: "responses",
+    let mut record = pipeline::record(
+        &auth,
+        "responses",
+        provider,
         requested_model,
-        upstream_model: resolved.model,
-        effort: req
-            .reasoning
-            .as_ref()
-            .and_then(|r| r.effort.clone())
-            .unwrap_or_default(),
-        service_tier: req.service_tier.clone().unwrap_or_default(),
-        status: 200,
-        session_key: session_key.clone(),
-        turn_index: facts.turn_index,
-        tools_declared: facts.tools_declared,
-        thinking_budget: facts.thinking_budget,
-        image_count: facts.image_count,
-        request_bytes: facts.request_bytes,
-        ..Default::default()
-    };
+        resolved.model,
+        facts,
+    );
+    record.effort = req
+        .reasoning
+        .as_ref()
+        .and_then(|r| r.effort.clone())
+        .unwrap_or_default();
+    record.service_tier = req.service_tier.clone().unwrap_or_default();
+    record.session_key = session_key.clone();
     let route = Route {
         session_key: &session_key,
         model: &record.requested_model,
@@ -460,12 +401,8 @@ pub async fn responses_passthrough(
         .await
     {
         Ok(d) => d,
-        Err(e) => {
-            log_error(&state, record, pool_error_status(&e), "pool");
-            return pool_error_response(DIALECT, &state.cfg.models, e);
-        }
+        Err(e) => return dispatch_failed(&state, record, DIALECT, e),
     };
-    let mut record = record;
     record.account_id = account_id;
     let capture = UsageCapture::default();
     let resp = match upstream {
@@ -511,10 +448,7 @@ pub async fn responses_passthrough(
             final_response = Some(response);
         }
         let snap = capture.snapshot();
-        record.input_tokens = snap.input_tokens;
-        record.output_tokens = snap.output_tokens;
-        record.cache_read_tokens = snap.cache_read_tokens;
-        record.reasoning_tokens = snap.reasoning_tokens;
+        apply_snapshot(&mut record, &snap);
         log_usage(&state, record);
         match final_response {
             Some(v) => {
@@ -580,10 +514,7 @@ async fn bridged_responses(
         }
     }
     let snap = capture.snapshot();
-    record.input_tokens = snap.input_tokens;
-    record.output_tokens = snap.output_tokens;
-    record.cache_read_tokens = snap.cache_read_tokens;
-    record.reasoning_tokens = snap.reasoning_tokens;
+    apply_snapshot(&mut record, &snap);
     log_usage(&state, record);
     Json(NonStreamResponse {
         id: format!("resp_{}", uuid::Uuid::new_v4().simple()),

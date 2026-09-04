@@ -24,7 +24,7 @@ use crate::clock::unix_now;
 use crate::codex::types::{OutputItem, ResponsesEvent, ResponsesRequest, Usage};
 use crate::db::usage::UsageRecord;
 use crate::pool::pools::{Dispatched, Upstream};
-use crate::pool::{Route, UsageWindow, window_seconds};
+use crate::pool::{PoolError, Route, UsageWindow, window_seconds};
 use crate::provider::Provider;
 use crate::translate::chat::ChatRequest;
 use crate::translate::openai_req;
@@ -321,9 +321,95 @@ struct ReasoningPatch {
    rest: serde_json::Map<String, serde_json::Value>,
 }
 
-/// Zen 400s the whole request when a `*_call` item and its `*_call_output`
-/// do not both appear, which is what a client that truncated its history
-/// mid-cycle sends. Every other item is left where it was.
+#[derive(Default)]
+struct ZenFixups {
+   hoisted: usize,
+   rewritten: usize,
+   dropped: usize,
+   unpaired: usize,
+}
+
+#[derive(serde::Serialize)]
+struct AssistantText {
+   #[serde(rename = "type")]
+   kind: &'static str,
+   role: &'static str,
+   content: [TextPart; 1],
+}
+
+#[derive(serde::Serialize)]
+struct TextPart {
+   #[serde(rename = "type")]
+   kind: &'static str,
+   text: String,
+}
+
+/// Zen 400s these codex-only items as `input[N] did not match any supported type`.
+fn zen_input_fixups(rest: &mut serde_json::Map<String, Value>) -> ZenFixups {
+   let mut fixes = ZenFixups::default();
+   let mut hoisted = Vec::new();
+   if let Some(&mut Value::Array(ref mut items)) = rest.get_mut("input") {
+      let before = items.len();
+      for item in items.iter_mut() {
+         let kind = item
+            .get("type")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_default();
+         match kind.as_str() {
+            "additional_tools" => {
+               if let Some(&mut Value::Array(ref mut tools)) = item.get_mut("tools") {
+                  hoisted.append(tools);
+               }
+               *item = Value::Null;
+            },
+            "agent_message" => {
+               let text = item
+                  .get("content")
+                  .and_then(Value::as_array)
+                  .map(|parts| {
+                     parts
+                        .iter()
+                        .filter_map(|part| part.get("text").and_then(Value::as_str))
+                        .collect::<String>()
+                  })
+                  .unwrap_or_default();
+               *item = if text.is_empty() {
+                  Value::Null
+               } else {
+                  fixes.rewritten += 1;
+                  serde_json::to_value(AssistantText {
+                     kind: "message",
+                     role: "assistant",
+                     content: [TextPart {
+                        kind: "output_text",
+                        text,
+                     }],
+                  })
+                  .unwrap_or(Value::Null)
+               };
+            },
+            "local_shell_call" | "context_compaction" => *item = Value::Null,
+            _ => {},
+         }
+      }
+      items.retain(|item| !item.is_null());
+      fixes.dropped = before - items.len();
+   }
+   if !hoisted.is_empty() {
+      fixes.hoisted = hoisted.len();
+      match rest.get_mut("tools") {
+         Some(&mut Value::Array(ref mut tools)) => tools.append(&mut hoisted),
+         _ => {
+            rest.insert("tools".into(), Value::Array(hoisted));
+         },
+      }
+   }
+   fixes.unpaired = drop_unpaired_tool_items(rest);
+   fixes
+}
+
+/// An unpaired `*_call` or `*_call_output` is a 400 on zen.
 fn drop_unpaired_tool_items(rest: &mut serde_json::Map<String, Value>) -> usize {
    let Some(&mut Value::Array(ref mut items)) = rest.get_mut("input") else {
       return 0;
@@ -355,6 +441,30 @@ fn drop_unpaired_tool_items(rest: &mut serde_json::Map<String, Value>) -> usize 
       None => true,
    });
    before - items.len()
+}
+
+fn rejected_index(body: &str) -> Option<usize> {
+   let tail = body.split_once("\"param\":\"input[")?.1;
+   tail.split(']').next()?.parse().ok()
+}
+
+fn note_rejected_item(body: &str, rest: &serde_json::Map<String, Value>) {
+   let Some(index) = rejected_index(body) else {
+      return;
+   };
+   let Some(item) = rest
+      .get("input")
+      .and_then(Value::as_array)
+      .and_then(|items| items.get(index))
+   else {
+      return;
+   };
+   let kind = item.get("type").and_then(Value::as_str).unwrap_or("?");
+   let keys: Vec<&str> = item
+      .as_object()
+      .map(|fields| fields.keys().map(String::as_str).collect())
+      .unwrap_or_default();
+   tracing::warn!(index, kind, ?keys, "zen rejected an input item");
 }
 
 pub async fn responses_passthrough(
@@ -392,9 +502,16 @@ pub async fn responses_passthrough(
    }
 
    if provider == Provider::Zen {
-      let dropped = drop_unpaired_tool_items(&mut req.rest);
-      if dropped > 0 {
-         tracing::warn!(dropped, user = %auth.user, "dropped tool items zen rejects as unpaired");
+      let fixes = zen_input_fixups(&mut req.rest);
+      if fixes.hoisted + fixes.rewritten + fixes.dropped + fixes.unpaired > 0 {
+         tracing::warn!(
+            fixes.hoisted,
+            fixes.rewritten,
+            fixes.dropped,
+            fixes.unpaired,
+            user = %auth.user,
+            "reshaped codex-only input items for zen"
+         );
       }
    }
 
@@ -453,7 +570,14 @@ pub async fn responses_passthrough(
       .await
    {
       Ok(dispatched) => dispatched,
-      Err(err) => return dispatch_failed(&state, record, DIALECT, err),
+      Err(err) => {
+         if provider == Provider::Zen
+            && let PoolError::BadRequest { ref body, .. } = err
+         {
+            note_rejected_item(body, &req.rest);
+         }
+         return dispatch_failed(&state, record, DIALECT, err);
+      },
    };
    record.account_id = account_id;
    let capture = UsageCapture::default();
@@ -840,6 +964,53 @@ mod unpaired_tool_tests {
             "reasoning"
          ]
       );
+   }
+
+   #[test]
+   fn codex_only_items_are_hoisted_rewritten_or_dropped() {
+      let mut rest = input(serde_json::json!([
+          {"type": "additional_tools", "role": "developer", "tools": [{"type": "function", "name": "spawn_agent"}, {"type": "function", "name": "wait_agent"}]},
+          {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "go"}]},
+          {"type": "agent_message", "author": "main", "recipient": "worker", "content": [{"type": "input_text", "text": "check "}, {"type": "encrypted_content", "encrypted_content": "x"}, {"type": "input_text", "text": "the tree"}]},
+          {"type": "local_shell_call", "call_id": "sh1", "action": {"type": "exec", "command": ["ls"]}},
+          {"type": "function_call_output", "call_id": "sh1", "output": "files"},
+          {"type": "context_compaction", "summary": "earlier"},
+      ]));
+      rest.insert(
+         "tools".into(),
+         serde_json::json!([{"type": "function", "name": "shell"}]),
+      );
+      let fixes = zen_input_fixups(&mut rest);
+      assert_eq!(
+         (
+            fixes.hoisted,
+            fixes.rewritten,
+            fixes.dropped,
+            fixes.unpaired
+         ),
+         (2, 1, 3, 1)
+      );
+      let names: Vec<_> = rest["tools"]
+         .as_array()
+         .unwrap()
+         .iter()
+         .map(|tool| tool["name"].as_str().unwrap())
+         .collect();
+      assert_eq!(names, ["shell", "spawn_agent", "wait_agent"]);
+      assert_eq!(
+         rest["input"],
+         serde_json::json!([
+             {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "go"}]},
+             {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "check the tree"}]},
+         ])
+      );
+   }
+
+   #[test]
+   fn the_rejected_index_is_read_from_zens_body() {
+      let body = r#"{"error":{"param":"input[4]","type":"invalid_request_error"}}"#;
+      assert_eq!(rejected_index(body), Some(4));
+      assert_eq!(rejected_index(r#"{"error":{"param":"call_id"}}"#), None);
    }
 
    #[test]

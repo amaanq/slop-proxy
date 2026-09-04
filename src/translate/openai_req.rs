@@ -1,3 +1,4 @@
+use super::TranslateError;
 use super::anthropic_req::empty_schema;
 use super::chat::{ChatContent, ChatMessage, ChatPart, ChatRequest, ChatToolChoice};
 use super::model_map;
@@ -6,7 +7,7 @@ use crate::codex::types::{
 };
 use crate::config::Config;
 
-pub fn to_responses(req: &ChatRequest, cfg: &Config) -> Result<ResponsesRequest, String> {
+pub fn to_responses(req: &ChatRequest, cfg: &Config) -> Result<ResponsesRequest, TranslateError> {
     let resolved = model_map::resolve(&cfg.models, &req.model);
     let mut out = ResponsesRequest::new(resolved.model.clone(), cfg.codex.instructions());
 
@@ -60,7 +61,7 @@ pub fn to_responses(req: &ChatRequest, cfg: &Config) -> Result<ResponsesRequest,
     Ok(out)
 }
 
-fn convert_message(msg: &ChatMessage, out: &mut Vec<InputItem>) -> Result<(), String> {
+fn convert_message(msg: &ChatMessage, out: &mut Vec<InputItem>) -> Result<(), TranslateError> {
     match msg.role.as_str() {
         "system" | "developer" => {
             let text = msg.text();
@@ -107,11 +108,11 @@ fn convert_message(msg: &ChatMessage, out: &mut Vec<InputItem>) -> Result<(), St
                 call_id: msg
                     .tool_call_id
                     .clone()
-                    .ok_or("tool message without tool_call_id")?,
+                    .ok_or(TranslateError::ToolMessageWithoutCallId)?,
                 output: ToolOutput::Text(msg.text()),
             });
         }
-        other => return Err(format!("unsupported message role {other:?}")),
+        other => return Err(TranslateError::UnsupportedRole(other.to_owned())),
     }
     Ok(())
 }

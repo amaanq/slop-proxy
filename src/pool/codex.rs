@@ -1,6 +1,8 @@
 use axum::body::Bytes;
 
-use super::{AccountUsage, AuthPolicy, Backend, Cooldown, Pool, Route, Slot, UsageWindow};
+use super::{
+    AccountUsage, AuthPolicy, Backend, Cooldown, Pool, PoolError, Route, Slot, UsageWindow,
+};
 use crate::codex::client::CodexClient;
 use crate::codex::models::ModelInfo;
 use crate::provider::Provider;
@@ -152,26 +154,26 @@ impl Pool<CodexClient> {
         None
     }
 
-    pub async fn list_models(&self) -> Result<Vec<ModelInfo>, String> {
+    pub async fn list_models(&self) -> Result<Vec<ModelInfo>, PoolError> {
         let (access, account_id) = self
             .any_active_credentials()
             .await
-            .ok_or_else(|| "no usable account; run `slop-proxy login`".to_string())?;
-        self.backend.list_models(&access, &account_id).await
+            .ok_or(PoolError::NoAccounts(Provider::OpenAi))?;
+        Ok(self.backend.list_models(&access, &account_id).await?)
     }
 
     /// The catalog body untouched, for relaying to a codex client verbatim.
-    pub async fn models_raw(&self) -> Result<String, String> {
+    pub async fn models_raw(&self) -> Result<String, PoolError> {
         let (access, account_id) = self
             .any_active_credentials()
             .await
-            .ok_or_else(|| "no usable account; run `slop-proxy login`".to_string())?;
+            .ok_or(PoolError::NoAccounts(Provider::OpenAi))?;
         let (status, body) = self.backend.models_raw(&access, &account_id).await?;
         if !status.is_success() {
-            return Err(format!(
+            return Err(PoolError::Upstream(format!(
                 "{status}: {}",
                 body.chars().take(400).collect::<String>()
-            ));
+            )));
         }
         Ok(body)
     }

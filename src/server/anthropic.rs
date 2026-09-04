@@ -12,13 +12,14 @@ use futures_util::StreamExt;
 use super::auth::AuthInfo;
 use super::error::{Dialect, pool_error_response, pool_error_status, translation_error};
 use super::{AppState, LogGuard, cache_key, log_error, log_rejected, log_usage};
-use crate::codex::sse::{EventStream, event_stream};
+use crate::codex::sse::EventStream;
 use crate::db::usage::UsageRecord;
 use crate::pool::Route;
+use crate::pool::pools::Dispatched;
 use crate::provider::Provider;
 use crate::translate::anthropic_req::{self, AnthropicRequest};
 use crate::translate::anthropic_stream::{AnthropicStream, render_aggregated};
-use crate::translate::{StopKind, UsageCapture, aggregate, count_tokens, gemini_bridge};
+use crate::translate::{StopKind, UsageCapture, aggregate, count_tokens};
 
 const DIALECT: Dialect = Dialect::Anthropic;
 
@@ -65,7 +66,7 @@ pub async fn messages(
         Ok(r) => r,
         Err(e) => {
             log_rejected(&state, &auth, "messages", &req.model);
-            return translation_error(DIALECT, &e);
+            return translation_error(DIALECT, &e.to_string());
         }
     };
     upstream_req.prompt_cache_key = Some(cache_key(&auth.user, &upstream_req));
@@ -88,67 +89,19 @@ pub async fn messages(
         ..Default::default()
     };
 
-    let req_bytes = match serde_json::to_vec(&upstream_req) {
-        Ok(v) => Bytes::from(v),
-        Err(e) => {
-            log_error(&state, record, 400, "invalid_request");
-            return translation_error(DIALECT, &format!("serializing request: {e}"));
-        }
-    };
     let session_key = upstream_req.prompt_cache_key.clone().unwrap_or_default();
-    let route = state.cfg.models.route(&upstream_req.model);
-    let gemini = route == Provider::Gemini;
-    let dispatched = match route {
-        Provider::Gemini => {
-            let chat = gemini_bridge::to_chat(&upstream_req);
-            state
-                .pools
-                .gemini
-                .execute(
-                    Route {
-                        session_key: &session_key,
-                        model: &req.model,
-                        prefer_trusted: false,
-                    },
-                    crate::pool::gemini::Call::OpenAi(Box::new(chat)),
-                )
-                .await
-                .map(|(id, upstream)| (id, upstream.protocol, upstream.response))
-        }
-        // Zen already speaks the Responses API, so the body it is handed is
-        // the one codex would have received.
-        Provider::Zen => state
-            .pools
-            .zen
-            .execute(
-                Route {
-                    session_key: &session_key,
-                    model: &req.model,
-                    prefer_trusted: false,
-                },
-                req_bytes.clone(),
-            )
-            .await
-            .map(|(id, resp)| (id, crate::gemini::client::GeminiProtocol::OpenAi, resp)),
-        _ => state
-            .pools
-            .codex
-            .execute(
-                Route {
-                    session_key: &session_key,
-                    model: &req.model,
-                    prefer_trusted: auth.prefer_trusted,
-                },
-                req_bytes.clone(),
-            )
-            .await
-            .map(|(id, resp)| (id, crate::gemini::client::GeminiProtocol::OpenAi, resp)),
+    let route = Route {
+        session_key: &session_key,
+        model: &req.model,
+        prefer_trusted: auth.prefer_trusted,
     };
-    let (account_id, protocol, resp) = match dispatched {
-        Ok(r) => r,
+    let Dispatched {
+        account_id,
+        upstream,
+    } = match state.pools.responses(provider, route, &upstream_req).await {
+        Ok(d) => d,
         Err(e) => {
-            let status = pool_error_status(&e);
-            log_error(&state, record, status, "pool");
+            log_error(&state, record, pool_error_status(&e), "pool");
             return pool_error_response(DIALECT, &state.cfg.models, e);
         }
     };
@@ -156,17 +109,7 @@ pub async fn messages(
     record.account_id = account_id;
 
     let capture = UsageCapture::default();
-    let events = if gemini {
-        gemini_bridge::event_stream(
-            resp,
-            protocol,
-            &upstream_req.model,
-            Default::default(),
-            capture.clone(),
-        )
-    } else {
-        event_stream(resp)
-    };
+    let events = upstream.events(&upstream_req.model, capture.clone());
     let emit_thinking = req.thinking_enabled();
 
     if req.stream.unwrap_or(false) {
@@ -275,6 +218,6 @@ pub async fn count_tokens(
             input_tokens: count_tokens::estimate(&upstream_req),
         })
         .into_response(),
-        Err(e) => translation_error(DIALECT, &e),
+        Err(e) => translation_error(DIALECT, &e.to_string()),
     }
 }

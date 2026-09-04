@@ -16,6 +16,30 @@ use crate::translate::chat::{
     ExtraContent, FunctionBody, ImageRef, PromptTokensDetails,
 };
 
+#[derive(Debug, thiserror::Error)]
+pub enum NativeError {
+    #[error("invalid gemini model name")]
+    InvalidModel,
+    #[error("tool call is missing function name")]
+    CallWithoutName,
+    #[error("tool call arguments are not valid JSON: {0}")]
+    CallArguments(serde_json::Error),
+    #[error("tool message is missing tool_call_id")]
+    ToolMessageWithoutCallId,
+    #[error("tool message references unknown call {0}")]
+    UnknownCall(String),
+    #[error("unsupported message content type")]
+    UnsupportedPart,
+    #[error("invalid data URL")]
+    InvalidDataUrl,
+    #[error("native gemini only supports function tools")]
+    NonFunctionTool,
+    #[error("function tool is missing its declaration")]
+    ToolWithoutDeclaration,
+    #[error("invalid native gemini response: {0}")]
+    Response(serde_json::Error),
+}
+
 #[derive(Debug)]
 pub struct NativeRequest {
     pub model: String,
@@ -23,14 +47,14 @@ pub struct NativeRequest {
     pub body: GenerateContentRequest,
 }
 
-pub fn request(req: &ChatRequest) -> Result<NativeRequest, String> {
+pub fn request(req: &ChatRequest) -> Result<NativeRequest, NativeError> {
     let model = req.model.trim_start_matches("models/").to_string();
     if model.is_empty()
         || !model
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
     {
-        return Err("invalid gemini model name".into());
+        return Err(NativeError::InvalidModel);
     }
 
     let mut system_parts = Vec::new();
@@ -53,13 +77,12 @@ pub fn request(req: &ChatRequest) -> Result<NativeRequest, String> {
                     .function
                     .name
                     .clone()
-                    .ok_or_else(|| "tool call is missing function name".to_string())?;
+                    .ok_or(NativeError::CallWithoutName)?;
                 if let Some(id) = &call.id {
                     call_names.insert(id.clone(), name.clone());
                 }
                 let args = match &call.function.arguments {
-                    Some(raw) => serde_json::from_str(raw)
-                        .map_err(|e| format!("tool call arguments are not valid JSON: {e}"))?,
+                    Some(raw) => serde_json::from_str(raw).map_err(NativeError::CallArguments)?,
                     None => Value::Object(Map::new()),
                 };
                 parts.push(Part {
@@ -80,12 +103,12 @@ pub fn request(req: &ChatRequest) -> Result<NativeRequest, String> {
             let id = message
                 .tool_call_id
                 .as_deref()
-                .ok_or_else(|| "tool message is missing tool_call_id".to_string())?;
+                .ok_or(NativeError::ToolMessageWithoutCallId)?;
             let name = call_names
                 .get(id)
                 .cloned()
                 .or_else(|| message.name.clone())
-                .ok_or_else(|| format!("tool message references unknown call {id}"))?;
+                .ok_or_else(|| NativeError::UnknownCall(id.to_owned()))?;
             parts = vec![Part {
                 function_response: Some(FunctionResponse {
                     name,
@@ -119,7 +142,7 @@ pub fn request(req: &ChatRequest) -> Result<NativeRequest, String> {
     })
 }
 
-fn content_parts(content: Option<&ChatContent>) -> Result<Vec<Part>, String> {
+fn content_parts(content: Option<&ChatContent>) -> Result<Vec<Part>, NativeError> {
     match content {
         None => Ok(Vec::new()),
         Some(ChatContent::Text(text)) => Ok(vec![Part::text(text.clone())]),
@@ -127,7 +150,7 @@ fn content_parts(content: Option<&ChatContent>) -> Result<Vec<Part>, String> {
     }
 }
 
-fn content_part(part: &ChatPart) -> Result<Part, String> {
+fn content_part(part: &ChatPart) -> Result<Part, NativeError> {
     match part {
         ChatPart::Text { text } => Ok(Part::text(text.clone())),
         ChatPart::ImageUrl { image_url } => media_part(image_url.url(), "image/*"),
@@ -138,15 +161,13 @@ fn content_part(part: &ChatPart) -> Result<Part, String> {
             }),
             ..Part::default()
         }),
-        ChatPart::Other => Err("unsupported message content type".into()),
+        ChatPart::Other => Err(NativeError::UnsupportedPart),
     }
 }
 
-fn media_part(url: &str, fallback_mime: &str) -> Result<Part, String> {
+fn media_part(url: &str, fallback_mime: &str) -> Result<Part, NativeError> {
     if let Some(data) = url.strip_prefix("data:") {
-        let (metadata, payload) = data
-            .split_once(',')
-            .ok_or_else(|| "invalid data URL".to_string())?;
+        let (metadata, payload) = data.split_once(',').ok_or(NativeError::InvalidDataUrl)?;
         return Ok(Part {
             inline_data: Some(Blob {
                 mime_type: metadata
@@ -225,21 +246,21 @@ fn generation_config(req: &ChatRequest) -> Option<GenerationConfig> {
     (!empty).then_some(config)
 }
 
-fn tools(req: &ChatRequest) -> Result<Option<Vec<Tool>>, String> {
+fn tools(req: &ChatRequest) -> Result<Option<Vec<Tool>>, NativeError> {
     let Some(tools) = &req.tools else {
         return Ok(None);
     };
     let mut declarations = Vec::new();
     for tool in tools {
         if tool.kind.as_deref() != Some("function") {
-            return Err("native gemini only supports function tools".into());
+            return Err(NativeError::NonFunctionTool);
         }
         let def = tool.def();
         declarations.push(FunctionDeclaration {
             name: def
                 .name
                 .clone()
-                .ok_or_else(|| "function tool is missing its declaration".to_string())?,
+                .ok_or(NativeError::ToolWithoutDeclaration)?,
             description: def.description.clone(),
             parameters_json_schema: def.parameters.clone(),
         });
@@ -278,9 +299,9 @@ fn tool_config(req: &ChatRequest) -> Option<ToolConfig> {
     })
 }
 
-pub fn response(body: &[u8], requested_model: &str) -> Result<ChatCompletion, String> {
+pub fn response(body: &[u8], requested_model: &str) -> Result<ChatCompletion, NativeError> {
     let native: GenerateContentResponse =
-        serde_json::from_slice(body).map_err(|e| format!("invalid native gemini response: {e}"))?;
+        serde_json::from_slice(body).map_err(NativeError::Response)?;
     let choices = native
         .candidates
         .iter()
@@ -562,7 +583,10 @@ mod tests {
             ]
         })))
         .unwrap_err();
-        assert!(err.contains("invalid data URL"), "unexpected error {err}");
+        assert!(
+            err.to_string().contains("invalid data URL"),
+            "unexpected error {err}"
+        );
     }
 
     #[test]

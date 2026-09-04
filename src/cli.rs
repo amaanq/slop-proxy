@@ -5,6 +5,7 @@ use pound::Parse;
 
 use crate::config::Config;
 use crate::db::Db;
+use crate::db::accounts::AccountStatus;
 use crate::provider::{AuthMode, Provider};
 
 /// Anthropic/OpenAI API proxy backed by Codex subscription accounts
@@ -299,7 +300,7 @@ async fn accounts_list(db: &Db) -> Result<()> {
         trusted: bool,
         email: Option<&'a str>,
         plan_type: Option<&'a str>,
-        status: &'a str,
+        status: &'static str,
         label: Option<&'a str>,
         cooldown_seconds_left: Option<i64>,
         disabled_reason: Option<&'a str>,
@@ -316,9 +317,9 @@ async fn accounts_list(db: &Db) -> Result<()> {
             trusted: a.trusted,
             email: a.email.as_deref(),
             plan_type: a.plan_type.as_deref(),
-            status: &a.status,
+            status: a.status.as_str(),
             label: a.label.as_deref(),
-            cooldown_seconds_left: (a.status == "cooldown")
+            cooldown_seconds_left: (a.status == AccountStatus::Cooldown)
                 .then(|| a.cooldown_until.map(|c| (c - now).max(0)))
                 .flatten(),
             disabled_reason: a.disabled_reason.as_deref(),

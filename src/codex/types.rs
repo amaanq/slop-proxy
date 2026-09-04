@@ -5,6 +5,7 @@ use serde_json::value::RawValue;
 #[serde(default)]
 pub struct ResponsesRequest {
     pub model: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub instructions: String,
     #[serde(deserialize_with = "input_items")]
     pub input: Vec<InputItem>,
@@ -19,17 +20,14 @@ pub struct ResponsesRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u64>,
     pub store: bool,
-    #[serde(default = "yes")]
     pub stream: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub include: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_cache_key: Option<String>,
+    /// Codex sets this to `priority` for `/fast`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<String>,
-}
-
-fn yes() -> bool {
-    true
 }
 
 fn empty_object() -> String {
@@ -55,7 +53,9 @@ impl ResponsesRequest {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ReasoningConfig {
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub effort: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub summary: String,
 }
 

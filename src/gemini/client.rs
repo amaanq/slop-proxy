@@ -58,7 +58,8 @@ impl GeminiClient {
             .map(|(_, value)| value.as_str());
         let referer = account_referer.or(configured_referer);
         let (mut req, protocol) = if let Some(referer) = referer {
-            let translated = native::request(body).map_err(SendError::BadRequest)?;
+            let translated =
+                native::request(body).map_err(|e| SendError::BadRequest(e.to_string()))?;
             let base = self.cfg.base_url.trim_end_matches('/');
             let base = base.strip_suffix("/openai").unwrap_or(base);
             let action = if translated.streaming {
@@ -179,7 +180,7 @@ impl GeminiClient {
         &self,
         api_key: &str,
         account_referer: Option<&str>,
-    ) -> Result<Vec<String>, String> {
+    ) -> Result<Vec<String>, SendError> {
         let base = self.cfg.base_url.trim_end_matches('/');
         let mut req = if let Some(referer) = account_referer {
             let base = base.strip_suffix("/openai").unwrap_or(base);
@@ -196,11 +197,23 @@ impl GeminiClient {
             }
             req = req.header(name, value);
         }
-        let resp = req.send().await.map_err(|e| e.to_string())?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| SendError::Network(e.to_string()))?;
+        let status = resp.status().as_u16();
         if !resp.status().is_success() {
-            return Err(resp.status().to_string());
+            let body = resp.text().await.unwrap_or_default();
+            return Err(match status {
+                401 | 403 => SendError::Auth(body),
+                _ => SendError::Upstream { status, body },
+            });
         }
-        let body: crate::gemini::types::ModelList = resp.json().await.map_err(|e| e.to_string())?;
+        let body: crate::gemini::types::ModelList =
+            resp.json().await.map_err(|e| SendError::Upstream {
+                status,
+                body: format!("parsing models response: {e}"),
+            })?;
         // The two surfaces name the array differently, and the native one
         // prefixes every id with `models/`.
         let entries = if body.data.is_empty() {
@@ -308,7 +321,10 @@ mod tests {
             base_url: format!("http://{address}"),
             ..GeminiConfig::default()
         });
-        assert_eq!(client.models("test-key", None).await, Ok(vec![]));
+        assert_eq!(
+            client.models("test-key", None).await.unwrap(),
+            Vec::<String>::new()
+        );
     }
 
     #[tokio::test]
@@ -326,8 +342,8 @@ mod tests {
             ..GeminiConfig::default()
         });
         assert_eq!(
-            client.models("test-key", None).await,
-            Ok(vec!["gemini-x".to_string()])
+            client.models("test-key", None).await.unwrap(),
+            vec!["gemini-x".to_string()]
         );
     }
 }

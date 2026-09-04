@@ -132,10 +132,10 @@ pub fn to_chat(req: &ResponsesRequest) -> ChatRequest {
     ChatRequest {
         model: req.model.clone(),
         messages,
-        stream: Some(req.stream),
+        stream: Some(true),
         // Without this the terminal chunk carries no usage and the request
         // bills as zero tokens.
-        stream_options: req.stream.then_some(StreamOptions {
+        stream_options: Some(StreamOptions {
             include_usage: true,
         }),
         max_tokens: req.max_output_tokens,
@@ -750,9 +750,9 @@ mod tests {
     }
 
     #[test]
-    fn stream_defaults_on_when_absent() {
+    fn the_bridge_streams_even_for_a_blocking_caller() {
         let out = to_chat(&request(json!({
-            "model": "g", "instructions": "s",
+            "model": "g", "instructions": "s", "stream": false,
             "input": [],
         })));
         assert_eq!(out.stream, Some(true));

@@ -8,6 +8,7 @@ use futures_util::StreamExt;
 
 use crate::config::Config;
 use crate::db::Db;
+use crate::db::accounts::AccountStatus;
 use crate::pool::codex::CodexPool;
 use crate::provider::Provider;
 
@@ -42,7 +43,7 @@ pub async fn debug_ping(
     let accounts = db.list_accounts().await?;
     let account = accounts
         .iter()
-        .find(|a| a.provider == Provider::OpenAi && a.status != "disabled")
+        .find(|a| a.provider == Provider::OpenAi && a.status != AccountStatus::Disabled)
         .ok_or_else(|| eyre!("no usable account; run `slop-proxy login`"))?
         .clone();
 

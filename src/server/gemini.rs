@@ -141,6 +141,7 @@ pub async fn chat_completions(
     };
     let bytes = if protocol == GeminiProtocol::Native {
         match crate::gemini::native::response(&bytes, &model)
+            .map_err(|e| e.to_string())
             .and_then(|c| serde_json::to_vec(&c).map_err(|e| e.to_string()))
         {
             Ok(body) => Bytes::from(body),

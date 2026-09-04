@@ -1,7 +1,8 @@
 use axum::body::Bytes;
 
 use super::{
-    AccountUsage, AuthPolicy, Backend, Cooldown, ModelWindow, Pool, Route, Slot, UsageWindow,
+    AccountUsage, AuthPolicy, Backend, Cooldown, ModelWindow, Pool, PoolError, Route, Slot,
+    UsageWindow,
 };
 use crate::anthropic::client::{AnthropicClient, RelayHeaders};
 use crate::provider::Provider;
@@ -75,7 +76,7 @@ impl Pool<AnthropicClient> {
     }
 
     /// The catalog body untouched, for relaying to an Anthropic client.
-    pub async fn models_raw(&self) -> Result<String, String> {
+    pub async fn models_raw(&self) -> Result<String, PoolError> {
         for slot in self.slots.list().await {
             let Ok(token) = self.slots.fresh_token(&slot, false).await else {
                 continue;
@@ -86,7 +87,7 @@ impl Pool<AnthropicClient> {
                 Err(e) => tracing::debug!("models for {}: {e}", slot.display),
             }
         }
-        Err("no usable anthropic account".to_string())
+        Err(PoolError::NoAccounts(Provider::Anthropic))
     }
 
     /// Reads each account's rolling-window consumption from the provider.

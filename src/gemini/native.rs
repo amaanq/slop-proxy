@@ -48,7 +48,7 @@ pub struct NativeRequest {
 }
 
 pub fn request(req: &ChatRequest) -> Result<NativeRequest, NativeError> {
-    let model = req.model.trim_start_matches("models/").to_string();
+    let model = req.model.trim_start_matches("models/").to_owned();
     if model.is_empty()
         || !model
             .bytes()
@@ -175,16 +175,16 @@ fn media_part(url: &str, fallback_mime: &str) -> Result<Part, NativeError> {
                     .next()
                     .filter(|m| !m.is_empty())
                     .unwrap_or(fallback_mime)
-                    .to_string(),
-                data: payload.to_string(),
+                    .to_owned(),
+                data: payload.to_owned(),
             }),
             ..Part::default()
         });
     }
     Ok(Part {
         file_data: Some(FileData {
-            mime_type: fallback_mime.to_string(),
-            file_uri: url.to_string(),
+            mime_type: fallback_mime.to_owned(),
+            file_uri: url.to_owned(),
         }),
         ..Part::default()
     })
@@ -201,7 +201,7 @@ fn tool_response(content: Option<&ChatContent>) -> Box<RawValue> {
             .iter()
             .filter_map(|p| match p {
                 ChatPart::Text { text } => Some(text.as_str()),
-                _ => None,
+                ChatPart::ImageUrl { .. } | ChatPart::InputAudio { .. } | ChatPart::Other => None,
             })
             .collect(),
         None => "null".into(),
@@ -216,9 +216,9 @@ fn tool_response(content: Option<&ChatContent>) -> Box<RawValue> {
 
 fn generation_config(req: &ChatRequest) -> Option<GenerationConfig> {
     let (mime, schema) = match req.response_format.as_ref().map(|f| f.kind.as_str()) {
-        Some("json_object") => (Some("application/json".to_string()), None),
+        Some("json_object") => (Some("application/json".to_owned()), None),
         Some("json_schema") => (
-            Some("application/json".to_string()),
+            Some("application/json".to_owned()),
             req.response_format
                 .as_ref()
                 .and_then(|f| f.json_schema.as_ref())
@@ -234,14 +234,14 @@ fn generation_config(req: &ChatRequest) -> Option<GenerationConfig> {
         presence_penalty: req.presence_penalty,
         frequency_penalty: req.frequency_penalty,
         seed: req.seed,
-        stop_sequences: req.stop.clone().map(|s| s.into_vec()),
+        stop_sequences: req.stop.clone().map(chat::StopSequences::into_vec),
         response_mime_type: mime,
         response_json_schema: schema,
         thinking_config: None,
     };
     let empty = serde_json::to_value(&config)
         .ok()
-        .and_then(|v| v.as_object().map(|o| o.is_empty()))
+        .and_then(|v| v.as_object().map(Map::is_empty))
         .unwrap_or(true);
     (!empty).then_some(config)
 }
@@ -319,11 +319,10 @@ pub fn response(body: &[u8], requested_model: &str) -> Result<ChatCompletion, Na
     Ok(ChatCompletion {
         id: native
             .response_id
-            .map(|id| format!("chatcmpl-{id}"))
-            .unwrap_or_else(|| format!("chatcmpl-{}", uuid::Uuid::new_v4())),
+            .map_or_else(|| format!("chatcmpl-{}", uuid::Uuid::new_v4()), |id| format!("chatcmpl-{id}")),
         object: "chat.completion".into(),
         created: crate::clock::unix_now(),
-        model: requested_model.to_string(),
+        model: requested_model.to_owned(),
         choices,
         usage: native.usage_metadata.as_ref().map(chat_usage),
     })
@@ -457,7 +456,7 @@ impl NativeStream {
     pub fn new(model: &str) -> Self {
         Self {
             id: format!("chatcmpl-{}", uuid::Uuid::new_v4()),
-            model: model.to_string(),
+            model: model.to_owned(),
             created: crate::clock::unix_now(),
             frames: crate::gemini::sse::Frames::default(),
             sent_roles: BTreeSet::new(),
@@ -540,7 +539,7 @@ struct ErrorFrame<'a> {
     error: &'a ApiError,
 }
 
-fn sse<T: Serialize>(value: &T) -> Vec<u8> {
+fn sse(value: &impl Serialize) -> Vec<u8> {
     let mut out = b"data: ".to_vec();
     out.extend(serde_json::to_vec(value).unwrap_or_default());
     out.extend_from_slice(b"\n\n");
@@ -611,7 +610,7 @@ mod tests {
         assert!(
             output["choices"][0]["message"]
                 .get("content")
-                .is_some_and(|v| v.is_null())
+                .is_some_and(Value::is_null)
         );
         assert_eq!(output["choices"][0]["finish_reason"], "tool_calls");
     }

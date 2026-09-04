@@ -71,7 +71,7 @@ impl CodexClient {
         Self { http, cfg }
     }
 
-    pub async fn send(
+    pub async fn post(
         &self,
         access_token: &str,
         chatgpt_account_id: &str,
@@ -132,7 +132,7 @@ impl CodexClient {
         })
     }
 
-    pub fn soft_utilization_limit(&self) -> f64 {
+    pub const fn soft_utilization_limit(&self) -> f64 {
         self.cfg.soft_utilization_limit
     }
 

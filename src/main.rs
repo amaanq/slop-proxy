@@ -1,3 +1,12 @@
+#![cfg_attr(
+    test,
+    expect(
+        clippy::panic,
+        clippy::wildcard_enum_match_arm,
+        reason = "a test matches the one variant it expects and dies loudly on any other"
+    )
+)]
+
 mod anthropic;
 mod cli;
 mod clock;
@@ -17,7 +26,7 @@ mod upstream;
 mod zen;
 
 use eyre::Result;
-use pound::Parse;
+use pound::Parse as _;
 
 #[tokio::main]
 async fn main() -> Result<()> {

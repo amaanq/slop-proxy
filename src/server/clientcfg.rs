@@ -1,10 +1,11 @@
 use axum::Json;
 use axum::http::HeaderMap;
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
+use axum::response::IntoResponse as _;
 use serde::Serialize;
 
 /// Ten years out. Codex refreshes when it believes the grant is near expiry,
-/// and the refresh would go to OpenAI rather than here, so the claim is dated
+/// and the refresh would go to `OpenAI` rather than here, so the claim is dated
 /// far enough ahead that it never fires.
 const LIFETIME_SECS: i64 = 10 * 365 * 24 * 3600;
 
@@ -84,7 +85,7 @@ pub async fn codex_auth(headers: HeaderMap) -> Response {
 /// Overriding the base url keeps `model_provider_id` as `openai`, which the
 /// resume picker filters threads by, so a custom provider would hide every
 /// existing session. The apps connector is off because it authenticates with
-/// a ChatGPT session cookie the proxy has no way to mint, and fails loudly at
+/// a `ChatGPT` session cookie the proxy has no way to mint, and fails loudly at
 /// startup with `no_biscuit_no_service`.
 pub async fn codex_config(headers: HeaderMap) -> Response {
     let host = headers
@@ -107,7 +108,10 @@ pub async fn codex_config(headers: HeaderMap) -> Response {
 
 /// Unsigned JWT. Codex reads the claims without verifying them, and the proxy
 /// is the only party that ever sees this file.
-fn jwt<T: Serialize>(claims: &T) -> String {
+fn jwt<T>(claims: &T) -> String
+where
+    T: Serialize,
+{
     let part = |json: String| data_encoding::BASE64URL_NOPAD.encode(json.as_bytes());
     let header = Header {
         alg: "none",
@@ -126,5 +130,5 @@ fn bearer(headers: &HeaderMap) -> Option<String> {
         .or_else(|| headers.get("authorization"))?
         .to_str()
         .ok()?;
-    Some(raw.strip_prefix("Bearer ").unwrap_or(raw).to_string())
+    Some(raw.strip_prefix("Bearer ").unwrap_or(raw).to_owned())
 }

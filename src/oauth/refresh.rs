@@ -20,32 +20,32 @@ const TERMINAL_CODES: &[&str] = &[
 ];
 
 #[derive(serde::Serialize)]
-pub(crate) struct RefreshRequest<'a> {
-    pub(crate) client_id: &'a str,
-    pub(crate) grant_type: &'a str,
-    pub(crate) refresh_token: &'a str,
+pub struct RefreshRequest<'a> {
+    pub client_id: &'a str,
+    pub grant_type: &'a str,
+    pub refresh_token: &'a str,
 }
 
 #[derive(Deserialize)]
-pub(crate) struct TokenResponse {
-    pub(crate) access_token: String,
-    pub(crate) refresh_token: Option<String>,
-    pub(crate) id_token: Option<String>,
-    pub(crate) expires_in: Option<i64>,
+pub struct TokenResponse {
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+    pub id_token: Option<String>,
+    pub expires_in: Option<i64>,
     #[serde(default)]
-    pub(crate) account: Option<Account>,
+    pub account: Option<Account>,
 }
 
 #[derive(Deserialize, Default)]
-pub(crate) struct Account {
-    pub(crate) uuid: Option<String>,
-    pub(crate) email_address: Option<String>,
+pub struct Account {
+    pub uuid: Option<String>,
+    pub email_address: Option<String>,
 }
 
 impl TokenResponse {
     /// Anthropic does not always rotate the refresh token, so the prior one
     /// carries over when the response omits it.
-    pub(crate) fn into_token_set(self, prior_refresh: Option<&str>) -> Option<TokenSet> {
+    pub fn into_token_set(self, prior_refresh: Option<&str>) -> Option<TokenSet> {
         let expires_at = jwt::exp(&self.access_token)
             .or_else(|| self.expires_in.map(|s| crate::clock::unix_now() + s));
         Some(TokenSet {
@@ -59,10 +59,10 @@ impl TokenResponse {
     }
 }
 
-pub(crate) async fn post_token(
-    url: &str,
-    body: &impl serde::Serialize,
-) -> Result<(u16, String), RefreshError> {
+pub async fn post_token<B>(url: &str, body: &B) -> Result<(u16, String), RefreshError>
+where
+    B: serde::Serialize + Sync,
+{
     let resp = super::http()
         .post(url)
         .json(body)
@@ -70,28 +70,28 @@ pub(crate) async fn post_token(
         .await
         .map_err(|e| RefreshError::Transient(e.to_string()))?;
     let status = resp.status().as_u16();
-    let body = resp
+    let text = resp
         .text()
         .await
         .map_err(|e| RefreshError::Transient(e.to_string()))?;
-    Ok((status, body))
+    Ok((status, text))
 }
 
-pub(crate) fn terminal(status: u16, body: &str) -> Option<String> {
+pub fn terminal(status: u16, body: &str) -> Option<String> {
     (status == 403 || TERMINAL_CODES.iter().any(|c| body.contains(c)))
         .then(|| format!("{status}: {body}"))
 }
 
-pub(crate) fn token_set(
+pub fn token_set(
     status: u16,
     body: &str,
     prior_refresh: Option<&str>,
 ) -> Result<TokenSet, RefreshError> {
     if !(200..300).contains(&status) {
-        return Err(match terminal(status, body) {
-            Some(msg) => RefreshError::Terminal(msg),
-            None => RefreshError::Transient(format!("{status}: {body}")),
-        });
+        return Err(terminal(status, body).map_or_else(
+            || RefreshError::Transient(format!("{status}: {body}")),
+            RefreshError::Terminal,
+        ));
     }
     serde_json::from_str::<TokenResponse>(body)
         .map_err(|e| RefreshError::Transient(format!("bad token response: {e}")))?

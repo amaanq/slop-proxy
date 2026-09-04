@@ -1,7 +1,7 @@
 use std::pin::Pin;
 
-use eventsource_stream::Eventsource;
-use futures_util::{Stream, StreamExt};
+use eventsource_stream::Eventsource as _;
+use futures_util::{Stream, StreamExt as _};
 
 use super::types::ResponsesEvent;
 

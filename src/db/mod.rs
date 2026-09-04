@@ -5,17 +5,17 @@ pub mod usage;
 use std::path::Path;
 use std::sync::Arc;
 
-use eyre::{Result, WrapErr};
+use eyre::{Result, WrapErr as _};
 use rusqlite::Connection;
 use tokio::sync::Mutex;
 
 #[derive(Clone)]
-pub struct Db(pub(crate) Arc<Mutex<Connection>>);
+pub struct Db(pub Arc<Mutex<Connection>>);
 
 const SCHEMA: &str = include_str!("schema.sql");
 
 impl Db {
-    pub async fn open(path: &Path) -> Result<Self> {
+    pub fn open(path: &Path) -> Result<Self> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).wrap_err_with(|| format!("creating {}", dir.display()))?;
         }

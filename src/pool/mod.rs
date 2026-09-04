@@ -16,9 +16,9 @@ use thiserror::Error;
 
 pub use pools::Pools;
 #[cfg(test)]
-pub(crate) use slots::test_slots;
+pub use slots::test_slots;
 pub use slots::{AccountSnapshot, AccountUsage, ModelWindow, Slot, UsageWindow, window_seconds};
-pub(crate) use slots::{Slots, rendezvous_score};
+pub use slots::{Slots, rendezvous_score};
 
 #[derive(Debug, Error)]
 pub enum PoolError {
@@ -38,7 +38,7 @@ pub enum PoolError {
 
 impl From<SendError> for PoolError {
     fn from(e: SendError) -> Self {
-        PoolError::Upstream(e.to_string())
+        Self::Upstream(e.to_string())
     }
 }
 
@@ -105,8 +105,8 @@ pub trait Backend: Send + Sync + 'static {
 }
 
 pub struct Pool<B: Backend> {
-    pub(crate) slots: Slots,
-    pub(crate) backend: B,
+    slots: Slots,
+    backend: B,
 }
 
 impl<B: Backend> Pool<B> {
@@ -117,7 +117,7 @@ impl<B: Backend> Pool<B> {
         })
     }
 
-    pub fn backend(&self) -> &B {
+    pub const fn backend(&self) -> &B {
         &self.backend
     }
 
@@ -125,9 +125,6 @@ impl<B: Backend> Pool<B> {
         self.slots.len().await
     }
 
-    pub async fn is_empty(&self) -> bool {
-        self.slots.is_empty().await
-    }
 
     pub async fn reload(&self) -> eyre::Result<()> {
         self.slots.reload().await
@@ -256,8 +253,8 @@ impl<B: Backend> Pool<B> {
                     }
                     AuthPolicy::RefreshOnce => {
                         tracing::warn!("account {} got 401, forcing refresh", slot.display);
-                        if let Ok(token) = self.slots.fresh_token(&slot, true).await {
-                            match self.backend.send(&token, &slot, route, req).await {
+                        if let Ok(fresh) = self.slots.fresh_token(&slot, true).await {
+                            match self.backend.send(&fresh, &slot, route, req).await {
                                 Ok(resp) => {
                                     return Ok((Some(slot.id), self.served(&slot, resp).await));
                                 }
@@ -357,9 +354,9 @@ mod retry_tests {
         }
     }
 
-    async fn pool(frees_after: usize, budget: Duration) -> Pool<Flaky> {
+    fn pool(frees_after: usize, budget: Duration) -> Pool<Flaky> {
         let db_path = std::env::temp_dir().join(format!("slop-retry-{}.db", uuid::Uuid::new_v4()));
-        let db = Db::open(&db_path).await.unwrap();
+        let db = Db::open(&db_path).unwrap();
         Pool {
             slots: test_slots(db, Provider::Gemini, &[(1, false)]),
             backend: Flaky {
@@ -380,14 +377,14 @@ mod retry_tests {
 
     #[tokio::test]
     async fn a_rate_limited_pool_is_waited_out_rather_than_handed_back() {
-        let pool = pool(1, Duration::from_secs(10)).await;
+        let pool = pool(1, Duration::from_secs(10));
         let (_, calls) = pool.execute(route(), ()).await.unwrap();
         assert_eq!(calls, 2, "the second sweep should have been served");
     }
 
     #[tokio::test]
     async fn no_budget_keeps_the_old_behaviour() {
-        let pool = pool(usize::MAX, Duration::ZERO).await;
+        let pool = pool(usize::MAX, Duration::ZERO);
         assert!(matches!(
             pool.execute(route(), ()).await,
             Err(PoolError::AllCoolingDown { .. })

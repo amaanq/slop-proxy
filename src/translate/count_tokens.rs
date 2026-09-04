@@ -3,8 +3,8 @@ use crate::codex::types::{ContentPart, InputItem, ResponsesRequest};
 /// Rough chars/4 estimate.
 pub fn estimate(req: &ResponsesRequest) -> i64 {
     let mut chars = req.instructions.len();
-    let mut per_item_overhead = 0i64;
-    let mut image_tokens = 0i64;
+    let mut per_item_overhead = 0_i64;
+    let mut image_tokens = 0_i64;
 
     for item in &req.input {
         per_item_overhead += 4;
@@ -13,7 +13,7 @@ pub fn estimate(req: &ResponsesRequest) -> i64 {
                 for part in content {
                     match part {
                         ContentPart::InputText { text } | ContentPart::OutputText { text } => {
-                            chars += text.len()
+                            chars += text.len();
                         }
                         ContentPart::InputImage { .. } => image_tokens += 1000,
                         ContentPart::Other => {}
@@ -28,7 +28,7 @@ pub fn estimate(req: &ResponsesRequest) -> i64 {
             InputItem::CustomToolCall { name, input, .. } => chars += name.len() + input.len(),
             InputItem::AdditionalTools { tools, .. } => {
                 for tool in tools {
-                    chars += serde_json::to_string(tool).map(|s| s.len()).unwrap_or(0);
+                    chars += serde_json::to_string(tool).map_or(0, |s| s.len());
                 }
             }
             InputItem::Other => {}
@@ -40,7 +40,7 @@ pub fn estimate(req: &ResponsesRequest) -> i64 {
         }
     }
     for tool in &req.tools {
-        chars += serde_json::to_string(tool).map(|s| s.len()).unwrap_or(0);
+        chars += serde_json::to_string(tool).map_or(0, |s| s.len());
     }
 
     (chars as i64) / 4 + per_item_overhead + image_tokens + 30

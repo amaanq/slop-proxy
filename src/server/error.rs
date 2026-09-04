@@ -1,6 +1,7 @@
 use axum::Json;
 use axum::http::{HeaderValue, StatusCode};
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
+use axum::response::IntoResponse as _;
 use serde::Serialize;
 
 use crate::config::ModelsConfig;
@@ -90,17 +91,16 @@ pub fn pool_error_response(dialect: Dialect, models: &ModelsConfig, err: PoolErr
             body,
         } => {
             tracing::warn!(%provider, %model, "upstream rejected request: {body}");
-            let message = match models.matched(&model) {
-                Some(_) => format!("the {provider} backend rejected {model}: {body}"),
-                None => {
-                    let hint = models
-                        .suggest(&model)
-                        .map(|m| format!(", did you mean {m}?"))
-                        .unwrap_or_default();
-                    format!(
-                        "no backend is configured for {model}{hint} it fell through to {provider}, which said: {body}"
-                    )
-                }
+            let message = if models.matched(&model).is_some() {
+                format!("the {provider} backend rejected {model}: {body}")
+            } else {
+                let hint = models
+                    .suggest(&model)
+                    .map(|m| format!(", did you mean {m}?"))
+                    .unwrap_or_default();
+                format!(
+                    "no backend is configured for {model}{hint} it fell through to {provider}, which said: {body}"
+                )
             };
             error_response(dialect, 400, "invalid_request_error", &message)
         }
@@ -125,7 +125,7 @@ pub fn body_at(body: &[u8], error: &serde_json::Error) -> String {
     String::from_utf8_lossy(&body[start..end]).into_owned()
 }
 
-pub fn pool_error_status(e: &PoolError) -> i64 {
+pub const fn pool_error_status(e: &PoolError) -> i64 {
     match e {
         PoolError::NoAccounts(_) => 503,
         PoolError::AllCoolingDown { .. } => 429,

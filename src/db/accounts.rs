@@ -13,7 +13,7 @@ pub enum AccountStatus {
 }
 
 impl AccountStatus {
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Active => "active",
             Self::Cooldown => "cooldown",
@@ -79,18 +79,27 @@ fn from_row(row: &Row) -> rusqlite::Result<Account> {
 
 const COLS: &str = "id, provider, provider_account_id, trusted, auth_mode, email, label, plan_type, access_token, refresh_token, http_referer, access_expires_at, status, cooldown_until, disabled_reason";
 
+pub struct NewAccount<'a> {
+    pub provider: Provider,
+    pub id: &'a str,
+    pub email: Option<&'a str>,
+    pub label: Option<&'a str>,
+    pub plan: Option<&'a str>,
+    pub tokens: &'a TokenSet,
+    pub auth_mode: AuthMode,
+}
+
 impl Db {
-    #[allow(clippy::too_many_arguments)]
-    pub async fn upsert_account(
-        &self,
-        provider: Provider,
-        provider_account_id: &str,
-        email: Option<&str>,
-        label: Option<&str>,
-        plan_type: Option<&str>,
-        tokens: &TokenSet,
-        auth_mode: AuthMode,
-    ) -> Result<i64> {
+    pub async fn upsert_account(&self, account: NewAccount<'_>) -> Result<i64> {
+        let NewAccount {
+            provider,
+            id: provider_account_id,
+            email,
+            label,
+            plan: plan_type,
+            tokens,
+            auth_mode,
+        } = account;
         let conn = self.0.lock().await;
         conn.execute(
             "INSERT INTO accounts (provider, provider_account_id, email, label, plan_type, access_token, refresh_token, access_expires_at, last_refresh_at, auth_mode)

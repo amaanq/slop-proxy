@@ -56,7 +56,7 @@ impl Backend for GeminiClient {
     }
 
     fn retry_budget(&self) -> std::time::Duration {
-        GeminiClient::retry_budget(self)
+        Self::retry_budget_duration(self)
     }
 
     async fn send(
@@ -68,14 +68,14 @@ impl Backend for GeminiClient {
     ) -> Result<Self::Response, SendError> {
         match req {
             Call::OpenAi(body) => {
-                GeminiClient::send(self, token, slot.http_referer.as_deref(), body).await
+                Self::post(self, token, slot.http_referer.as_deref(), body).await
             }
             Call::Native {
                 model,
                 action,
                 query,
                 body,
-            } => GeminiClient::send_native(
+            } => Self::send_native(
                 self,
                 token,
                 slot.http_referer.as_deref(),

@@ -40,17 +40,17 @@ impl GeminiClient {
         Self { http, cfg }
     }
 
-    pub fn soft_utilization_limit(&self) -> f64 {
+    pub const fn soft_utilization_limit(&self) -> f64 {
         self.cfg.soft_utilization_limit
     }
 
-    pub fn retry_budget(&self) -> std::time::Duration {
+    pub const fn retry_budget_duration(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.cfg.retry_budget_secs)
     }
 
     /// Google's OpenAI-compatible surface drops `Referer` before API-key
     /// validation, so origin-restricted keys have to use the native surface.
-    pub async fn send(
+    pub async fn post(
         &self,
         api_key: &str,
         account_referer: Option<&str>,
@@ -110,7 +110,7 @@ impl GeminiClient {
     }
 
     /// A caller that already speaks the native dialect is relayed as-is, so
-    /// nothing round-trips through the OpenAI shape and back.
+    /// nothing round-trips through the `OpenAI` shape and back.
     pub async fn send_native(
         &self,
         api_key: &str,
@@ -161,15 +161,16 @@ impl GeminiClient {
         account_referer: Option<&str>,
     ) -> Result<Vec<String>, SendError> {
         let base = self.cfg.base_url.trim_end_matches('/');
-        let mut req = if let Some(referer) = account_referer {
-            let base = base.strip_suffix("/openai").unwrap_or(base);
-            self.http
-                .get(format!("{base}/models"))
-                .header("x-goog-api-key", api_key)
-                .header("referer", referer)
-        } else {
-            self.http.get(format!("{base}/models")).bearer_auth(api_key)
-        };
+        let mut req = account_referer.map_or_else(
+            || self.http.get(format!("{base}/models")).bearer_auth(api_key),
+            |referer| {
+                let base = base.strip_suffix("/openai").unwrap_or(base);
+                self.http
+                    .get(format!("{base}/models"))
+                    .header("x-goog-api-key", api_key)
+                    .header("referer", referer)
+            },
+        );
         for (name, value) in &self.cfg.headers {
             if name.eq_ignore_ascii_case("referer") && account_referer.is_some() {
                 continue;
@@ -197,7 +198,7 @@ impl GeminiClient {
         let ids = entries
             .into_iter()
             .filter_map(|m| m.id.or(m.name))
-            .map(|id| id.trim_start_matches("models/").to_string())
+            .map(|id| id.trim_start_matches("models/").to_owned())
             .collect();
         Ok(ids)
     }
@@ -241,9 +242,9 @@ mod tests {
     #[tokio::test]
     async fn restricted_keys_use_the_native_auth_surface() {
         let seen = Arc::new(Mutex::new(None));
-        let captured = seen.clone();
+        let captured = Arc::clone(&seen);
         let app = axum::Router::new().fallback(post(move |request: Request| {
-            let captured = captured.clone();
+            let captured = Arc::clone(&captured);
             async move {
                 let headers = request.headers().clone();
                 let uri = request.uri().clone();
@@ -260,7 +261,7 @@ mod tests {
             ..GeminiConfig::default()
         });
         let response = client
-            .send(
+            .post(
                 "test-key",
                 Some("https://example.test/"),
                 &serde_json::from_value(json!({
@@ -316,7 +317,7 @@ mod tests {
         });
         assert_eq!(
             client.models("test-key", None).await.unwrap(),
-            vec!["gemini-x".to_string()]
+            vec!["gemini-x".to_owned()]
         );
     }
 }

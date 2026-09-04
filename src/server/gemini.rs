@@ -34,7 +34,7 @@ pub async fn chat_completions(
     let streaming = body.stream.unwrap_or(false);
     if let Some(effort) = &body.reasoning_effort {
         body.reasoning_effort =
-            Some(crate::translate::gemini_bridge::gemini_effort(effort).to_string());
+            Some(crate::translate::gemini_bridge::gemini_effort(effort).to_owned());
     }
     // Without this the terminal chunk carries no usage and the request bills
     // as zero tokens.
@@ -74,7 +74,7 @@ pub async fn chat_completions(
     let protocol = upstream.protocol;
     let resp = upstream.response;
     record.account_id = account_id;
-    record.status = resp.status().as_u16() as i64;
+    record.status = i64::from(resp.status().as_u16());
 
     let builder = forwarded_response(&resp);
     let ok = resp.status().is_success();
@@ -105,7 +105,7 @@ pub async fn chat_completions(
         let capture = UsageCapture::default();
         let scan = std::sync::Arc::new(std::sync::Mutex::new(ChatUsageScan::new(capture.clone())));
         let each = {
-            let scan = scan.clone();
+            let scan = std::sync::Arc::clone(&scan);
             move |bytes: Bytes| {
                 scan.lock().unwrap().feed(&bytes);
                 bytes
@@ -119,18 +119,19 @@ pub async fn chat_completions(
             DIALECT,
             each,
             move || {
-                let frame = match scan.lock().unwrap().frames.cutoff() {
+                let cutoff = scan.lock().unwrap().frames.cutoff();
+                let frame = match cutoff {
                     Some(error) => {
-                        let body = ChatError {
+                        let err = ChatError {
                             error: ChatErrorBody {
-                                message: error.message.clone().unwrap_or_default(),
+                                message: error.message.unwrap_or_default(),
                                 kind: Some("server_error".into()),
-                                code: error.status.clone().map(ErrorCode::Text),
+                                code: error.status.map(ErrorCode::Text),
                             },
                         };
                         format!(
                             "data: {}\n\ndata: [DONE]\n\n",
-                            serde_json::to_string(&body).unwrap_or_default()
+                            serde_json::to_string(&err).unwrap_or_default()
                         )
                     }
                     None => String::new(),
@@ -149,7 +150,7 @@ pub async fn chat_completions(
             .map_err(|e| e.to_string())
             .and_then(|c| serde_json::to_vec(&c).map_err(|e| e.to_string()))
         {
-            Ok(body) => Bytes::from(body),
+            Ok(payload) => Bytes::from(payload),
             Err(error) => {
                 log_error(&state, record, 502, "upstream_decode");
                 return error_response(DIALECT, 502, "api_error", &error);
@@ -248,7 +249,7 @@ impl ChatUsageScan {
                 self.cut = true;
                 let code = match &error.error.code {
                     Some(ErrorCode::Text(s)) => s.clone(),
-                    _ => "error".to_string(),
+                    _ => "error".to_owned(),
                 };
                 tracing::warn!(
                     status = %code,
@@ -290,7 +291,7 @@ pub async fn native(
             DIALECT,
             404,
             "invalid_request_error",
-            "expected /v1beta/models/{model}:{generateContent|streamGenerateContent}",
+            "expected /v1beta/models/{{model}}:{{generateContent|streamGenerateContent}}",
         );
     };
     if !matches!(action, "generateContent" | "streamGenerateContent") {
@@ -326,28 +327,26 @@ pub async fn native(
             );
         }
     };
-    let mut parsed = parsed;
-    let body = match crate::gemini::signatures::restore(&mut parsed.contents) {
-        true => match serde_json::to_vec(&parsed) {
-            Ok(patched) => Bytes::from(patched),
-            Err(_) => body,
-        },
-        false => body,
+    let mut request = parsed;
+    let body = if crate::gemini::signatures::restore(&mut request.contents) {
+        serde_json::to_vec(&request).map_or(body, Bytes::from)
+    } else {
+        body
     };
-    let key = native_session_key(&auth.user, &parsed);
-    let facts = super::facts::RequestFacts::from_native(&parsed, &headers);
+    let key = native_session_key(&auth.user, &request);
+    let facts = super::facts::RequestFacts::from_native(&request, &headers);
     let mut record = super::pipeline::record(
         &auth,
         "native",
         Provider::Gemini,
-        model.to_string(),
-        model.to_string(),
+        model.to_owned(),
+        model.to_owned(),
         facts,
     );
     record.session_key = key.clone();
     let call = crate::pool::gemini::Call::Native {
-        model: model.to_string(),
-        action: action.to_string(),
+        model: model.to_owned(),
+        action: action.to_owned(),
         query,
         body,
     };
@@ -369,7 +368,7 @@ pub async fn native(
     };
     let resp = upstream.response;
     record.account_id = account_id;
-    record.status = resp.status().as_u16() as i64;
+    record.status = i64::from(resp.status().as_u16());
     let ok = resp.status().is_success();
     let builder = forwarded_response(&resp);
     if !ok {
@@ -402,7 +401,7 @@ pub async fn native(
             crate::gemini::signatures::remember(&content.parts);
         }
         if let Some(reason) = finish_reason(&v) {
-            record.stop_reason = reason.to_string();
+            record.stop_reason = reason;
         }
         if let Some(u) = &v.usage_metadata {
             let capture = UsageCapture::default();

@@ -124,7 +124,9 @@ impl ChatMessage {
                 .iter()
                 .filter_map(|p| match p {
                     ChatPart::Text { text } => Some(text.as_str()),
-                    _ => None,
+                    ChatPart::ImageUrl { .. }
+                    | ChatPart::InputAudio { .. }
+                    | ChatPart::Other => None,
                 })
                 .collect::<Vec<_>>()
                 .join(""),
@@ -228,7 +230,7 @@ impl ExtraContent {
     pub fn with_signature(sig: &str) -> Self {
         Self {
             google: Some(GoogleExtra {
-                thought_signature: Some(sig.to_string()),
+                thought_signature: Some(sig.to_owned()),
             }),
         }
     }
@@ -343,7 +345,7 @@ impl From<ChatUsage> for Usage {
         if reasoning_tokens == 0 {
             reasoning_tokens = billed_output - c.completion_tokens;
         }
-        Usage {
+        Self {
             input_tokens: c.prompt_tokens,
             output_tokens: billed_output,
             total_tokens: c.prompt_tokens + billed_output,
@@ -359,8 +361,7 @@ impl From<ChatUsage> for Usage {
     }
 }
 
-impl From<&Usage> for ChatUsage {
-    fn from(u: &Usage) -> Self {
+impl From<&Usage> for ChatUsage {    fn from(u: &Usage) -> Self {
         Self {
             prompt_tokens: u.input_tokens,
             completion_tokens: u.output_tokens,
@@ -476,7 +477,7 @@ pub struct ChatErrorBody {
     pub code: Option<ErrorCode>,
 }
 
-/// OpenAI sends a string, Google a number.
+/// `OpenAI` sends a string, `Google` a number.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ErrorCode {
@@ -579,16 +580,16 @@ mod tests {
             "image_url": {"url": "u"},
         }))
         .unwrap();
-        let ChatPart::ImageUrl { image_url } = part else {
-            panic!("expected image part");
+        let ChatPart::ImageUrl { image_url: first } = part else {
+            panic!("expected image part: {part:?}");
         };
-        assert_eq!(image_url.url(), "u");
-        let part: ChatPart =
+        assert_eq!(first.url(), "u");
+        let part2: ChatPart =
             serde_json::from_value(json!({"type": "image_url", "image_url": "u"})).unwrap();
-        let ChatPart::ImageUrl { image_url } = part else {
-            panic!("expected image part");
+        let ChatPart::ImageUrl { image_url: second } = part2 else {
+            panic!("expected image part: {part2:?}");
         };
-        assert_eq!(image_url.url(), "u");
+        assert_eq!(second.url(), "u");
     }
 
     #[test]

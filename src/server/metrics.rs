@@ -1,8 +1,10 @@
-use std::fmt::{Display, Write};
+use std::fmt::Display;
+use std::fmt::Write as _;
 
 use axum::extract::State;
 use axum::http::header::CONTENT_TYPE;
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
+use axum::response::IntoResponse as _;
 
 use super::AppState;
 use crate::db::usage::{ErrorRow, InsightRow, MetricsRow, SessionRow, ToolRow};
@@ -201,7 +203,7 @@ const ACCOUNT_GAUGES: [(&str, &str, AccountGauge); 6] = [
     (
         "slop_account_status",
         "Account state: 0 active, 1 cooling down, 2 disabled",
-        |a, _| Some(a.status as f64),
+        |a, _| Some(f64::from(a.status)),
     ),
     (
         "slop_account_cooldown_seconds",
@@ -211,7 +213,7 @@ const ACCOUNT_GAUGES: [(&str, &str, AccountGauge); 6] = [
     (
         "slop_account_consecutive_fails",
         "Consecutive upstream failures feeding the backoff",
-        |a, _| Some(a.consecutive_fails as f64),
+        |a, _| Some(f64::from(a.consecutive_fails)),
     ),
     (
         "slop_account_usage_age_seconds",
@@ -389,7 +391,7 @@ fn sample(out: &mut String, name: &str, labels: &[(&str, &str)], value: impl Dis
     let _ = writeln!(out, "}} {value}");
 }
 
-fn bool_label(v: bool) -> &'static str {
+const fn bool_label(v: bool) -> &'static str {
     if v { "true" } else { "false" }
 }
 

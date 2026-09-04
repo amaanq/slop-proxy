@@ -85,16 +85,12 @@ fn parse_time(s: &str, now: i64) -> Result<i64> {
     if let Ok(ts) = s.parse::<jiff::Timestamp>() {
         return Ok(ts.as_second());
     }
-    if let Some(rest) = s.strip_suffix(['h', 'd', 'm', 'w'])
-        && let Ok(n) = rest.parse::<i64>()
-    {
-        let secs = match s.chars().last().unwrap() {
-            'm' => n * 60,
-            'h' => n * 3600,
-            'd' => n * 86400,
-            'w' => n * 7 * 86400,
-            _ => unreachable!(),
-        };
+    let units = [('m', 60), ('h', 3600), ('d', 86400), ('w', 7 * 86400)];
+    let secs = units.iter().find_map(|&(unit, mult)| {
+        let n = s.strip_suffix(unit)?.parse::<i64>().ok()?;
+        Some(n * mult)
+    });
+    if let Some(secs) = secs {
         return Ok(now - secs);
     }
     bail!("cannot parse time {s:?}; use RFC3339 or 30m/24h/7d/2w");

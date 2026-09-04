@@ -27,10 +27,10 @@ fn signature_for(call_id: &str) -> Option<String> {
 
 fn tool_call_message(call_id: &str, name: &str, arguments: String) -> ChatMessage {
     let call = ChatToolCall {
-        id: Some(call_id.to_string()),
+        id: Some(call_id.to_owned()),
         kind: Some("function".into()),
         function: FunctionBody {
-            name: Some(name.to_string()),
+            name: Some(name.to_owned()),
             arguments: Some(arguments),
         },
         extra_content: signature_for(call_id)
@@ -81,7 +81,7 @@ pub fn to_chat(req: &ResponsesRequest) -> ChatRequest {
     for item in &req.input {
         match item {
             InputItem::Message { role, content } => messages.push(ChatMessage {
-                role: chat_role(role).to_string(),
+                role: chat_role(role).to_owned(),
                 content: Some(parts(content)),
                 ..Default::default()
             }),
@@ -144,7 +144,7 @@ pub fn to_chat(req: &ResponsesRequest) -> ChatRequest {
             .reasoning
             .as_ref()
             .filter(|r| !r.effort.is_empty())
-            .map(|r| gemini_effort(&r.effort).to_string()),
+            .map(|r| gemini_effort(&r.effort).to_owned()),
         tools: (!tools.is_empty()).then_some(tools),
         tool_choice: req.tool_choice.as_ref().map(|c| match c {
             ToolChoice::Mode(mode) => ChatToolChoice::Mode(mode.clone()),
@@ -241,6 +241,10 @@ impl ChatToResponses {
         b
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one chunk in, every Responses event it implies out; the arms are the frame kinds"
+    )]
     pub fn feed(&mut self, chunk: &ChatChunk) -> Vec<ResponsesEvent> {
         self.frames += 1;
         if self.first_frame.is_none() {
@@ -322,7 +326,7 @@ impl ChatToResponses {
                 item_id: Some(id),
                 output_index: 0,
                 content_index: 0,
-                delta: text.to_string(),
+                delta: text.to_owned(),
             });
             self.text.push_str(text);
         }
@@ -443,10 +447,10 @@ impl ChatToResponses {
         let mut out = Vec::new();
         let slot = &mut self.calls[idx];
         if let Some(id) = &call.id {
-            slot.id = id.clone();
+            slot.id.clone_from(id);
         }
         if let Some(name) = &call.function.name {
-            slot.name = name.clone();
+            slot.name.clone_from(name);
         }
         if let Some(sig) = call.thought_signature()
             && !slot.id.is_empty()
@@ -458,38 +462,38 @@ impl ChatToResponses {
             slot.item_id = format!("fc_{}", uuid::Uuid::new_v4().simple());
             slot.index = self.next_index;
             self.next_index += 1;
-            let slot = &self.calls[idx];
-            let item = if self.custom.contains(&slot.name) {
+            let ready = &self.calls[idx];
+            let item = if self.custom.contains(&ready.name) {
                 OutputItem::CustomToolCall {
-                    id: Some(slot.item_id.clone()),
-                    call_id: slot.id.clone(),
-                    name: slot.name.clone(),
+                    id: Some(ready.item_id.clone()),
+                    call_id: ready.id.clone(),
+                    name: ready.name.clone(),
                     input: String::new(),
                     status: None,
                 }
             } else {
                 OutputItem::FunctionCall {
-                    id: Some(slot.item_id.clone()),
-                    call_id: slot.id.clone(),
-                    name: slot.name.clone(),
+                    id: Some(ready.item_id.clone()),
+                    call_id: ready.id.clone(),
+                    name: ready.name.clone(),
                     arguments: Some(String::new()),
                     status: None,
                 }
             };
             out.push(ResponsesEvent::OutputItemAdded {
-                output_index: slot.index,
+                output_index: ready.index,
                 item,
             });
         }
-        let slot = &mut self.calls[idx];
+        let args_slot = &mut self.calls[idx];
         if let Some(args) = call.function.arguments.as_deref()
             && !args.is_empty()
         {
-            slot.arguments.push_str(args);
+            args_slot.arguments.push_str(args);
             out.push(ResponsesEvent::FunctionCallArgumentsDelta {
-                item_id: Some(slot.item_id.clone()),
-                output_index: slot.index,
-                delta: args.to_string(),
+                item_id: Some(args_slot.item_id.clone()),
+                output_index: args_slot.index,
+                delta: args.to_owned(),
             });
         }
         out
@@ -506,14 +510,14 @@ pub fn event_stream(
     capture: crate::translate::UsageCapture,
 ) -> crate::codex::sse::EventStream {
     use crate::gemini::client::GeminiProtocol;
-    use eventsource_stream::Eventsource;
-    use futures_util::StreamExt;
+    use eventsource_stream::Eventsource as _;
+    use futures_util::StreamExt as _;
 
     let mut native = (protocol == GeminiProtocol::Native)
         .then(|| crate::gemini::native::NativeStream::new(model));
     let mut frames = crate::gemini::sse::Frames::default();
     let mut cut = false;
-    let head = capture.clone();
+    let head = capture;
     let chat_bytes = resp.bytes_stream().flat_map(move |item| {
         let chunks = match (&mut native, item) {
             (Some(native), Ok(bytes)) => {
@@ -597,7 +601,7 @@ mod tests {
                 serde_json::to_value(e).unwrap()["type"]
                     .as_str()
                     .unwrap()
-                    .to_string()
+                    .to_owned()
             })
             .collect()
     }
@@ -670,8 +674,8 @@ mod tests {
         assert_eq!(item["arguments"], "{\"path\":1}");
     }
 
-    /// Gemini puts usage on a chunk of its own, often ahead of the one with
-    /// finish_reason. Closing on usage alone ended the response before its
+    /// Gemini puts `usage` on a chunk of its own, often ahead of the one with
+    /// `finish_reason`. Closing on `usage` alone ended the response before its
     /// content and then ended it a second time, which codex rejects.
     #[test]
     fn the_response_closes_once_and_after_its_content() {
@@ -719,8 +723,9 @@ mod tests {
             "message": "high demand", "type": "server_error", "code": "UNAVAILABLE"
         }})));
         assert_eq!(kinds(&events), ["response.failed"]);
-        let ResponsesEvent::Failed { response } = &events[0] else {
-            panic!("expected a failed event");
+        let response = match &events[0] {
+            ResponsesEvent::Failed { response } => response,
+            other => panic!("expected a failed event: {other:?}"),
         };
         let error = response.error.as_ref().unwrap();
         assert_eq!(error.message.as_deref(), Some("high demand"));
@@ -943,7 +948,7 @@ mod real_chunk {
                 serde_json::to_value(e).unwrap()["type"]
                     .as_str()
                     .unwrap()
-                    .to_string()
+                    .to_owned()
             })
             .collect();
         assert_eq!(
@@ -986,7 +991,27 @@ mod aggregate_path {
                 OutputContentPart::OutputText { text } => text.clone(),
                 OutputContentPart::Other => String::new(),
             }),
-            _ => None,
+            ResponsesEvent::OutputItemDone { .. }
+            | ResponsesEvent::Created { .. }
+            | ResponsesEvent::InProgress
+            | ResponsesEvent::OutputItemAdded { .. }
+            | ResponsesEvent::ContentPartAdded { .. }
+            | ResponsesEvent::ContentPartDone
+            | ResponsesEvent::OutputTextDelta { .. }
+            | ResponsesEvent::OutputTextDone { .. }
+            | ResponsesEvent::ReasoningSummaryPartAdded
+            | ResponsesEvent::ReasoningSummaryPartDone
+            | ResponsesEvent::ReasoningSummaryTextDelta { .. }
+            | ResponsesEvent::ReasoningSummaryTextDone
+            | ResponsesEvent::ReasoningTextDelta { .. }
+            | ResponsesEvent::ReasoningTextDone
+            | ResponsesEvent::FunctionCallArgumentsDelta { .. }
+            | ResponsesEvent::FunctionCallArgumentsDone { .. }
+            | ResponsesEvent::CustomToolCallInputDone { .. }
+            | ResponsesEvent::Completed { .. }
+            | ResponsesEvent::Incomplete { .. }
+            | ResponsesEvent::Failed { .. }
+            | ResponsesEvent::Other => None,
         });
         assert_eq!(text.as_deref(), Some("ok"));
     }

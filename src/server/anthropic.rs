@@ -2,7 +2,7 @@ use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::sse::Event;
-use axum::response::{IntoResponse, Response};
+use axum::response::{IntoResponse as _, Response};
 use axum::{Extension, Json};
 
 use super::auth::AuthInfo;
@@ -46,9 +46,7 @@ pub async fn messages(
         Provider::Glm => {
             return super::relay::glm(state, auth, headers, body, peek).await;
         }
-        Provider::Gemini => {}
-        Provider::Zen => {}
-        Provider::OpenAi => {}
+        Provider::Gemini | Provider::Zen | Provider::OpenAi => {}
     }
     let req = match serde_json::from_slice::<AnthropicRequest>(&body) {
         Ok(r) => r,
@@ -58,13 +56,7 @@ pub async fn messages(
             return translation_error(DIALECT, &format!("invalid request: {e}"));
         }
     };
-    let mut upstream_req = match anthropic_req::to_responses(&req, &state.cfg) {
-        Ok(r) => r,
-        Err(e) => {
-            log_rejected(&state, &auth, "messages", &req.model);
-            return translation_error(DIALECT, &e.to_string());
-        }
-    };
+    let mut upstream_req = anthropic_req::to_responses(&req, &state.cfg);
     upstream_req.prompt_cache_key = Some(cache_key(&auth.user, &upstream_req));
     let est_input = count_tokens::estimate(&upstream_req);
 
@@ -139,6 +131,11 @@ pub async fn count_tokens(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    #[derive(serde::Serialize)]
+    struct TokenCount {
+        input_tokens: i64,
+    }
+
     let peek = super::relay::Peek::from_slice(&body);
     let provider = state.cfg.models.route(&peek.model);
     if !auth.may_use(provider) {
@@ -148,25 +145,14 @@ pub async fn count_tokens(
         Provider::Anthropic => {
             return super::relay::count_tokens(state, auth, headers, body, peek).await;
         }
-        Provider::Gemini => {}
-        Provider::Zen => {}
-        Provider::Glm => {}
-        Provider::OpenAi => {}
+        Provider::Gemini | Provider::Zen | Provider::Glm | Provider::OpenAi => {}
     }
     let req = match serde_json::from_slice::<AnthropicRequest>(&body) {
         Ok(r) => r,
         Err(e) => return translation_error(DIALECT, &format!("invalid request: {e}")),
     };
-    #[derive(serde::Serialize)]
-    struct TokenCount {
-        input_tokens: i64,
-    }
-
-    match anthropic_req::to_responses(&req, &state.cfg) {
-        Ok(upstream_req) => Json(TokenCount {
-            input_tokens: count_tokens::estimate(&upstream_req),
-        })
-        .into_response(),
-        Err(e) => translation_error(DIALECT, &e.to_string()),
-    }
+    Json(TokenCount {
+        input_tokens: count_tokens::estimate(&anthropic_req::to_responses(&req, &state.cfg)),
+    })
+    .into_response()
 }

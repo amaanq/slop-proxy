@@ -32,11 +32,11 @@ impl Backend for ZenClient {
         _route: Route<'_>,
         req: &Self::Request,
     ) -> Result<Self::Response, SendError> {
-        ZenClient::send(self, Some(token), req).await
+        Self::post(self, Some(token), req).await
     }
 
     async fn send_anonymous(&self, req: &Self::Request) -> Result<Self::Response, SendError> {
-        ZenClient::send(self, None, req).await
+        Self::post(self, None, req).await
     }
 }
 

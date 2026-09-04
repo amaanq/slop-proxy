@@ -18,7 +18,8 @@ use std::time::{Duration, Instant};
 use axum::Router;
 use axum::middleware;
 use axum::routing::{get, post};
-use eyre::{Result, WrapErr};
+use eyre::Result;
+use eyre::WrapErr as _;
 
 use crate::codex::models::ModelInfo;
 use crate::config::Config;
@@ -82,10 +83,10 @@ pub struct ModelCache {
 }
 
 impl ModelCache {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             inner: Mutex::new(None),
-            ttl: Duration::from_secs(300),
+            ttl: Duration::from_mins(5),
         }
     }
 
@@ -121,7 +122,7 @@ pub async fn serve(db: Db, cfg: Config, bind: &str) -> Result<()> {
     price_history(&state).await;
     let price_state = state.clone();
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(Duration::from_secs(12 * 3600));
+        let mut tick = tokio::time::interval(Duration::from_hours(12));
         tick.tick().await;
         loop {
             tick.tick().await;
@@ -132,7 +133,7 @@ pub async fn serve(db: Db, cfg: Config, bind: &str) -> Result<()> {
     });
     let reload_state = state.clone();
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(Duration::from_secs(60));
+        let mut tick = tokio::time::interval(Duration::from_mins(1));
         tick.tick().await;
         loop {
             tick.tick().await;
@@ -225,7 +226,7 @@ pub fn router(state: AppState) -> Router {
 
 /// Reasoning tokens are a subset of the output the provider already billed,
 /// so they are deliberately absent here.
-fn billable(r: &UsageRecord) -> Tokens {
+const fn billable(r: &UsageRecord) -> Tokens {
     Tokens {
         input: r.input_tokens,
         output: r.output_tokens,
@@ -246,7 +247,7 @@ impl LogGuard {
     /// `started` is the handler's own clock. Timing from here instead would
     /// begin after the upstream response headers, hiding the wait that time
     /// to first byte exists to measure.
-    pub fn new(
+    pub const fn new(
         state: AppState,
         capture: UsageCapture,
         record: UsageRecord,
@@ -315,7 +316,7 @@ pub fn log_rejected(state: &AppState, auth: &auth::AuthInfo, dialect: &'static s
             token_id: Some(auth.token_id),
             user: auth.user.clone(),
             dialect,
-            requested_model: model.to_string(),
+            requested_model: model.to_owned(),
             ..Default::default()
         },
         400,
@@ -327,7 +328,7 @@ pub fn log_rejected(state: &AppState, auth: &auth::AuthInfo, dialect: &'static s
 /// the price table.
 pub fn log_error(state: &AppState, mut record: UsageRecord, status: i64, kind: &str) {
     record.status = status;
-    record.error_kind = Some(kind.to_string());
+    record.error_kind = Some(kind.to_owned());
     write_usage(&state.db, record);
 }
 
@@ -361,7 +362,7 @@ pub fn cache_key(user: &str, req: &crate::codex::types::ResponsesRequest) -> Str
         hasher.update(serde_json::to_string(first).unwrap_or_default());
     }
     let digest = hasher.finalize();
-    let mut bytes = [0u8; 16];
+    let mut bytes = [0_u8; 16];
     bytes.copy_from_slice(&digest[..16]);
     uuid::Builder::from_random_bytes(bytes)
         .into_uuid()
@@ -385,7 +386,7 @@ mod end_reason_tests {
 
         let cut_by_upstream = UsageCapture::default();
         cut_by_upstream.note_upstream_eof();
-        let snap = cut_by_upstream.snapshot();
-        assert!(!snap.completed && snap.upstream_eof);
+        let upstream_snap = cut_by_upstream.snapshot();
+        assert!(!upstream_snap.completed && upstream_snap.upstream_eof);
     }
 }

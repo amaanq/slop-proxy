@@ -59,19 +59,16 @@ impl Peek {
             // carries the same signal.
             effort: peek
                 .effort
-                .or_else(|| peek.thinking.and_then(|t| t.kind))
+                .or_else(|| peek.thinking?.kind)
                 .unwrap_or_default(),
             user_id: peek.metadata.and_then(|m| m.user_id),
             system: peek.system,
         }
     }
 
-    /// Claude Code's metadata.user_id is stable for a session, which is
+    /// Claude Code's `metadata.user_id` is stable for a session, which is
     /// exactly the granularity upstream prompt caching wants.
     fn session_key(&self, auth: &AuthInfo) -> String {
-        if let Some(uid) = &self.user_id {
-            return uid.clone();
-        }
         struct HashWriter(hmac_sha256::Hash);
         impl std::io::Write for HashWriter {
             fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
@@ -83,6 +80,9 @@ impl Peek {
             }
         }
 
+        if let Some(uid) = &self.user_id {
+            return uid.clone();
+        }
         let mut h = HashWriter(hmac_sha256::Hash::new());
         h.0.update(auth.user.as_bytes());
         if let Some(system) = &self.system {
@@ -197,9 +197,10 @@ fn not_claude_code(user: &str, headers: &HeaderMap) -> Response {
 
 /// The body goes upstream untouched, so the parse here only feeds the log.
 fn anthropic_facts(body: &[u8], headers: &HeaderMap) -> super::facts::RequestFacts {
-    serde_json::from_slice::<crate::translate::anthropic_req::AnthropicRequest>(body)
-        .map(|r| super::facts::RequestFacts::from_anthropic(&r, headers))
-        .unwrap_or_else(|_| super::facts::RequestFacts::empty(headers))
+    serde_json::from_slice::<crate::translate::anthropic_req::AnthropicRequest>(body).map_or_else(
+        |_| super::facts::RequestFacts::empty(headers),
+        |r| super::facts::RequestFacts::from_anthropic(&r, headers),
+    )
 }
 
 pub async fn messages(
@@ -250,7 +251,7 @@ pub async fn messages(
         Err(e) => return dispatch_failed(&state, record, DIALECT, e),
     };
     record.account_id = account_id;
-    record.status = resp.status().as_u16() as i64;
+    record.status = i64::from(resp.status().as_u16());
 
     let streaming = resp
         .headers()
@@ -344,7 +345,7 @@ pub async fn glm(
         Err(e) => return dispatch_failed(&state, record, DIALECT, e),
     };
     record.account_id = account_id;
-    record.status = resp.status().as_u16() as i64;
+    record.status = i64::from(resp.status().as_u16());
 
     let streaming = resp
         .headers()
@@ -501,7 +502,7 @@ struct SseScan {
 }
 
 impl SseScan {
-    fn new(capture: UsageCapture) -> Self {
+    const fn new(capture: UsageCapture) -> Self {
         Self {
             buf: String::new(),
             interesting: false,
@@ -513,8 +514,8 @@ impl SseScan {
         self.capture.note_bytes(chunk.len());
         self.buf.push_str(&String::from_utf8_lossy(chunk));
         let mut consumed = 0;
-        while let Some(nl) = self.buf[consumed..].find('\n') {
-            let line = self.buf[consumed..consumed + nl].trim();
+        while let Some(nl) = self.buf.get(consumed..).and_then(|s| s.find('\n')) {
+            let line = self.buf.get(consumed..consumed + nl).map_or("", |s| s.trim());
             if let Some(event) = line.strip_prefix("event:") {
                 self.capture.note_event(event.trim());
                 self.interesting = matches!(

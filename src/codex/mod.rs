@@ -4,7 +4,7 @@ pub mod sse;
 pub mod types;
 
 use eyre::{Result, bail, eyre};
-use futures_util::StreamExt;
+use futures_util::StreamExt as _;
 
 use crate::config::Config;
 use crate::db::Db;
@@ -83,7 +83,7 @@ pub async fn debug_ping(
     let client = client::CodexClient::new(cfg.codex.clone());
     let req = axum::body::Bytes::from(serde_json::to_vec(&req)?);
     let mut stream = match client
-        .send(
+        .post(
             &account.access_token,
             &account.provider_account_id,
             &req,
@@ -96,7 +96,10 @@ pub async fn debug_ping(
     };
 
     while let Some(ev) = stream.next().await {
-        println!("{ev:?}");
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&ev).unwrap_or_else(|_| String::from("<unserializable event>"))
+        );
     }
     Ok(())
 }

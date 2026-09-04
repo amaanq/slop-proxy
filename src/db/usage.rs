@@ -1,5 +1,5 @@
 use eyre::Result;
-use rusqlite::{OptionalExtension, TransactionBehavior, params};
+use rusqlite::{OptionalExtension as _, TransactionBehavior, params};
 use serde::Serialize;
 
 use super::Db;
@@ -150,7 +150,7 @@ impl Db {
                 r.token_id,
                 r.user,
                 r.account_id,
-                r.provider.map(|p| p.as_str()),
+                r.provider.map(Provider::as_str),
                 r.dialect,
                 r.requested_model,
                 r.upstream_model,
@@ -190,7 +190,7 @@ impl Db {
 
     /// Admission is persisted before upstream dispatch inside an IMMEDIATE
     /// transaction, so concurrent requests cannot race past the request
-    /// limit. Token counts settle later via log_usage, which means a request
+    /// limit. Token counts settle later via `log_usage`, which means a request
     /// can overshoot the token limit once and the window absorbs it.
     pub async fn admit_token(
         &self,
@@ -355,8 +355,7 @@ impl Db {
 
 fn retry_after(oldest: Option<i64>, window_ms: i64, now: i64) -> i64 {
     oldest
-        .map(|ts| ((ts.saturating_add(window_ms).saturating_sub(now) + 999) / 1000).max(1))
-        .unwrap_or(1)
+        .map_or(1, |ts| ((ts.saturating_add(window_ms).saturating_sub(now) + 999) / 1000).max(1))
 }
 
 #[derive(Clone, Copy)]
@@ -480,8 +479,8 @@ impl Db {
         Ok(())
     }
 
-    /// Failures grouped by what went wrong. Kept off MetricsRow because
-    /// error_kind would otherwise split every token counter by it too.
+    /// Failures grouped by what went wrong. Kept off `MetricsRow` because
+    /// `error_kind` would otherwise split every token counter by it too.
     /// `tools_called` holds a comma-joined list, so the split has to happen in
     /// SQL to yield one row per tool.
     pub async fn tool_metrics(&self) -> Result<Vec<ToolRow>> {

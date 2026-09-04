@@ -37,7 +37,7 @@ impl Backend for CodexClient {
         route: Route<'_>,
         req: &Self::Request,
     ) -> Result<Self::Response, SendError> {
-        CodexClient::send(
+        Self::post(
             self,
             token,
             &slot.provider_account_id,
@@ -60,7 +60,7 @@ impl Backend for CodexClient {
 }
 
 impl Pool<CodexClient> {
-    pub fn client(&self) -> &CodexClient {
+    pub const fn client(&self) -> &CodexClient {
         self.backend()
     }
 
@@ -68,7 +68,7 @@ impl Pool<CodexClient> {
     /// routing moves it.
     pub async fn pool_windows(&self) -> Vec<UsageWindow> {
         let mut by_name: std::collections::BTreeMap<String, (f64, usize, Option<i64>)> =
-            Default::default();
+            std::collections::BTreeMap::default();
         for account in self.slots.snapshot().await {
             let Some(usage) = account.usage else { continue };
             for w in usage.windows {
@@ -131,7 +131,7 @@ impl Pool<CodexClient> {
         }
     }
 
-    /// Fresh (access_token, account_id) for the models listing. Trusted
+    /// Fresh (`access_token`, `account_id`) for the models listing. Trusted
     /// first, since gated models are absent from an untrusted account's
     /// catalog.
     pub async fn any_active_credentials(&self) -> Option<(String, String)> {
@@ -215,7 +215,7 @@ fn session_uuid(session_key: &str) -> String {
         return uuid::Uuid::new_v4().to_string();
     }
     let digest = hmac_sha256::Hash::hash(session_key.as_bytes());
-    let mut bytes = [0u8; 16];
+    let mut bytes = [0_u8; 16];
     bytes.copy_from_slice(&digest[..16]);
     uuid::Builder::from_random_bytes(bytes)
         .into_uuid()

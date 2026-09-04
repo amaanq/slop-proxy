@@ -69,9 +69,9 @@ enum DecodeError {
 /// Reads one byte past the ceiling so a body that would exceed it is refused
 /// rather than truncated.
 fn decode(bytes: &Bytes) -> Result<Vec<u8>, DecodeError> {
-    use std::io::Read;
+    use std::io::Read as _;
     let mut out = Vec::with_capacity(bytes.len() * 4);
-    ruzstd::decoding::StreamingDecoder::new(&mut &bytes[..])
+    ruzstd::decoding::StreamingDecoder::new(&mut &**bytes)
         .map_err(|_| DecodeError::Malformed)?
         .take(MAX_BODY as u64 + 1)
         .read_to_end(&mut out)
@@ -109,7 +109,7 @@ mod tests {
             .unwrap();
         let resp = tower::ServiceExt::oneshot(app, req).await.unwrap();
         let out = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
-        assert_eq!(&out[..], b"got:{\"model\":\"m\"}");
+        assert_eq!(out.as_ref(), b"got:{\"model\":\"m\"}");
     }
 
     /// A body over the ceiling has to be refused outright. Truncating it

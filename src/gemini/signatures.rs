@@ -1,8 +1,8 @@
 //! Google rejects a replayed `functionCall` that lost its `thoughtSignature`.
-//! See https://ai.google.dev/gemini-api/docs/thought-signatures.
+//! See <https://ai.google.dev/gemini-api/docs/thought-signatures>.
 
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
+use std::hash::{Hash as _, Hasher as _};
 use std::sync::{LazyLock, Mutex};
 
 use crate::gemini::types::{Content, FunctionCall, Part};
@@ -38,7 +38,7 @@ impl Cache {
 }
 
 pub fn put(key: u64, signature: &str) {
-    CACHE.lock().unwrap().put(key, signature.to_string());
+    CACHE.lock().unwrap().put(key, signature.to_owned());
 }
 
 pub fn get(key: u64) -> Option<String> {
@@ -58,7 +58,7 @@ fn part_key(call: &FunctionCall) -> u64 {
     if let Some(args) = &call.args {
         hash.update(serde_json::to_string(args).unwrap_or_default().as_bytes());
     }
-    u64::from_be_bytes(hash.finalize()[..8].try_into().unwrap_or_default())
+    u64::from_le_bytes(hash.finalize()[..8].try_into().unwrap_or_default())
 }
 
 pub fn remember(parts: &[Part]) {

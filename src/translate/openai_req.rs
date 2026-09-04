@@ -125,7 +125,7 @@ fn user_parts(content: Option<&ChatContent>) -> Vec<ContentPart> {
             .filter_map(|p| match p {
                 ChatPart::Text { text } => Some(ContentPart::InputText { text: text.clone() }),
                 ChatPart::ImageUrl { image_url } => Some(ContentPart::InputImage {
-                    image_url: image_url.url().to_string(),
+                    image_url: image_url.url().to_owned(),
                 }),
                 ChatPart::InputAudio { .. } | ChatPart::Other => {
                     tracing::debug!("dropping unsupported openai part");

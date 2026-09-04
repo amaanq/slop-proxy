@@ -33,7 +33,7 @@ impl Window {
             .as_deref()?
             .parse::<jiff::Timestamp>()
             .ok()
-            .map(|t| t.as_second())
+            .map(jiff::Timestamp::as_second)
     }
 }
 
@@ -139,7 +139,7 @@ impl AnthropicClient {
         Self { http, cfg }
     }
 
-    pub fn soft_utilization_limit(&self) -> f64 {
+    pub const fn soft_utilization_limit(&self) -> f64 {
         self.cfg.soft_utilization_limit
     }
 
@@ -194,7 +194,7 @@ impl AnthropicClient {
     /// Statuses other than 401/429/5xx come back as `Ok` so the caller can
     /// forward them verbatim, and only failures worth retrying on another
     /// account become errors.
-    pub async fn send(
+    pub async fn post(
         &self,
         access_token: &str,
         path: &str,
@@ -250,7 +250,7 @@ mod tests {
     fn a_scoped_model_is_named_from_its_scope() {
         let u: Usage = serde_json::from_str(USAGE).unwrap();
         let got: Vec<_> = u.model_windows().collect();
-        assert_eq!(got, vec![("fable".to_string(), "7d", 0.63)]);
+        assert_eq!(got, vec![("fable".to_owned(), "7d", 0.63)]);
     }
 
     #[test]

@@ -43,7 +43,7 @@ impl Backend for AnthropicClient {
         _route: Route<'_>,
         req: &Self::Request,
     ) -> Result<Self::Response, SendError> {
-        AnthropicClient::send(self, token, req.path, &req.body, &req.hdrs).await
+        Self::post(self, token, req.path, &req.body, &req.hdrs).await
     }
 }
 
@@ -52,7 +52,7 @@ impl Pool<AnthropicClient> {
     /// routing moves it.
     pub async fn pool_windows(&self) -> Vec<UsageWindow> {
         let mut by_name: std::collections::BTreeMap<String, (f64, usize, Option<i64>)> =
-            Default::default();
+            std::collections::BTreeMap::default();
         for account in self.slots.snapshot().await {
             let Some(usage) = account.usage else { continue };
             for w in usage.windows {
@@ -103,7 +103,7 @@ impl Pool<AnthropicClient> {
                     let windows = usage
                         .windows()
                         .map(|(name, w)| UsageWindow {
-                            name: name.to_string(),
+                            name: name.to_owned(),
                             // The endpoint reports percentages while the
                             // response headers report fractions.
                             utilization: w.utilization / 100.0,
@@ -119,7 +119,7 @@ impl Pool<AnthropicClient> {
                                     .model_windows()
                                     .map(|(model, window, utilization)| ModelWindow {
                                         model,
-                                        window: window.to_string(),
+                                        window: window.to_owned(),
                                         utilization,
                                     })
                                     .collect(),
@@ -143,9 +143,9 @@ mod tests {
     use crate::config::AnthropicConfig;
     use crate::db::Db;
 
-    async fn test_pool(ids: &[(i64, bool)]) -> AnthropicPool {
+    fn test_pool(ids: &[(i64, bool)]) -> AnthropicPool {
         let db_path = std::env::temp_dir().join(format!("slop-rdv-{}.db", uuid::Uuid::new_v4()));
-        let db = Db::open(&db_path).await.unwrap();
+        let db = Db::open(&db_path).unwrap();
         AnthropicPool {
             slots: super::super::test_slots(db, Provider::Anthropic, ids),
             backend: AnthropicClient::new(AnthropicConfig::default()),
@@ -163,7 +163,7 @@ mod tests {
 
     #[tokio::test]
     async fn rendezvous_is_sticky_and_spreads() {
-        let pool = test_pool(&[(1, false), (2, false), (3, false), (4, false)]).await;
+        let pool = test_pool(&[(1, false), (2, false), (3, false), (4, false)]);
 
         let first = ranked(&pool, "session-a").await[0].id;
         for _ in 0..10 {
@@ -179,7 +179,7 @@ mod tests {
 
     #[tokio::test]
     async fn quota_that_resets_soonest_is_spent_first() {
-        let pool = test_pool(&[(1, false), (2, false), (3, false), (4, false)]).await;
+        let pool = test_pool(&[(1, false), (2, false), (3, false), (4, false)]);
         let now = crate::clock::unix_now();
         let hours = |h: f64| now + (h * 3600.0) as i64;
         for (id, used, resets_in) in [
@@ -221,9 +221,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_spent_window_sinks_below_its_peers() {
-        let pool = test_pool(&[(1, false), (2, false), (3, false), (4, false)]).await;
+        let pool = test_pool(&[(1, false), (2, false), (3, false), (4, false)]);
         let key = "session-strain";
-        let head = ranked(&pool, key).await[0].clone();
+        let head = std::sync::Arc::clone(&ranked(&pool, key).await[0]);
 
         pool.slots
             .note_usage(
@@ -244,7 +244,7 @@ mod tests {
         assert_eq!(after[3].id, head.id, "spent account should sort last");
 
         // A locked account sinks the same way regardless of its fraction.
-        let fresh = after[0].clone();
+        let fresh = std::sync::Arc::clone(&after[0]);
         pool.slots
             .note_usage(
                 &fresh,
@@ -260,7 +260,7 @@ mod tests {
                 },
             )
             .await;
-        let after = ranked(&pool, key).await;
-        assert_ne!(after[0].id, fresh.id, "locked account still ranked first");
+        let reranked = ranked(&pool, key).await;
+        assert_ne!(reranked[0].id, fresh.id, "locked account still ranked first");
     }
 }

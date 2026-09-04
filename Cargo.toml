@@ -71,15 +71,7 @@ pedantic = { level = "warn", priority = -1 }
 
 
 blanket_clippy_restriction_lints = "allow"
-# Closure and iterator parameters; renaming five hundred `e`/`s`/`c` is churn.
-min_ident_chars = "allow"
-# Rarely used items are named at the call site on purpose.
-absolute_paths = "allow"
-# Match ergonomics through references is the idiom here.
-pattern_type_mismatch = "allow"
-# `let line = line.strip_suffix(..)` refinement is deliberate.
-shadow_reuse = "allow"
-default_numeric_fallback = "allow"
+shadow_reuse                     = "allow"
 # Every `mod tests` is inline by design.
 inline_modules = "allow"
 # Nursery, fires on every lock guard that is used after the lock.
@@ -89,16 +81,16 @@ float_arithmetic = "allow"
 # Token counts, byte sizes and epoch seconds to f64 for metrics.
 cast_precision_loss = "allow"
 # Token counts, byte sizes, epoch seconds and HTTP statuses fit i64.
-cast_possible_wrap = "allow"
 cast_possible_truncation = "allow"
-cast_sign_loss = "allow"
+cast_possible_wrap       = "allow"
+cast_sign_loss           = "allow"
 # Each backend's inherent `impl Pool<X>` lives beside its Backend impl.
 multiple_inherent_impl = "allow"
 # Serde wire structs carry the provider's field names.
 struct_field_names = "allow"
 # A struct's private state beside its public facts.
 partial_pub_fields = "allow"
-restriction                      = { level = "warn", priority = -1 }
+restriction        = { level = "warn", priority = -1 }
 
 
 arbitrary_source_item_ordering     = "allow"

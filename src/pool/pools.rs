@@ -8,13 +8,19 @@ use super::gemini::{Call, GeminiPool};
 use super::glm::GlmPool;
 use super::zen::ZenPool;
 use super::{AccountSnapshot, Backend, PoolError, Route};
+use crate::anthropic::client::AnthropicClient;
+use crate::codex::client::CodexClient;
+use crate::codex::sse;
 use crate::codex::sse::EventStream;
 use crate::codex::types::ResponsesRequest;
+use crate::config::Config;
 use crate::db::Db;
 use crate::gemini::client::{GeminiClient, GeminiProtocol};
+use crate::glm::client::GlmClient;
 use crate::provider::Provider;
 use crate::translate::UsageCapture;
 use crate::translate::gemini_bridge;
+use crate::zen::client::ZenClient;
 
 /// A backend's reply to a Responses request, before anything reads it.
 pub enum Upstream {
@@ -33,7 +39,7 @@ impl Upstream {
    /// The reply as Responses events, whichever dialect it arrived in.
    pub fn events(self, model: &str, capture: UsageCapture) -> EventStream {
       match self {
-         Self::Responses(response) => crate::codex::sse::event_stream(response),
+         Self::Responses(response) => sse::event_stream(response),
          Self::Bridged {
             response,
             protocol,
@@ -57,32 +63,13 @@ pub struct Pools {
 }
 
 impl Pools {
-   pub async fn load(db: &Db, cfg: &crate::config::Config) -> eyre::Result<Self> {
-      let codex = CodexPool::load(
-         db.clone(),
-         crate::codex::client::CodexClient::new(cfg.codex.clone()),
-      )
-      .await?;
-      let anthropic = AnthropicPool::load(
-         db.clone(),
-         crate::anthropic::client::AnthropicClient::new(cfg.anthropic.clone()),
-      )
-      .await?;
-      let gemini = GeminiPool::load(
-         db.clone(),
-         crate::gemini::client::GeminiClient::new(cfg.gemini.clone()),
-      )
-      .await?;
-      let zen = ZenPool::load(
-         db.clone(),
-         crate::zen::client::ZenClient::new(cfg.zen.clone())?,
-      )
-      .await?;
-      let glm = GlmPool::load(
-         db.clone(),
-         crate::glm::client::GlmClient::new(cfg.glm.clone()),
-      )
-      .await?;
+   pub async fn load(db: &Db, cfg: &Config) -> eyre::Result<Self> {
+      let codex = CodexPool::load(db.clone(), CodexClient::new(cfg.codex.clone())).await?;
+      let anthropic =
+         AnthropicPool::load(db.clone(), AnthropicClient::new(cfg.anthropic.clone())).await?;
+      let gemini = GeminiPool::load(db.clone(), GeminiClient::new(cfg.gemini.clone())).await?;
+      let zen = ZenPool::load(db.clone(), ZenClient::new(cfg.zen.clone())?).await?;
+      let glm = GlmPool::load(db.clone(), GlmClient::new(cfg.glm.clone())).await?;
       announce("codex", codex.len().await, Some("slop-proxy login"));
       announce(
          "anthropic",
@@ -102,20 +89,20 @@ impl Pools {
    }
 
    pub async fn reload(&self) {
-      if let Err(e) = self.codex.reload().await {
-         tracing::warn!("reloading {} accounts: {e}", Provider::OpenAi);
+      if let Err(err) = self.codex.reload().await {
+         tracing::warn!("reloading {} accounts: {err}", Provider::OpenAi);
       }
-      if let Err(e) = self.anthropic.reload().await {
-         tracing::warn!("reloading {} accounts: {e}", Provider::Anthropic);
+      if let Err(err) = self.anthropic.reload().await {
+         tracing::warn!("reloading {} accounts: {err}", Provider::Anthropic);
       }
-      if let Err(e) = self.gemini.reload().await {
-         tracing::warn!("reloading {} accounts: {e}", Provider::Gemini);
+      if let Err(err) = self.gemini.reload().await {
+         tracing::warn!("reloading {} accounts: {err}", Provider::Gemini);
       }
-      if let Err(e) = self.zen.reload().await {
-         tracing::warn!("reloading {} accounts: {e}", Provider::Zen);
+      if let Err(err) = self.zen.reload().await {
+         tracing::warn!("reloading {} accounts: {err}", Provider::Zen);
       }
-      if let Err(e) = self.glm.reload().await {
-         tracing::warn!("reloading {} accounts: {e}", Provider::Glm);
+      if let Err(err) = self.glm.reload().await {
+         tracing::warn!("reloading {} accounts: {err}", Provider::Glm);
       }
    }
 
@@ -134,7 +121,7 @@ impl Pools {
    ) -> Result<Dispatched, PoolError> {
       let body = serde_json::to_vec(req)
          .map(Bytes::from)
-         .map_err(|e| PoolError::Upstream(format!("serializing request: {e}")))?;
+         .map_err(|err| PoolError::Upstream(format!("serializing request: {err}")))?;
       self.responses_raw(provider, route, body, Some(req)).await
    }
 
@@ -212,6 +199,6 @@ fn announce(name: &str, count: usize, login: Option<&str>) {
    match (count, login) {
       (0, Some(login)) => tracing::warn!("no {name} accounts in the database; run `{login}`"),
       (0, None) => {},
-      (n, _) => tracing::info!("loaded {n} {name} account(s)"),
+      (count, _) => tracing::info!("loaded {count} {name} account(s)"),
    }
 }

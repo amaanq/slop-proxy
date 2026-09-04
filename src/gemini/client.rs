@@ -1,13 +1,17 @@
+use std::time::Duration;
+
 use axum::body::Bytes;
+use reqwest::header::CONTENT_TYPE;
 
 use crate::translate::chat::ChatRequest;
 
 use crate::config::GeminiConfig;
 use crate::gemini::native;
+use crate::gemini::types::ModelList;
 use crate::upstream::{Classify, SendError, classify};
 
 const RULES: Classify = Classify {
-   pass: |s| !matches!(s, 401 | 403 | 429 | 500..=599),
+   pass: |status| !matches!(status, 401 | 403 | 429 | 500..=599),
    // A key restricted to an origin or with the API disabled answers
    // 403, and no retry on another account makes that key work.
    auth: &[401, 403],
@@ -33,8 +37,8 @@ pub struct GeminiResponse {
 impl GeminiClient {
    pub fn new(cfg: GeminiConfig) -> Self {
       let http = reqwest::Client::builder()
-         .connect_timeout(std::time::Duration::from_secs(30))
-         .tcp_keepalive(std::time::Duration::from_secs(30))
+         .connect_timeout(Duration::from_secs(30))
+         .tcp_keepalive(Duration::from_secs(30))
          .build()
          .expect("building http client");
       Self { http, cfg }
@@ -44,8 +48,8 @@ impl GeminiClient {
       self.cfg.soft_utilization_limit
    }
 
-   pub const fn retry_budget_duration(&self) -> std::time::Duration {
-      std::time::Duration::from_secs(self.cfg.retry_budget_secs)
+   pub const fn retry_budget_duration(&self) -> Duration {
+      Duration::from_secs(self.cfg.retry_budget_secs)
    }
 
    /// Google's OpenAI-compatible surface drops `Referer` before API-key
@@ -56,16 +60,15 @@ impl GeminiClient {
       account_referer: Option<&str>,
       body: &ChatRequest,
    ) -> Result<GeminiResponse, SendError> {
-      let configured_referer = self
-         .cfg
-         .headers
-         .iter()
-         .find(|(name, _)| name.eq_ignore_ascii_case("referer"))
-         .map(|(_, value)| value.as_str());
+      let configured_referer = self.cfg.headers.iter().find_map(|(name, value)| {
+         name
+            .eq_ignore_ascii_case("referer")
+            .then_some(value.as_str())
+      });
       let referer = account_referer.or(configured_referer);
       let (mut req, protocol) = if let Some(referer) = referer {
          let translated =
-            native::request(body).map_err(|e| SendError::BadRequest(e.to_string()))?;
+            native::request(body).map_err(|err| SendError::BadRequest(err.to_string()))?;
          let base = self.cfg.base_url.trim_end_matches('/');
          let base = base.strip_suffix("/openai").unwrap_or(base);
          let action = if translated.streaming {
@@ -106,7 +109,7 @@ impl GeminiClient {
       let resp = req
          .send()
          .await
-         .map_err(|e| SendError::Network(e.to_string()))?;
+         .map_err(|err| SendError::Network(err.to_string()))?;
       let response = classify(resp, RULES).await?;
       Ok(GeminiResponse { response, protocol })
    }
@@ -129,15 +132,14 @@ impl GeminiClient {
          .http
          .post(format!("{base}/models/{model}:{action}{query}"))
          .header("x-goog-api-key", api_key)
-         .header(reqwest::header::CONTENT_TYPE, "application/json")
+         .header(CONTENT_TYPE, "application/json")
          .body(body.clone());
       let referer = account_referer.or_else(|| {
-         self
-            .cfg
-            .headers
-            .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case("referer"))
-            .map(|(_, v)| v.as_str())
+         self.cfg.headers.iter().find_map(|(name, value)| {
+            name
+               .eq_ignore_ascii_case("referer")
+               .then_some(value.as_str())
+         })
       });
       if let Some(referer) = referer {
          req = req.header("referer", referer);
@@ -152,7 +154,7 @@ impl GeminiClient {
       let resp = req
          .send()
          .await
-         .map_err(|e| SendError::Network(e.to_string()))?;
+         .map_err(|err| SendError::Network(err.to_string()))?;
       classify(resp, RULES).await
    }
 
@@ -184,14 +186,13 @@ impl GeminiClient {
       let resp = req
          .send()
          .await
-         .map_err(|e| SendError::Network(e.to_string()))?;
+         .map_err(|err| SendError::Network(err.to_string()))?;
       let resp = classify(resp, Classify::STRICT).await?;
       let status = resp.status().as_u16();
-      let body: crate::gemini::types::ModelList =
-         resp.json().await.map_err(|e| SendError::Upstream {
-            status,
-            body: format!("parsing models response: {e}"),
-         })?;
+      let body: ModelList = resp.json().await.map_err(|err| SendError::Upstream {
+         status,
+         body: format!("parsing models response: {err}"),
+      })?;
       // The two surfaces name the array differently, and the native one
       // prefixes every id with `models/`.
       let entries = if body.data.is_empty() {
@@ -201,7 +202,7 @@ impl GeminiClient {
       };
       let ids = entries
          .into_iter()
-         .filter_map(|m| m.id.or(m.name))
+         .filter_map(|entry| entry.id.or(entry.name))
          .map(|id| id.trim_start_matches("models/").to_owned())
          .collect();
       Ok(ids)
@@ -212,14 +213,15 @@ impl GeminiClient {
 /// `key` holds the caller's own token and upstream would reject it.
 fn forwarded_query(query: Option<&str>) -> String {
    query
-      .map(|q| {
-         q.split('&')
-            .filter(|p| !p.starts_with("key="))
+      .map(|query| {
+         query
+            .split('&')
+            .filter(|part| !part.starts_with("key="))
             .collect::<Vec<_>>()
             .join("&")
       })
-      .filter(|q| !q.is_empty())
-      .map(|q| format!("?{q}"))
+      .filter(|query| !query.is_empty())
+      .map(|query| format!("?{query}"))
       .unwrap_or_default()
 }
 
@@ -231,6 +233,7 @@ mod tests {
    use axum::extract::Request;
    use axum::routing::{get, post};
    use serde_json::json;
+   use tokio::net::TcpListener;
 
    use super::*;
 
@@ -256,7 +259,7 @@ mod tests {
             Json(json!({"candidates": []}))
          }
       }));
-      let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+      let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
       let address = listener.local_addr().unwrap();
       tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
@@ -291,7 +294,7 @@ mod tests {
    #[tokio::test]
    async fn an_empty_catalog_is_not_an_error() {
       let app = axum::Router::new().route("/models", get(|| async { Json(json!({"data": []})) }));
-      let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+      let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
       let address = listener.local_addr().unwrap();
       tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
@@ -311,7 +314,7 @@ mod tests {
          "/models",
          get(|| async { Json(json!({"models": [{"name": "models/gemini-x"}]})) }),
       );
-      let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+      let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
       let address = listener.local_addr().unwrap();
       tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 

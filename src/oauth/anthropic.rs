@@ -1,3 +1,5 @@
+use std::io;
+
 use eyre::{Result, WrapErr as _, bail, eyre};
 use rand::RngCore as _;
 use reqwest::Url;
@@ -46,7 +48,7 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
    println!("then paste the code shown on the callback page (looks like code#state):");
 
    let mut line = String::new();
-   std::io::stdin()
+   io::stdin()
       .read_line(&mut line)
       .wrap_err("reading authorization code")?;
    let pasted = line.trim();
@@ -77,9 +79,9 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
 
    let account = parsed.account.as_ref();
    let account_id = account
-      .and_then(|a| a.uuid.clone())
+      .and_then(|acct| acct.uuid.clone())
       .ok_or_else(|| eyre!("token response has no account uuid"))?;
-   let email = account.and_then(|a| a.email_address.clone());
+   let email = account.and_then(|acct| acct.email_address.clone());
    let plan = subscription_tier(&parsed.access_token).await;
    let tokens = parsed
       .into_token_set(None)

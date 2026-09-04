@@ -47,10 +47,12 @@ pub fn exp(token: &str) -> Option<i64> {
 }
 
 pub fn parse_id_token(token: &str) -> Result<IdTokenInfo> {
-   let c = claims(token)?;
-   let auth = c.auth.unwrap_or_default();
+   let parsed = claims(token)?;
+   let auth = parsed.auth.unwrap_or_default();
    Ok(IdTokenInfo {
-      email: c.email.or_else(|| c.profile.unwrap_or_default().email),
+      email: parsed
+         .email
+         .or_else(|| parsed.profile.unwrap_or_default().email),
       chatgpt_account_id: auth.chatgpt_account_id,
       plan_type: auth.chatgpt_plan_type,
    })

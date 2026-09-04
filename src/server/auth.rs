@@ -1,22 +1,27 @@
+use std::time::Duration;
+
 use axum::extract::{Request, State};
-use axum::http::{HeaderName, HeaderValue};
+use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use axum::middleware::Next;
 use axum::response::Response;
+use tokio::time;
 
 use super::AppState;
 use super::error::{Dialect, error_response};
+use crate::db::tokens::TokenLimits;
 use crate::db::usage::AdmissionError;
+use crate::provider::Provider;
 
 #[derive(Clone, Debug)]
 pub struct AuthInfo {
    pub token_id: i64,
    pub user: String,
    pub meter_id: i64,
-   pub limits: crate::db::tokens::TokenLimits,
+   pub limits: TokenLimits,
 }
 
 impl AuthInfo {
-   pub fn may_use(&self, provider: crate::provider::Provider) -> bool {
+   pub fn may_use(&self, provider: Provider) -> bool {
       self.limits.may_use(provider)
    }
 }
@@ -60,16 +65,13 @@ pub async fn require_token(
                insert_header(&mut response, "retry-after", retry_after);
                return response;
             },
-            Err(e) => {
-               tracing::error!("token metering failed: {e}");
+            Err(err) => {
+               tracing::error!("token metering failed: {err}");
                return error_response(dialect, 500, "api_error", "internal error");
             },
          };
          if admission.slowdown_ms > 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(
-               admission.slowdown_ms as u64,
-            ))
-            .await;
+            time::sleep(Duration::from_millis(admission.slowdown_ms as u64)).await;
          }
          req.extensions_mut().insert(AuthInfo {
             token_id: token.id,
@@ -102,8 +104,8 @@ pub async fn require_token(
          "authentication_error",
          "invalid or revoked API token",
       ),
-      Err(e) => {
-         tracing::error!("token lookup failed: {e}");
+      Err(err) => {
+         tracing::error!("token lookup failed: {err}");
          error_response(dialect, 500, "api_error", "internal error")
       },
    }
@@ -119,7 +121,7 @@ fn insert_header(response: &mut Response, name: &'static str, value: i64) {
 
 /// Gemini CLI sends its key as `x-goog-api-key`, and the raw REST form puts it
 /// in a `key` query parameter, so neither of the other two headers is present.
-fn bearer_token(headers: &axum::http::HeaderMap, query: Option<&str>) -> Option<String> {
+fn bearer_token(headers: &HeaderMap, query: Option<&str>) -> Option<String> {
    let header = |name: &str| headers.get(name)?.to_str().ok().map(str::to_owned);
    header("x-api-key")
       .or_else(|| header("x-goog-api-key"))
@@ -134,7 +136,7 @@ fn bearer_token(headers: &axum::http::HeaderMap, query: Option<&str>) -> Option<
       .or_else(|| {
          query?
             .split('&')
-            .find_map(|p| p.strip_prefix("key="))
+            .find_map(|part| part.strip_prefix("key="))
             .map(str::to_owned)
       })
 }

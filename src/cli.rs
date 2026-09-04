@@ -3,11 +3,23 @@ use std::path::PathBuf;
 use eyre::{Result, bail, eyre};
 use pound::Parse;
 
+use crate::clock;
+use crate::codex;
+use crate::codex::client::CodexClient;
+use crate::codex::models::ModelInfo;
 use crate::config::Config;
 use crate::db::Db;
 use crate::db::accounts::AccountStatus;
 use crate::db::accounts::NewAccount;
+use crate::db::tokens;
+use crate::db::tokens::TokenLimits;
+use crate::oauth;
+use crate::oauth::anthropic;
+use crate::oauth::refresh;
+use crate::pool::codex::CodexPool;
 use crate::provider::{AuthMode, Provider};
+use crate::server;
+use crate::stats;
 
 /// Anthropic/OpenAI API proxy backed by Codex subscription accounts
 #[derive(Parse)]
@@ -169,8 +181,8 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
 
    match args.command {
       Command::Login { label, provider } => match provider {
-         Provider::OpenAi => crate::oauth::login(&db, label).await,
-         Provider::Anthropic => crate::oauth::anthropic::login(&db, label).await,
+         Provider::OpenAi => oauth::login(&db, label).await,
+         Provider::Anthropic => anthropic::login(&db, label).await,
          Provider::Gemini => Err(eyre::eyre!(
             "google has no device-code flow here, use `accounts add-key --provider gemini`"
          )),
@@ -237,16 +249,14 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
       },
       Command::Serve { bind } => {
          let bind = bind.unwrap_or_else(|| cfg.bind.clone());
-         crate::server::serve(db, cfg, &bind).await
+         server::serve(db, cfg, &bind).await
       },
-      Command::Stats { since, until } => crate::stats::run(&db, since, until).await,
+      Command::Stats { since, until } => stats::run(&db, since, until).await,
       Command::Models => models(&db, &cfg).await,
       Command::Debug { command } => match command {
-         DebugCommand::Ping { model, prompt } => {
-            crate::codex::debug_ping(&db, &cfg, model, prompt).await
-         },
+         DebugCommand::Ping { model, prompt } => codex::debug_ping(&db, &cfg, model, prompt).await,
          DebugCommand::Refresh { account } => debug_refresh(&db, &account).await,
-         DebugCommand::Models => crate::codex::debug_models(&db, &cfg).await,
+         DebugCommand::Models => codex::debug_models(&db, &cfg).await,
       },
    }
 }
@@ -264,10 +274,10 @@ async fn accounts_add_key(
    if referer.is_some() && provider != Provider::Gemini {
       bail!("--referer is only supported for gemini keys");
    }
-   let mut h = hmac_sha256::Hash::new();
-   h.update(key.as_bytes());
-   let account_id = data_encoding::HEXLOWER.encode(&h.finalize()[..8]);
-   let tokens = crate::oauth::TokenSet {
+   let mut hasher = hmac_sha256::Hash::new();
+   hasher.update(key.as_bytes());
+   let account_id = data_encoding::HEXLOWER.encode(&hasher.finalize()[..8]);
+   let tokens = oauth::TokenSet {
       access_token: key.to_owned(),
       refresh_token: String::new(),
       id_token: None,
@@ -309,22 +319,22 @@ async fn accounts_list(db: &Db) -> Result<()> {
    }
 
    let accounts = db.list_accounts().await?;
-   let now = crate::clock::unix_now();
+   let now = clock::unix_now();
    let rows = accounts
       .iter()
-      .map(|a| AccountRow {
-         id: a.id,
-         provider: a.provider.as_str(),
-         trusted: a.trusted,
-         email: a.email.as_deref(),
-         plan_type: a.plan_type.as_deref(),
-         status: a.status.as_str(),
-         label: a.label.as_deref(),
-         cooldown_seconds_left: (a.status == AccountStatus::Cooldown)
-            .then(|| a.cooldown_until.map(|c| (c - now).max(0)))
+      .map(|account| AccountRow {
+         id: account.id,
+         provider: account.provider.as_str(),
+         trusted: account.trusted,
+         email: account.email.as_deref(),
+         plan_type: account.plan_type.as_deref(),
+         status: account.status.as_str(),
+         label: account.label.as_deref(),
+         cooldown_seconds_left: (account.status == AccountStatus::Cooldown)
+            .then(|| account.cooldown_until.map(|until| (until - now).max(0)))
             .flatten(),
-         disabled_reason: a.disabled_reason.as_deref(),
-         http_referer: a.http_referer.as_deref(),
+         disabled_reason: account.disabled_reason.as_deref(),
+         http_referer: account.http_referer.as_deref(),
       })
       .collect::<Vec<AccountRow>>();
    println!("{}", serde_json::to_string_pretty(&rows)?);
@@ -343,16 +353,16 @@ async fn accounts_trust(db: &Db, account: &str, trusted: bool) -> Result<()> {
 }
 
 async fn accounts_remove(db: &Db, account: &str) -> Result<()> {
-   let n = db.remove_account(account).await?;
-   if n == 0 {
+   let count = db.remove_account(account).await?;
+   if count == 0 {
       bail!("no account matched {account:?}");
    }
-   println!("removed {n} account(s)");
+   println!("removed {count} account(s)");
    Ok(())
 }
 
-async fn token_create(db: &Db, user: &str, limits: &crate::db::tokens::TokenLimits) -> Result<()> {
-   let (raw, prefix) = crate::db::tokens::generate();
+async fn token_create(db: &Db, user: &str, limits: &TokenLimits) -> Result<()> {
+   let (raw, prefix) = tokens::generate();
    let id = db.create_token(user, &raw, &prefix).await?;
    db.set_token_limits(&id.to_string(), limits).await?;
    println!("token for {user}: {raw}");
@@ -367,11 +377,11 @@ fn token_limits(
    slowdown_ms: i64,
    prefer_trusted: bool,
    providers: Option<String>,
-) -> Result<crate::db::tokens::TokenLimits> {
-   if requests.is_some_and(|v| v <= 0) {
+) -> Result<TokenLimits> {
+   if requests.is_some_and(|value| value <= 0) {
       bail!("--requests must be greater than zero");
    }
-   if tokens.is_some_and(|v| v <= 0) {
+   if tokens.is_some_and(|value| value <= 0) {
       bail!("--tokens must be greater than zero");
    }
    if window_seconds <= 0 {
@@ -381,18 +391,17 @@ fn token_limits(
       bail!("--slowdown-ms cannot be negative");
    }
    let providers = providers
-      .filter(|p| !p.trim().is_empty())
+      .filter(|csv| !csv.trim().is_empty())
       .map(|raw| {
          raw.split(',')
-            .map(|p| {
-               crate::provider::Provider::from_str(p)
-                  .ok_or_else(|| eyre::eyre!("unknown provider: {p}"))
+            .map(|part| {
+               Provider::from_str(part).ok_or_else(|| eyre::eyre!("unknown provider: {part}"))
             })
             .collect::<Result<Vec<_>>>()
       })
       .transpose()?
       .unwrap_or_default();
-   Ok(crate::db::tokens::TokenLimits {
+   Ok(TokenLimits {
       requests,
       tokens,
       window_seconds,
@@ -402,11 +411,7 @@ fn token_limits(
    })
 }
 
-async fn token_set_limits(
-   db: &Db,
-   token: &str,
-   limits: &crate::db::tokens::TokenLimits,
-) -> Result<()> {
+async fn token_set_limits(db: &Db, token: &str, limits: &TokenLimits) -> Result<()> {
    if db.set_token_limits(token, limits).await? == 0 {
       bail!("no token matched {token:?}");
    }
@@ -441,17 +446,17 @@ async fn token_list(db: &Db) -> Result<()> {
    let tokens = db.list_tokens().await?;
    let rows = tokens
       .iter()
-      .map(|t| TokenRow {
-         id: t.id,
-         user: &t.user,
-         prefix: &t.token_prefix,
-         created_at: t.created_at,
-         revoked: t.revoked_at.is_some(),
-         revoked_at: t.revoked_at,
-         request_limit: t.limits.requests,
-         token_limit: t.limits.tokens,
-         window_seconds: t.limits.window_seconds,
-         slowdown_ms: t.limits.slowdown_ms,
+      .map(|token| TokenRow {
+         id: token.id,
+         user: &token.user,
+         prefix: &token.token_prefix,
+         created_at: token.created_at,
+         revoked: token.revoked_at.is_some(),
+         revoked_at: token.revoked_at,
+         request_limit: token.limits.requests,
+         token_limit: token.limits.tokens,
+         window_seconds: token.limits.window_seconds,
+         slowdown_ms: token.limits.slowdown_ms,
       })
       .collect::<Vec<TokenRow>>();
    println!("{}", serde_json::to_string_pretty(&rows)?);
@@ -459,11 +464,11 @@ async fn token_list(db: &Db) -> Result<()> {
 }
 
 async fn token_revoke(db: &Db, token: &str) -> Result<()> {
-   let n = db.revoke_token(token).await?;
-   if n == 0 {
+   let count = db.revoke_token(token).await?;
+   if count == 0 {
       bail!("no active token matched {token:?}");
    }
-   println!("revoked {n} token(s)");
+   println!("revoked {count} token(s)");
    Ok(())
 }
 
@@ -471,26 +476,26 @@ async fn models(db: &Db, cfg: &Config) -> Result<()> {
    #[derive(serde::Serialize)]
    struct ModelRow<'a> {
       #[serde(flatten)]
-      info: &'a crate::codex::models::ModelInfo,
+      info: &'a ModelInfo,
       listed: bool,
    }
 
-   let client = crate::codex::client::CodexClient::new(cfg.codex.clone());
-   let pool = crate::pool::codex::CodexPool::load(db.clone(), client).await?;
+   let client = CodexClient::new(cfg.codex.clone());
+   let pool = CodexPool::load(db.clone(), client).await?;
 
    let models = match pool.list_models().await {
       Ok(models) => models,
-      Err(e) => {
-         eprintln!("could not fetch models from the codex backend: {e}");
+      Err(err) => {
+         eprintln!("could not fetch models from the codex backend: {err}");
          Vec::new()
       },
    };
 
    let arr = models
       .iter()
-      .map(|m| ModelRow {
-         info: m,
-         listed: m.listed(),
+      .map(|model| ModelRow {
+         info: model,
+         listed: model.listed(),
       })
       .collect::<Vec<_>>();
    println!("{}", serde_json::to_string_pretty(&arr)?);
@@ -503,8 +508,8 @@ async fn debug_refresh(db: &Db, account: &str) -> Result<()> {
       .await?
       .ok_or_else(|| eyre!("no account matched"))?;
    let tokens = match acc.provider {
-      Provider::OpenAi => crate::oauth::refresh::refresh(&acc.refresh_token).await?,
-      Provider::Anthropic => crate::oauth::anthropic::refresh(&acc.refresh_token).await?,
+      Provider::OpenAi => refresh::refresh(&acc.refresh_token).await?,
+      Provider::Anthropic => anthropic::refresh(&acc.refresh_token).await?,
       Provider::Gemini | Provider::Zen | Provider::Glm => {
          bail!("this provider has no refresh flow")
       },

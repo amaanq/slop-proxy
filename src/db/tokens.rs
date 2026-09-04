@@ -36,7 +36,7 @@ impl TokenLimits {
       self
          .providers
          .iter()
-         .map(|p| p.as_str())
+         .map(|provider| provider.as_str())
          .collect::<Vec<_>>()
          .join(",")
    }
@@ -83,20 +83,20 @@ impl Db {
                     allowed_providers
              FROM api_tokens ORDER BY id",
       )?;
-      let rows = stmt.query_map([], |r| {
+      let rows = stmt.query_map([], |row| {
          Ok(ApiToken {
-            id: r.get(0)?,
-            user: r.get(1)?,
-            token_prefix: r.get(2)?,
-            created_at: r.get(3)?,
-            revoked_at: r.get(4)?,
+            id: row.get(0)?,
+            user: row.get(1)?,
+            token_prefix: row.get(2)?,
+            created_at: row.get(3)?,
+            revoked_at: row.get(4)?,
             limits: TokenLimits {
-               requests: r.get(5)?,
-               tokens: r.get(6)?,
-               window_seconds: r.get(7)?,
-               slowdown_ms: r.get(8)?,
-               prefer_trusted: r.get(9)?,
-               providers: TokenLimits::decode(&r.get::<_, String>(10)?),
+               requests: row.get(5)?,
+               tokens: row.get(6)?,
+               window_seconds: row.get(7)?,
+               slowdown_ms: row.get(8)?,
+               prefer_trusted: row.get(9)?,
+               providers: TokenLimits::decode(&row.get::<_, String>(10)?),
             },
          })
       })?;
@@ -141,17 +141,17 @@ impl Db {
                     prefer_trusted, allowed_providers
              FROM api_tokens WHERE token_hash = ?1 AND revoked_at IS NULL",
       )?;
-      let mut rows = stmt.query_map(params![hash(raw)], |r| {
+      let mut rows = stmt.query_map(params![hash(raw)], |row| {
          Ok(AuthenticatedToken {
-            id: r.get(0)?,
-            user: r.get(1)?,
+            id: row.get(0)?,
+            user: row.get(1)?,
             limits: TokenLimits {
-               requests: r.get(2)?,
-               tokens: r.get(3)?,
-               window_seconds: r.get(4)?,
-               slowdown_ms: r.get(5)?,
-               prefer_trusted: r.get(6)?,
-               providers: TokenLimits::decode(&r.get::<_, String>(7)?),
+               requests: row.get(2)?,
+               tokens: row.get(3)?,
+               window_seconds: row.get(4)?,
+               slowdown_ms: row.get(5)?,
+               prefer_trusted: row.get(6)?,
+               providers: TokenLimits::decode(&row.get::<_, String>(7)?),
             },
          })
       })?;
@@ -166,17 +166,17 @@ mod tests {
 
    #[test]
    fn an_unscoped_token_reaches_every_backend() {
-      let l = TokenLimits::default();
-      assert!(l.may_use(Provider::Gemini) && l.may_use(Provider::Anthropic));
+      let limits = TokenLimits::default();
+      assert!(limits.may_use(Provider::Gemini) && limits.may_use(Provider::Anthropic));
    }
 
    #[test]
    fn a_scoped_token_reaches_only_its_own() {
-      let l = TokenLimits {
+      let limits = TokenLimits {
          providers: vec![Provider::Gemini],
          ..TokenLimits::default()
       };
-      assert!(l.may_use(Provider::Gemini));
-      assert!(!l.may_use(Provider::Anthropic) && !l.may_use(Provider::OpenAi));
+      assert!(limits.may_use(Provider::Gemini));
+      assert!(!limits.may_use(Provider::Anthropic) && !limits.may_use(Provider::OpenAi));
    }
 }

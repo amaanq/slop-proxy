@@ -1,9 +1,13 @@
+use std::result::Result as StdResult;
+
 use eyre::Result;
 use rusqlite::{OptionalExtension as _, TransactionBehavior, params};
 use serde::Serialize;
 
 use super::Db;
 use super::tokens::TokenLimits;
+use crate::clock;
+use crate::pricing::Tokens;
 use crate::provider::Provider;
 
 #[derive(Debug, Clone, Default)]
@@ -93,7 +97,7 @@ pub struct TokenMeter {
 pub struct UnpricedRow {
    pub id: i64,
    pub model: String,
-   pub tokens: crate::pricing::Tokens,
+   pub tokens: Tokens,
 }
 
 #[derive(Debug, Clone)]
@@ -137,54 +141,54 @@ pub struct SessionRow {
 }
 
 impl Db {
-   pub async fn log_usage(&self, r: &UsageRecord) -> Result<()> {
+   pub async fn log_usage(&self, record: &UsageRecord) -> Result<()> {
       let mut conn = self.0.lock().await;
-      let tx = conn.transaction()?;
-      tx.execute(
+      let txn = conn.transaction()?;
+      txn.execute(
             "INSERT INTO usage_log (token_id, user, account_id, provider, dialect, requested_model, upstream_model, effort, service_tier,
                input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, cost_usd, list_cost_usd, status, error_kind, duration_ms,
                session_key, turn_index, tools_declared, tools_called, thinking_budget, image_count, request_bytes, response_bytes, ttft_ms, stop_reason)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
                      ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29)",
             params![
-                r.token_id,
-                r.user,
-                r.account_id,
-                r.provider.map(Provider::as_str),
-                r.dialect,
-                r.requested_model,
-                r.upstream_model,
-                r.effort,
-                r.service_tier,
-                r.input_tokens,
-                r.output_tokens,
-                r.cache_read_tokens,
-                r.cache_write_tokens,
-                r.reasoning_tokens,
-                r.cost_usd,
-                r.list_cost_usd,
-                r.status,
-                r.error_kind,
-                r.duration_ms,
-                r.session_key,
-                r.turn_index,
-                r.tools_declared,
-                r.tools_called,
-                r.thinking_budget,
-                r.image_count,
-                r.request_bytes,
-                r.response_bytes,
-                r.ttft_ms,
-                r.stop_reason,
+                record.token_id,
+                record.user,
+                record.account_id,
+                record.provider.map(Provider::as_str),
+                record.dialect,
+                record.requested_model,
+                record.upstream_model,
+                record.effort,
+                record.service_tier,
+                record.input_tokens,
+                record.output_tokens,
+                record.cache_read_tokens,
+                record.cache_write_tokens,
+                record.reasoning_tokens,
+                record.cost_usd,
+                record.list_cost_usd,
+                record.status,
+                record.error_kind,
+                record.duration_ms,
+                record.session_key,
+                record.turn_index,
+                record.tools_declared,
+                record.tools_called,
+                record.thinking_budget,
+                record.image_count,
+                record.request_bytes,
+                record.response_bytes,
+                record.ttft_ms,
+                record.stop_reason,
             ],
         )?;
-      if let Some(meter_id) = r.meter_id {
-         tx.execute(
+      if let Some(meter_id) = record.meter_id {
+         txn.execute(
             "UPDATE api_meter SET input_tokens = ?2, output_tokens = ?3 WHERE id = ?1",
-            params![meter_id, r.input_tokens, r.output_tokens],
+            params![meter_id, record.input_tokens, record.output_tokens],
          )?;
       }
-      tx.commit()?;
+      txn.commit()?;
       Ok(())
    }
 
@@ -196,19 +200,19 @@ impl Db {
       &self,
       token_id: i64,
       limits: &TokenLimits,
-   ) -> Result<std::result::Result<Admission, AdmissionError>> {
-      let now = crate::clock::unix_now_ms();
+   ) -> Result<StdResult<Admission, AdmissionError>> {
+      let now = clock::unix_now_ms();
       let window_ms = limits.window_seconds.saturating_mul(1000);
       let since = now.saturating_sub(window_ms);
       let mut conn = self.0.lock().await;
-      let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+      let txn = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
       let (requests, tokens, oldest_request, oldest_tokens): (i64, i64, Option<i64>, Option<i64>) =
-         tx.query_row(
+         txn.query_row(
             "SELECT COUNT(*), COALESCE(SUM(input_tokens + output_tokens), 0), MIN(ts_ms),
                     MIN(CASE WHEN input_tokens + output_tokens > 0 THEN ts_ms END)
              FROM api_meter WHERE token_id = ?1 AND ts_ms > ?2",
             params![token_id, since],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
          )?;
 
       if limits.requests.is_some_and(|limit| requests >= limit) {
@@ -220,16 +224,16 @@ impl Db {
          return Ok(Err(AdmissionError::TokenLimit { retry_after }));
       }
 
-      tx.execute(
+      txn.execute(
          "DELETE FROM api_meter WHERE token_id = ?1 AND ts_ms <= ?2",
          params![token_id, since],
       )?;
-      tx.execute(
+      txn.execute(
          "INSERT INTO api_meter (token_id, ts_ms) VALUES (?1, ?2)",
          params![token_id, now],
       )?;
-      let meter_id = tx.last_insert_rowid();
-      tx.commit()?;
+      let meter_id = txn.last_insert_rowid();
+      txn.commit()?;
 
       Ok(Ok(Admission {
          meter_id,
@@ -243,7 +247,7 @@ impl Db {
    }
 
    pub async fn token_meter(&self, key: &str) -> Result<Option<TokenMeter>> {
-      let now = crate::clock::unix_now_ms();
+      let now = clock::unix_now_ms();
       let id = key.parse::<i64>().unwrap_or(-1);
       let conn = self.0.lock().await;
       let token = conn
@@ -251,15 +255,15 @@ impl Db {
             "SELECT id, user, token_prefix, request_limit, token_limit, window_seconds, slowdown_ms
                  FROM api_tokens WHERE id = ?1 OR token_prefix = ?2 ORDER BY id LIMIT 1",
             params![id, key],
-            |r| {
+            |row| {
                Ok((
-                  r.get::<_, i64>(0)?,
-                  r.get::<_, String>(1)?,
-                  r.get::<_, String>(2)?,
-                  r.get::<_, Option<i64>>(3)?,
-                  r.get::<_, Option<i64>>(4)?,
-                  r.get::<_, i64>(5)?,
-                  r.get::<_, i64>(6)?,
+                  row.get::<_, i64>(0)?,
+                  row.get::<_, String>(1)?,
+                  row.get::<_, String>(2)?,
+                  row.get::<_, Option<i64>>(3)?,
+                  row.get::<_, Option<i64>>(4)?,
+                  row.get::<_, i64>(5)?,
+                  row.get::<_, i64>(6)?,
                ))
             },
          )
@@ -274,7 +278,7 @@ impl Db {
          "SELECT COUNT(*), COALESCE(SUM(input_tokens + output_tokens), 0), MIN(ts_ms)
              FROM api_meter WHERE token_id = ?1 AND ts_ms > ?2",
          params![token_id, since],
-         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
       )?;
       Ok(Some(TokenMeter {
          id: token_id,
@@ -300,16 +304,16 @@ impl Db {
                     COALESCE(SUM(reasoning_tokens),0)
              FROM usage_log WHERE ts >= ?1 AND ts < ?2",
             params![since, until],
-            |r| {
+            |row| {
                 Ok(UsageAgg {
                     key: "total".into(),
-                    requests: r.get(0)?,
-                    errors: r.get::<_, Option<i64>>(1)?.unwrap_or(0),
-                    input_tokens: r.get(2)?,
-                    output_tokens: r.get(3)?,
-                    cache_read_tokens: r.get(4)?,
-                    cache_write_tokens: r.get(5)?,
-                    reasoning_tokens: r.get(6)?,
+                    requests: row.get(0)?,
+                    errors: row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                    input_tokens: row.get(2)?,
+                    output_tokens: row.get(3)?,
+                    cache_read_tokens: row.get(4)?,
+                    cache_write_tokens: row.get(5)?,
+                    reasoning_tokens: row.get(6)?,
                 })
             },
         )?;
@@ -333,16 +337,16 @@ impl Db {
              GROUP BY k ORDER BY SUM(u.input_tokens) + SUM(u.output_tokens) DESC"
         );
       let mut stmt = conn.prepare(&sql)?;
-      let rows = stmt.query_map(params![since, until], |r| {
+      let rows = stmt.query_map(params![since, until], |row| {
          Ok(UsageAgg {
-            key: r.get(0)?,
-            requests: r.get(1)?,
-            errors: r.get::<_, Option<i64>>(2)?.unwrap_or(0),
-            input_tokens: r.get(3)?,
-            output_tokens: r.get(4)?,
-            cache_read_tokens: r.get(5)?,
-            cache_write_tokens: r.get(6)?,
-            reasoning_tokens: r.get(7)?,
+            key: row.get(0)?,
+            requests: row.get(1)?,
+            errors: row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+            input_tokens: row.get(3)?,
+            output_tokens: row.get(4)?,
+            cache_read_tokens: row.get(5)?,
+            cache_write_tokens: row.get(6)?,
+            reasoning_tokens: row.get(7)?,
          })
       })?;
       Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -350,8 +354,8 @@ impl Db {
 }
 
 fn retry_after(oldest: Option<i64>, window_ms: i64, now: i64) -> i64 {
-   oldest.map_or(1, |ts| {
-      ((ts.saturating_add(window_ms).saturating_sub(now) + 999) / 1000).max(1)
+   oldest.map_or(1, |timestamp| {
+      ((timestamp.saturating_add(window_ms).saturating_sub(now) + 999) / 1000).max(1)
    })
 }
 
@@ -411,26 +415,26 @@ impl Db {
              GROUP BY u.user, account, provider, u.requested_model, u.upstream_model,
                       u.effort, u.service_tier, u.dialect",
         )?;
-      let rows = stmt.query_map([], |r| {
+      let rows = stmt.query_map([], |row| {
          Ok(MetricsRow {
-            user: r.get(0)?,
-            account: r.get(1)?,
-            provider: r.get(2)?,
-            requested_model: r.get(3)?,
-            model: r.get(4)?,
-            effort: r.get(5)?,
-            service_tier: r.get(6)?,
-            dialect: r.get(7)?,
-            requests: r.get(8)?,
-            errors: r.get::<_, Option<i64>>(9)?.unwrap_or(0),
-            input_tokens: r.get(10)?,
-            output_tokens: r.get(11)?,
-            cache_read_tokens: r.get(12)?,
-            cache_write_tokens: r.get(13)?,
-            reasoning_tokens: r.get(14)?,
-            cost_usd: r.get(15)?,
-            list_cost_usd: r.get(16)?,
-            duration_ms: r.get(17)?,
+            user: row.get(0)?,
+            account: row.get(1)?,
+            provider: row.get(2)?,
+            requested_model: row.get(3)?,
+            model: row.get(4)?,
+            effort: row.get(5)?,
+            service_tier: row.get(6)?,
+            dialect: row.get(7)?,
+            requests: row.get(8)?,
+            errors: row.get::<_, Option<i64>>(9)?.unwrap_or(0),
+            input_tokens: row.get(10)?,
+            output_tokens: row.get(11)?,
+            cache_read_tokens: row.get(12)?,
+            cache_write_tokens: row.get(13)?,
+            reasoning_tokens: row.get(14)?,
+            cost_usd: row.get(15)?,
+            list_cost_usd: row.get(16)?,
+            duration_ms: row.get(17)?,
          })
       })?;
       Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -447,15 +451,15 @@ impl Db {
              WHERE (cost_usd = 0 OR list_cost_usd = 0)
                AND input_tokens + output_tokens + cache_read_tokens + cache_write_tokens > 0",
       )?;
-      let rows = stmt.query_map([], |r| {
+      let rows = stmt.query_map([], |row| {
          Ok(UnpricedRow {
-            id: r.get(0)?,
-            model: r.get(1)?,
-            tokens: crate::pricing::Tokens {
-               input: r.get(2)?,
-               output: r.get(3)?,
-               cache_read: r.get(4)?,
-               cache_write: r.get(5)?,
+            id: row.get(0)?,
+            model: row.get(1)?,
+            tokens: Tokens {
+               input: row.get(2)?,
+               output: row.get(3)?,
+               cache_read: row.get(4)?,
+               cache_write: row.get(5)?,
             },
          })
       })?;
@@ -464,15 +468,15 @@ impl Db {
 
    pub async fn price_usage(&self, priced: &[(i64, f64, f64)]) -> Result<()> {
       let mut conn = self.0.lock().await;
-      let tx = conn.transaction()?;
+      let txn = conn.transaction()?;
       {
          let mut stmt =
-            tx.prepare("UPDATE usage_log SET cost_usd = ?2, list_cost_usd = ?3 WHERE id = ?1")?;
-         for (id, cost, list_cost) in priced {
+            txn.prepare("UPDATE usage_log SET cost_usd = ?2, list_cost_usd = ?3 WHERE id = ?1")?;
+         for &(id, cost, list_cost) in priced {
             stmt.execute(params![id, cost, list_cost])?;
          }
       }
-      tx.commit()?;
+      txn.commit()?;
       Ok(())
    }
 
@@ -491,11 +495,11 @@ impl Db {
              )
              SELECT user, tool, COUNT(*) FROM split WHERE tool <> '' GROUP BY user, tool",
         )?;
-      let rows = stmt.query_map([], |r| {
+      let rows = stmt.query_map([], |row| {
          Ok(ToolRow {
-            user: r.get(0)?,
-            tool: r.get(1)?,
-            count: r.get(2)?,
+            user: row.get(0)?,
+            tool: row.get(1)?,
+            count: row.get(2)?,
          })
       })?;
       Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -523,20 +527,20 @@ impl Db {
              FROM usage_log u
              GROUP BY u.user, account, stop_reason",
       )?;
-      let rows = stmt.query_map([], |r| {
+      let rows = stmt.query_map([], |row| {
          Ok(InsightRow {
-            user: r.get(0)?,
-            account: r.get(1)?,
-            stop_reason: r.get(2)?,
-            requests: r.get(3)?,
-            request_bytes: r.get(4)?,
-            response_bytes: r.get(5)?,
-            turns: r.get(6)?,
-            images: r.get(7)?,
-            thinking_budget: r.get(8)?,
-            tools_declared: r.get(9)?,
-            ttft_ms: r.get(10)?,
-            ttft_samples: r.get::<_, Option<i64>>(11)?.unwrap_or(0),
+            user: row.get(0)?,
+            account: row.get(1)?,
+            stop_reason: row.get(2)?,
+            requests: row.get(3)?,
+            request_bytes: row.get(4)?,
+            response_bytes: row.get(5)?,
+            turns: row.get(6)?,
+            images: row.get(7)?,
+            thinking_budget: row.get(8)?,
+            tools_declared: row.get(9)?,
+            ttft_ms: row.get(10)?,
+            ttft_samples: row.get::<_, Option<i64>>(11)?.unwrap_or(0),
          })
       })?;
       Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -559,13 +563,13 @@ impl Db {
                    GROUP BY user, session_key)
              GROUP BY user",
       )?;
-      let rows = stmt.query_map([], |r| {
+      let rows = stmt.query_map([], |row| {
          Ok(SessionRow {
-            user: r.get(0)?,
-            sessions: r.get(1)?,
-            deepest: r.get(2)?,
-            switches: r.get(3)?,
-            tokens_max: r.get(4)?,
+            user: row.get(0)?,
+            sessions: row.get(1)?,
+            deepest: row.get(2)?,
+            switches: row.get(3)?,
+            tokens_max: row.get(4)?,
          })
       })?;
       Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -584,12 +588,12 @@ impl Db {
              WHERE u.status >= 400 OR u.error_kind IS NOT NULL
              GROUP BY u.user, provider, kind",
       )?;
-      let rows = stmt.query_map([], |r| {
+      let rows = stmt.query_map([], |row| {
          Ok(ErrorRow {
-            user: r.get(0)?,
-            provider: r.get(1)?,
-            kind: r.get(2)?,
-            count: r.get(3)?,
+            user: row.get(0)?,
+            provider: row.get(1)?,
+            kind: row.get(2)?,
+            count: row.get(3)?,
          })
       })?;
       Ok(rows.collect::<rusqlite::Result<_>>()?)

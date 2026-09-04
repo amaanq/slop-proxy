@@ -1,11 +1,14 @@
 use axum::body::Bytes;
 
+use std::collections::BTreeMap;
+
 use super::{
    AccountUsage, AuthPolicy, Backend, Cooldown, ModelWindow, Pool, PoolError, Route, Slot,
    UsageWindow,
 };
 use crate::anthropic::client::{AnthropicClient, RelayHeaders};
 use crate::provider::Provider;
+use crate::translate::chat::ChatError;
 use crate::upstream::SendError;
 
 /// Session-sticky pool over Anthropic Max accounts, owning the relay client.
@@ -29,7 +32,7 @@ impl Backend for AnthropicClient {
    type Response = reqwest::Response;
 
    fn reason(body: String) -> String {
-      crate::translate::chat::ChatError::reason(body)
+      ChatError::reason(body)
    }
 
    fn soft_limit(&self) -> f64 {
@@ -51,17 +54,18 @@ impl Pool<AnthropicClient> {
    /// Averaged across accounts, so a caller's figures do not jump when
    /// routing moves it.
    pub async fn pool_windows(&self) -> Vec<UsageWindow> {
-      let mut by_name: std::collections::BTreeMap<String, (f64, usize, Option<i64>)> =
-         std::collections::BTreeMap::default();
+      let mut by_name: BTreeMap<String, (f64, usize, Option<i64>)> = BTreeMap::default();
       for account in self.slots.snapshot().await {
          let Some(usage) = account.usage else { continue };
-         for w in usage.windows {
-            let slot = by_name.entry(w.name.clone()).or_insert((0.0, 0, None));
-            slot.0 += w.utilization;
+         for window in usage.windows {
+            let slot = by_name
+               .entry(window.name.clone())
+               .or_insert((0.0_f64, 0_usize, None));
+            slot.0 += window.utilization;
             slot.1 += 1;
-            slot.2 = match (slot.2, w.resets_at) {
-               (Some(a), Some(b)) => Some(a.min(b)),
-               (a, b) => a.or(b),
+            slot.2 = match (slot.2, window.resets_at) {
+               (Some(left), Some(right)) => Some(left.min(right)),
+               (left, right) => left.or(right),
             };
          }
       }
@@ -84,7 +88,7 @@ impl Pool<AnthropicClient> {
          match self.backend.models_raw(&token).await {
             Ok((status, body)) if status.is_success() => return Ok(body),
             Ok((status, _)) => tracing::debug!("models for {}: {status}", slot.display),
-            Err(e) => tracing::debug!("models for {}: {e}", slot.display),
+            Err(err) => tracing::debug!("models for {}: {err}", slot.display),
          }
       }
       Err(PoolError::NoAccounts(Provider::Anthropic))
@@ -102,12 +106,12 @@ impl Pool<AnthropicClient> {
             Ok(usage) => {
                let windows = usage
                   .windows()
-                  .map(|(name, w)| UsageWindow {
+                  .map(|(name, window)| UsageWindow {
                      name: name.to_owned(),
                      // The endpoint reports percentages while the
                      // response headers report fractions.
-                     utilization: w.utilization / 100.0,
-                     resets_at: w.resets_at_unix(),
+                     utilization: window.utilization / 100.0,
+                     resets_at: window.resets_at_unix(),
                   })
                   .collect();
                self
@@ -130,7 +134,7 @@ impl Pool<AnthropicClient> {
                   )
                   .await;
             },
-            Err(e) => tracing::debug!("usage for {}: {e}", slot.display),
+            Err(err) => tracing::debug!("usage for {}: {err}", slot.display),
          }
       }
    }
@@ -139,13 +143,17 @@ impl Pool<AnthropicClient> {
 #[cfg(test)]
 mod tests {
    use std::collections::HashSet;
+   use std::env;
+   use std::sync::Arc;
 
    use super::*;
+   use crate::clock;
    use crate::config::AnthropicConfig;
    use crate::db::Db;
+   use uuid::Uuid;
 
    fn test_pool(ids: &[(i64, bool)]) -> AnthropicPool {
-      let db_path = std::env::temp_dir().join(format!("slop-rdv-{}.db", uuid::Uuid::new_v4()));
+      let db_path = env::temp_dir().join(format!("slop-rdv-{}.db", Uuid::new_v4()));
       let db = Db::open(&db_path).unwrap();
       AnthropicPool {
          slots: super::super::test_slots(db, Provider::Anthropic, ids),
@@ -153,7 +161,7 @@ mod tests {
       }
    }
 
-   async fn ranked(pool: &AnthropicPool, session_key: &str) -> Vec<std::sync::Arc<Slot>> {
+   async fn ranked(pool: &AnthropicPool, session_key: &str) -> Vec<Arc<Slot>> {
       pool
          .ranked(Route {
             session_key,
@@ -168,13 +176,13 @@ mod tests {
       let pool = test_pool(&[(1, false), (2, false), (3, false), (4, false)]);
 
       let first = ranked(&pool, "session-a").await[0].id;
-      for _ in 0..10 {
+      for _ in 0_usize..10_usize {
          assert_eq!(ranked(&pool, "session-a").await[0].id, first);
       }
 
       let mut winners = HashSet::new();
-      for i in 0..64 {
-         winners.insert(ranked(&pool, &format!("session-{i}")).await[0].id);
+      for idx in 0_usize..64_usize {
+         winners.insert(ranked(&pool, &format!("session-{idx}")).await[0].id);
       }
       assert!(winners.len() > 1, "all sessions landed on one account");
    }
@@ -182,20 +190,20 @@ mod tests {
    #[tokio::test]
    async fn quota_that_resets_soonest_is_spent_first() {
       let pool = test_pool(&[(1, false), (2, false), (3, false), (4, false)]);
-      let now = crate::clock::unix_now();
-      let hours = |h: f64| now + (h * 3600.0) as i64;
+      let now = clock::unix_now();
+      let hours = |hrs: f64| now + (hrs * 3600.0_f64) as i64;
       for (id, used, resets_in) in [
-         (1, 0.64, 47.2),
-         (2, 0.90, 37.2),
-         (3, 0.04, 131.0),
-         (4, 0.69, 8.2),
+         (1_i64, 0.64_f64, 47.2_f64),
+         (2_i64, 0.90_f64, 37.2_f64),
+         (3_i64, 0.04_f64, 131.0_f64),
+         (4_i64, 0.69_f64, 8.2_f64),
       ] {
          let slot = pool
             .slots
             .list()
             .await
             .into_iter()
-            .find(|s| s.id == id)
+            .find(|slot| slot.id == id)
             .unwrap();
          pool
             .slots
@@ -226,7 +234,7 @@ mod tests {
    async fn a_spent_window_sinks_below_its_peers() {
       let pool = test_pool(&[(1, false), (2, false), (3, false), (4, false)]);
       let key = "session-strain";
-      let head = std::sync::Arc::clone(&ranked(&pool, key).await[0]);
+      let head = Arc::clone(&ranked(&pool, key).await[0]);
 
       pool
          .slots
@@ -248,7 +256,7 @@ mod tests {
       assert_eq!(after[3].id, head.id, "spent account should sort last");
 
       // A locked account sinks the same way regardless of its fraction.
-      let fresh = std::sync::Arc::clone(&after[0]);
+      let fresh = Arc::clone(&after[0]);
       pool
          .slots
          .note_usage(

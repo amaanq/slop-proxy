@@ -4,6 +4,8 @@ use axum::response::IntoResponse as _;
 use axum::response::Response;
 use serde::Serialize;
 
+use crate::clock;
+
 /// Ten years out. Codex refreshes when it believes the grant is near expiry,
 /// and the refresh would go to `OpenAI` rather than here, so the claim is dated
 /// far enough ahead that it never fires.
@@ -58,7 +60,7 @@ pub async fn codex_auth(headers: HeaderMap) -> Response {
       );
    };
 
-   let now = crate::clock::unix_now();
+   let now = clock::unix_now();
    let claims = Claims {
       auth: AuthClaim {
          chatgpt_account_id: "slop-proxy",
@@ -77,7 +79,7 @@ pub async fn codex_auth(headers: HeaderMap) -> Response {
          refresh_token: token,
          account_id: "slop-proxy",
       },
-      last_refresh: crate::clock::rfc3339(now),
+      last_refresh: clock::rfc3339(now),
    })
    .into_response()
 }
@@ -90,11 +92,11 @@ pub async fn codex_auth(headers: HeaderMap) -> Response {
 pub async fn codex_config(headers: HeaderMap) -> Response {
    let host = headers
       .get("host")
-      .and_then(|v| v.to_str().ok())
+      .and_then(|value| value.to_str().ok())
       .unwrap_or("localhost");
    let scheme = headers
       .get("x-forwarded-proto")
-      .and_then(|v| v.to_str().ok())
+      .and_then(|value| value.to_str().ok())
       .unwrap_or("https");
 
    let body = format!(

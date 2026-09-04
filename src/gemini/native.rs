@@ -4,6 +4,8 @@ use serde::Serialize;
 use serde_json::value::{RawValue, to_raw_value};
 use serde_json::{Map, Value};
 
+use crate::clock::unix_now;
+use crate::gemini::sse::Frames;
 use crate::gemini::types::{
    ApiError, Blob, Candidate, Content, FileData, FinishReason, FunctionCall, FunctionCallingConfig,
    FunctionCallingMode, FunctionDeclaration, FunctionResponse, GenerateContentRequest,
@@ -51,7 +53,7 @@ pub fn request(req: &ChatRequest) -> Result<NativeRequest, NativeError> {
    if model.is_empty()
       || !model
          .bytes()
-         .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+         .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
    {
       return Err(NativeError::InvalidModel);
    }
@@ -69,7 +71,7 @@ pub fn request(req: &ChatRequest) -> Result<NativeRequest, NativeError> {
 
       let mut parts = content_parts(message.content.as_ref())?;
       if role == "assistant"
-         && let Some(tool_calls) = &message.tool_calls
+         && let Some(tool_calls) = message.tool_calls.as_ref()
       {
          for call in tool_calls {
             let name = call
@@ -77,10 +79,10 @@ pub fn request(req: &ChatRequest) -> Result<NativeRequest, NativeError> {
                .name
                .clone()
                .ok_or(NativeError::CallWithoutName)?;
-            if let Some(id) = &call.id {
+            if let Some(id) = call.id.as_ref() {
                call_names.insert(id.clone(), name.clone());
             }
-            let args = match &call.function.arguments {
+            let args = match call.function.arguments.as_deref() {
                Some(raw) => serde_json::from_str(raw).map_err(NativeError::CallArguments)?,
                None => Value::Object(Map::new()),
             };
@@ -144,16 +146,16 @@ pub fn request(req: &ChatRequest) -> Result<NativeRequest, NativeError> {
 fn content_parts(content: Option<&ChatContent>) -> Result<Vec<Part>, NativeError> {
    match content {
       None => Ok(Vec::new()),
-      Some(ChatContent::Text(text)) => Ok(vec![Part::text(text.clone())]),
-      Some(ChatContent::Parts(items)) => items.iter().map(content_part).collect(),
+      Some(&ChatContent::Text(ref text)) => Ok(vec![Part::text(text.clone())]),
+      Some(&ChatContent::Parts(ref items)) => items.iter().map(content_part).collect(),
    }
 }
 
 fn content_part(part: &ChatPart) -> Result<Part, NativeError> {
-   match part {
-      ChatPart::Text { text } => Ok(Part::text(text.clone())),
-      ChatPart::ImageUrl { image_url } => media_part(image_url.url(), "image/*"),
-      ChatPart::InputAudio { input_audio } => Ok(Part {
+   match *part {
+      ChatPart::Text { ref text } => Ok(Part::text(text.clone())),
+      ChatPart::ImageUrl { ref image_url } => media_part(image_url.url(), "image/*"),
+      ChatPart::InputAudio { ref input_audio } => Ok(Part {
          inline_data: Some(Blob {
             mime_type: format!("audio/{}", input_audio.format.as_deref().unwrap_or("wav")),
             data: input_audio.data.clone(),
@@ -172,7 +174,7 @@ fn media_part(url: &str, fallback_mime: &str) -> Result<Part, NativeError> {
             mime_type: metadata
                .split(';')
                .next()
-               .filter(|m| !m.is_empty())
+               .filter(|segment| !segment.is_empty())
                .unwrap_or(fallback_mime)
                .to_owned(),
             data: payload.to_owned(),
@@ -195,11 +197,11 @@ fn tool_response(content: Option<&ChatContent>) -> Box<RawValue> {
       result: Box<RawValue>,
    }
    let text = match content {
-      Some(ChatContent::Text(raw)) => raw.clone(),
-      Some(ChatContent::Parts(parts)) => parts
+      Some(&ChatContent::Text(ref raw)) => raw.clone(),
+      Some(&ChatContent::Parts(ref parts)) => parts
          .iter()
-         .filter_map(|p| match p {
-            ChatPart::Text { text } => Some(text.as_str()),
+         .filter_map(|part| match *part {
+            ChatPart::Text { ref text } => Some(text.as_str()),
             ChatPart::ImageUrl { .. } | ChatPart::InputAudio { .. } | ChatPart::Other => None,
          })
          .collect(),
@@ -214,14 +216,18 @@ fn tool_response(content: Option<&ChatContent>) -> Box<RawValue> {
 }
 
 fn generation_config(req: &ChatRequest) -> Option<GenerationConfig> {
-   let (mime, schema) = match req.response_format.as_ref().map(|f| f.kind.as_str()) {
+   let (mime, schema) = match req
+      .response_format
+      .as_ref()
+      .map(|format| format.kind.as_str())
+   {
       Some("json_object") => (Some("application/json".to_owned()), None),
       Some("json_schema") => (
          Some("application/json".to_owned()),
          req.response_format
             .as_ref()
-            .and_then(|f| f.json_schema.as_ref())
-            .and_then(|s| s.schema.clone()),
+            .and_then(|format| format.json_schema.as_ref())
+            .and_then(|schema| schema.schema.clone()),
       ),
       _ => (None, None),
    };
@@ -229,7 +235,7 @@ fn generation_config(req: &ChatRequest) -> Option<GenerationConfig> {
       temperature: req.temperature,
       top_p: req.top_p,
       max_output_tokens: req.max_completion_tokens.or(req.max_tokens),
-      candidate_count: req.n,
+      candidate_count: req.choice_count,
       presence_penalty: req.presence_penalty,
       frequency_penalty: req.frequency_penalty,
       seed: req.seed,
@@ -240,13 +246,13 @@ fn generation_config(req: &ChatRequest) -> Option<GenerationConfig> {
    };
    let empty = serde_json::to_value(&config)
       .ok()
-      .and_then(|v| v.as_object().map(Map::is_empty))
+      .and_then(|value| value.as_object().map(Map::is_empty))
       .unwrap_or(true);
    (!empty).then_some(config)
 }
 
 fn tools(req: &ChatRequest) -> Result<Option<Vec<Tool>>, NativeError> {
-   let Some(tools) = &req.tools else {
+   let Some(tools) = req.tools.as_ref() else {
       return Ok(None);
    };
    let mut declarations = Vec::new();
@@ -272,12 +278,12 @@ fn tools(req: &ChatRequest) -> Result<Option<Vec<Tool>>, NativeError> {
 }
 
 fn tool_config(req: &ChatRequest) -> Option<ToolConfig> {
-   let config = match req.tool_choice.as_ref()? {
-      ChatToolChoice::Mode(mode) if mode == "none" => FunctionCallingConfig {
+   let config = match *req.tool_choice.as_ref()? {
+      ChatToolChoice::Mode(ref mode) if mode == "none" => FunctionCallingConfig {
          mode: FunctionCallingMode::None,
          allowed_function_names: None,
       },
-      ChatToolChoice::Mode(mode) if mode == "required" => FunctionCallingConfig {
+      ChatToolChoice::Mode(ref mode) if mode == "required" => FunctionCallingConfig {
          mode: FunctionCallingMode::Any,
          allowed_function_names: None,
       },
@@ -285,11 +291,11 @@ fn tool_config(req: &ChatRequest) -> Option<ToolConfig> {
          mode: FunctionCallingMode::Auto,
          allowed_function_names: None,
       },
-      ChatToolChoice::Named { function, .. } => FunctionCallingConfig {
+      ChatToolChoice::Named { ref function, .. } => FunctionCallingConfig {
          mode: FunctionCallingMode::Any,
          allowed_function_names: function
             .as_ref()
-            .and_then(|f| f.name.clone())
+            .and_then(|func| func.name.clone())
             .map(|name| vec![name]),
       },
    };
@@ -321,7 +327,7 @@ pub fn response(body: &[u8], requested_model: &str) -> Result<ChatCompletion, Na
          |id| format!("chatcmpl-{id}"),
       ),
       object: "chat.completion".into(),
-      created: crate::clock::unix_now(),
+      created: unix_now(),
       model: requested_model.to_owned(),
       choices,
       usage: native.usage_metadata.as_ref().map(chat_usage),
@@ -339,14 +345,14 @@ fn choice(
    let mut text = String::new();
    let mut tool_calls = Vec::new();
    let mut images = Vec::new();
-   for part in candidate.content.iter().flat_map(|c| &c.parts) {
+   for part in candidate.content.iter().flat_map(|content| &content.parts) {
       if part.thought == Some(true) {
          continue;
       }
-      if let Some(value) = &part.text {
+      if let Some(value) = part.text.as_ref() {
          text.push_str(value);
       }
-      if let Some(call) = &part.function_call {
+      if let Some(call) = part.function_call.as_ref() {
          tool_calls.push(tool_call(
             call,
             part.thought_signature.as_deref(),
@@ -354,7 +360,7 @@ fn choice(
             streaming,
          ));
       }
-      if let Some(data) = &part.inline_data
+      if let Some(data) = part.inline_data.as_ref()
          && !data.data.is_empty()
       {
          let mime = if data.mime_type.is_empty() {
@@ -448,7 +454,7 @@ pub struct NativeStream {
    id: String,
    model: String,
    created: i64,
-   frames: crate::gemini::sse::Frames,
+   frames: Frames,
    sent_roles: BTreeSet<u64>,
    done: bool,
 }
@@ -458,8 +464,8 @@ impl NativeStream {
       Self {
          id: format!("chatcmpl-{}", uuid::Uuid::new_v4()),
          model: model.to_owned(),
-         created: crate::clock::unix_now(),
-         frames: crate::gemini::sse::Frames::default(),
+         created: unix_now(),
+         frames: Frames::default(),
          sent_roles: BTreeSet::new(),
          done: false,
       }
@@ -483,10 +489,10 @@ impl NativeStream {
    }
 
    fn event(&mut self, event: &GenerateContentResponse) -> Vec<Vec<u8>> {
-      if let Some(response_id) = &event.response_id {
+      if let Some(response_id) = event.response_id.as_ref() {
          self.id = format!("chatcmpl-{response_id}");
       }
-      if let Some(error) = &event.error {
+      if let Some(error) = event.error.as_ref() {
          self.done = true;
          let frame = ErrorFrame { error };
          return vec![sse(&frame), b"data: [DONE]\n\n".to_vec()];
@@ -552,8 +558,8 @@ mod tests {
    use super::*;
    use serde_json::json;
 
-   fn chat(v: Value) -> ChatRequest {
-      serde_json::from_value(v).unwrap()
+   fn chat(value: Value) -> ChatRequest {
+      serde_json::from_value(value).unwrap()
    }
 
    #[test]
@@ -622,7 +628,7 @@ mod tests {
       let output = stream.feed(b"data: {\"error\":{\"code\":429,\"message\":\"slow down\",\"status\":\"RESOURCE_EXHAUSTED\",\"details\":[{\"@type\":\"x\"}]}}\n\n");
       assert_eq!(output.len(), 2);
       let first: Value = serde_json::from_slice(&output[0][6..]).unwrap();
-      assert_eq!(first["error"]["code"], 429);
+      assert_eq!(first["error"]["code"], 429_i32);
       assert_eq!(first["error"]["status"], "RESOURCE_EXHAUSTED");
       assert_eq!(first["error"]["details"][0]["@type"], "x");
       assert_eq!(output[1], b"data: [DONE]\n\n");
@@ -634,8 +640,8 @@ mod signature_tests {
    use super::*;
    use serde_json::json;
 
-   fn candidate(v: Value) -> Candidate {
-      serde_json::from_value(v).unwrap()
+   fn candidate(value: Value) -> Candidate {
+      serde_json::from_value(value).unwrap()
    }
 
    /// The signature rides on the part, beside functionCall not inside it.
@@ -686,7 +692,7 @@ mod cutoff_tests {
          .iter()
          .rev()
          .take(2)
-         .map(|f| String::from_utf8_lossy(f).into_owned())
+         .map(|frame| String::from_utf8_lossy(frame).into_owned())
          .collect();
       assert_eq!(tail[0], "data: [DONE]\n\n");
       assert!(

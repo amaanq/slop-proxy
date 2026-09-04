@@ -2,6 +2,7 @@ pub mod accounts;
 pub mod tokens;
 pub mod usage;
 
+use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -17,16 +18,16 @@ const SCHEMA: &str = include_str!("schema.sql");
 impl Db {
    pub fn open(path: &Path) -> Result<Self> {
       if let Some(dir) = path.parent() {
-         std::fs::create_dir_all(dir).wrap_err_with(|| format!("creating {}", dir.display()))?;
+         fs::create_dir_all(dir).wrap_err_with(|| format!("creating {}", dir.display()))?;
       }
       let conn = Connection::open(path).wrap_err_with(|| format!("opening {}", path.display()))?;
       conn.pragma_update(None, "journal_mode", "WAL")?;
-      conn.pragma_update(None, "busy_timeout", 5000)?;
+      conn.pragma_update(None, "busy_timeout", 5000_i64)?;
       conn.pragma_update(None, "foreign_keys", "ON")?;
 
       conn.execute_batch(SCHEMA).wrap_err("creating schema")?;
       // A column added to schema.sql never reaches an existing table.
-      for (table, column, ddl) in ADDED_COLUMNS {
+      for &(table, column, ddl) in ADDED_COLUMNS {
          add_column(&conn, table, column, ddl)?;
       }
       conn

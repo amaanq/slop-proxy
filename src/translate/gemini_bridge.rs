@@ -2,14 +2,24 @@
 //! chat completions.
 
 use std::collections::{BTreeSet, HashMap};
+use std::io::Error;
+use std::mem;
 
+use futures_util::stream;
 use serde::Serialize;
 use serde_json::value::{RawValue, to_raw_value};
 
+use crate::codex::sse::EventStream;
 use crate::codex::types::{
    ContentPart, InputItem, OutputContentPart, OutputItem, ResponseObj, ResponsesEvent,
    ResponsesRequest, ToolChoice, UpstreamError, Usage,
 };
+use crate::gemini::client::GeminiProtocol;
+use crate::gemini::native::NativeStream;
+use crate::gemini::signatures;
+use crate::gemini::sse::Frames;
+use crate::gemini::types::ApiError;
+use crate::translate::UsageCapture;
 use crate::translate::anthropic_req::{ObjectSchema, empty_schema};
 use crate::translate::chat::{
    ChatChunk, ChatContent, ChatError, ChatErrorBody, ChatMessage, ChatPart, ChatRequest,
@@ -18,11 +28,11 @@ use crate::translate::chat::{
 };
 
 fn remember_signature(call_id: &str, signature: &str) {
-   crate::gemini::signatures::put(crate::gemini::signatures::call_id_key(call_id), signature);
+   signatures::put(signatures::call_id_key(call_id), signature);
 }
 
 fn signature_for(call_id: &str) -> Option<String> {
-   crate::gemini::signatures::get(crate::gemini::signatures::call_id_key(call_id))
+   signatures::get(signatures::call_id_key(call_id))
 }
 
 fn tool_call_message(call_id: &str, name: &str, arguments: String) -> ChatMessage {
@@ -51,8 +61,8 @@ fn tool_call_message(call_id: &str, name: &str, arguments: String) -> ChatMessag
 pub fn custom_tools(req: &ResponsesRequest) -> BTreeSet<String> {
    req.tools
       .iter()
-      .filter(|t| t.kind == "custom")
-      .map(|t| t.name.clone())
+      .filter(|tool| tool.kind == "custom")
+      .map(|tool| tool.name.clone())
       .collect()
 }
 
@@ -79,28 +89,37 @@ pub fn to_chat(req: &ResponsesRequest) -> ChatRequest {
       ..Default::default()
    }];
    for item in &req.input {
-      match item {
-         InputItem::Message { role, content } => messages.push(ChatMessage {
+      match *item {
+         InputItem::Message {
+            ref role,
+            ref content,
+         } => messages.push(ChatMessage {
             role: chat_role(role).to_owned(),
             content: Some(parts(content)),
             ..Default::default()
          }),
          InputItem::FunctionCall {
-            call_id,
-            name,
-            arguments,
+            ref call_id,
+            ref name,
+            ref arguments,
          } => messages.push(tool_call_message(call_id, name, arguments.clone())),
-         InputItem::FunctionCallOutput { call_id, output }
-         | InputItem::CustomToolCallOutput { call_id, output } => messages.push(ChatMessage {
+         InputItem::FunctionCallOutput {
+            ref call_id,
+            ref output,
+         }
+         | InputItem::CustomToolCallOutput {
+            ref call_id,
+            ref output,
+         } => messages.push(ChatMessage {
             role: "tool".into(),
             tool_call_id: Some(call_id.clone()),
             content: Some(ChatContent::Text(output.text())),
             ..Default::default()
          }),
          InputItem::CustomToolCall {
-            call_id,
-            name,
-            input,
+            ref call_id,
+            ref name,
+            ref input,
          } => messages.push(tool_call_message(
             call_id,
             name,
@@ -114,16 +133,16 @@ pub fn to_chat(req: &ResponsesRequest) -> ChatRequest {
    let tools: Vec<ChatToolDef> = req
       .tools
       .iter()
-      .filter(|t| !t.name.is_empty())
-      .map(|t| {
-         let parameters = if t.kind == "custom" {
+      .filter(|tool| !tool.name.is_empty())
+      .map(|tool| {
+         let parameters = if tool.kind == "custom" {
             freeform_schema()
          } else {
-            t.parameters.clone().unwrap_or_else(empty_schema)
+            tool.parameters.clone().unwrap_or_else(empty_schema)
          };
          ChatToolDef::function(FunctionDef {
-            name: Some(t.name.clone()),
-            description: t.description.clone(),
+            name: Some(tool.name.clone()),
+            description: tool.description.clone(),
             parameters: Some(parameters),
             strict: None,
          })
@@ -143,12 +162,12 @@ pub fn to_chat(req: &ResponsesRequest) -> ChatRequest {
       reasoning_effort: req
          .reasoning
          .as_ref()
-         .filter(|r| !r.effort.is_empty())
-         .map(|r| gemini_effort(&r.effort).to_owned()),
+         .filter(|reasoning| !reasoning.effort.is_empty())
+         .map(|reasoning| gemini_effort(&reasoning.effort).to_owned()),
       tools: (!tools.is_empty()).then_some(tools),
-      tool_choice: req.tool_choice.as_ref().map(|c| match c {
-         ToolChoice::Mode(mode) => ChatToolChoice::Mode(mode.clone()),
-         ToolChoice::Function { name, .. } => ChatToolChoice::function(name.clone()),
+      tool_choice: req.tool_choice.as_ref().map(|choice| match *choice {
+         ToolChoice::Mode(ref mode) => ChatToolChoice::Mode(mode.clone()),
+         ToolChoice::Function { ref name, .. } => ChatToolChoice::function(name.clone()),
       }),
       ..Default::default()
    }
@@ -177,14 +196,14 @@ fn parts(content: &[ContentPart]) -> ChatContent {
    ChatContent::Parts(
       content
          .iter()
-         .map(|p| match p {
-            ContentPart::InputImage { image_url } => ChatPart::ImageUrl {
+         .map(|part| match part {
+            &ContentPart::InputImage { ref image_url } => ChatPart::ImageUrl {
                image_url: ImageRef::Url(image_url.clone()),
             },
-            ContentPart::InputText { text } | ContentPart::OutputText { text } => {
+            &ContentPart::InputText { ref text } | &ContentPart::OutputText { ref text } => {
                ChatPart::Text { text: text.clone() }
             },
-            ContentPart::Other => ChatPart::Text {
+            &ContentPart::Other => ChatPart::Text {
                text: String::new(),
             },
          })
@@ -236,9 +255,9 @@ struct OpenCall {
 
 impl ChatToResponses {
    pub fn with_custom(custom: BTreeSet<String>) -> Self {
-      let mut b = Self::default();
-      b.custom = custom;
-      b
+      let mut bridge = Self::default();
+      bridge.custom = custom;
+      bridge
    }
 
    #[expect(
@@ -261,7 +280,7 @@ impl ChatToResponses {
       if self.completed {
          return out;
       }
-      if let Some(err) = &chunk.error {
+      if let Some(err) = chunk.error.as_ref() {
          self.completed = true;
          self.finished = true;
          self.calls.clear();
@@ -273,8 +292,8 @@ impl ChatToResponses {
                status: Some("failed".into()),
                usage: None,
                error: Some(UpstreamError {
-                  code: err.code.as_ref().map(|c| match c {
-                     ErrorCode::Text(code) => code.clone(),
+                  code: err.code.as_ref().map(|error_code| match *error_code {
+                     ErrorCode::Text(ref code) => code.clone(),
                      ErrorCode::Number(code) => code.to_string(),
                   }),
                   message: Some(err.message.clone()),
@@ -293,8 +312,8 @@ impl ChatToResponses {
          });
       }
       let first = chunk.choices.first();
-      let delta = first.map(|c| &c.delta);
-      if let Some(text) = delta.and_then(|d| d.content.as_deref())
+      let delta = first.map(|choice| &choice.delta);
+      if let Some(text) = delta.and_then(|delta| delta.content.as_deref())
          && !text.is_empty()
       {
          // Codex attaches a delta to an item by id, so text streamed before
@@ -330,12 +349,12 @@ impl ChatToResponses {
          });
          self.text.push_str(text);
       }
-      if let Some(calls) = delta.and_then(|d| d.tool_calls.as_ref()) {
+      if let Some(calls) = delta.and_then(|delta| delta.tool_calls.as_ref()) {
          for call in calls {
             out.extend(self.tool_call(call));
          }
       }
-      if first.is_some_and(|c| c.finish_reason.is_some()) {
+      if first.is_some_and(|choice| choice.finish_reason.is_some()) {
          self.finished = true;
          for call in &self.calls {
             if !call.announced {
@@ -346,7 +365,7 @@ impl ChatToResponses {
             if self.custom.contains(&call.name) {
                let input = serde_json::from_str::<HashMap<String, String>>(&call.arguments)
                   .ok()
-                  .and_then(|mut a| a.remove(FREEFORM_ARG))
+                  .and_then(|mut args| args.remove(FREEFORM_ARG))
                   .unwrap_or_else(|| call.arguments.clone());
                out.push(ResponsesEvent::CustomToolCallInputDone {
                   item_id: Some(call.item_id.clone()),
@@ -387,7 +406,7 @@ impl ChatToResponses {
          // turn needs the whole message restated as one.
          if !self.text.is_empty() {
             let id = self.msg_id.clone().unwrap_or_default();
-            let text = std::mem::take(&mut self.text);
+            let text = mem::take(&mut self.text);
             out.push(ResponsesEvent::OutputTextDone {
                item_id: Some(id.clone()),
                output_index: 0,
@@ -405,7 +424,7 @@ impl ChatToResponses {
             });
          }
       }
-      if let Some(usage) = &chunk.usage {
+      if let Some(usage) = chunk.usage.as_ref() {
          self.usage = Some(Usage::from(usage.clone()));
       }
       // Gemini reports usage on a chunk of its own, often before the one
@@ -429,9 +448,9 @@ impl ChatToResponses {
       // content when deciding whether the bridge produced anything.
       self.emitted += out
          .iter()
-         .filter(|e| {
+         .filter(|event| {
             !matches!(
-               e,
+               event,
                ResponsesEvent::Created { .. } | ResponsesEvent::Completed { .. }
             )
          })
@@ -446,10 +465,10 @@ impl ChatToResponses {
       }
       let mut out = Vec::new();
       let slot = &mut self.calls[idx];
-      if let Some(id) = &call.id {
+      if let Some(id) = call.id.as_ref() {
          slot.id.clone_from(id);
       }
-      if let Some(name) = &call.function.name {
+      if let Some(name) = call.function.name.as_ref() {
          slot.name.clone_from(name);
       }
       if let Some(sig) = call.thought_signature()
@@ -504,32 +523,30 @@ impl ChatToResponses {
 /// in Gemini's own frames, so that protocol is normalised before parsing.
 pub fn event_stream(
    resp: reqwest::Response,
-   protocol: crate::gemini::client::GeminiProtocol,
+   protocol: GeminiProtocol,
    model: &str,
    custom: BTreeSet<String>,
-   capture: crate::translate::UsageCapture,
-) -> crate::codex::sse::EventStream {
-   use crate::gemini::client::GeminiProtocol;
+   capture: UsageCapture,
+) -> EventStream {
    use eventsource_stream::Eventsource as _;
    use futures_util::StreamExt as _;
 
-   let mut native =
-      (protocol == GeminiProtocol::Native).then(|| crate::gemini::native::NativeStream::new(model));
-   let mut frames = crate::gemini::sse::Frames::default();
+   let mut native = (protocol == GeminiProtocol::Native).then(|| NativeStream::new(model));
+   let mut frames = Frames::default();
    let mut cut = false;
    let head = capture;
    let chat_bytes = resp.bytes_stream().flat_map(move |item| {
       let chunks = match (&mut native, item) {
-         (Some(native), Ok(bytes)) => {
+         (&mut Some(ref mut native), Ok(bytes)) => {
             head.note_upstream_head(&bytes);
             native.feed(&bytes)
          },
-         (None, Ok(bytes)) => {
+         (&mut None, Ok(bytes)) => {
             head.note_upstream_head(&bytes);
             let mut chunks: Vec<Vec<u8>> = frames
                .feed(&bytes)
                .into_iter()
-               .map(|p| format!("data: {}\n\n", String::from_utf8_lossy(&p)).into_bytes())
+               .map(|frame| format!("data: {}\n\n", String::from_utf8_lossy(&frame)).into_bytes())
                .collect();
             if !cut && let Some(error) = frames.cutoff() {
                cut = true;
@@ -537,36 +554,38 @@ pub fn event_stream(
             }
             chunks
          },
-         (_, Err(e)) => {
-            tracing::warn!("gemini stream error: {e}");
+         (_, Err(err)) => {
+            tracing::warn!("gemini stream error: {err}");
             Vec::new()
          },
       };
-      futures_util::stream::iter(chunks.into_iter().map(Ok::<_, std::io::Error>))
+      stream::iter(chunks.into_iter().map(Ok::<_, Error>))
    });
 
    let mut bridge = ChatToResponses::with_custom(custom);
-   let stream = chat_bytes.eventsource().flat_map(move |ev| {
-      let events = match ev {
-         Ok(ev) if ev.data != "[DONE]" => match serde_json::from_str::<ChatChunk>(&ev.data) {
-            Ok(chunk) => bridge.feed(&chunk),
-            Err(error) => {
-               tracing::warn!(%error, frame = %ev.data, "gemini chunk did not parse");
-               Vec::new()
-            },
+   let stream = chat_bytes.eventsource().flat_map(move |event| {
+      let events = match event {
+         Ok(event) if event.data != "[DONE]" => {
+            match serde_json::from_str::<ChatChunk>(&event.data) {
+               Ok(chunk) => bridge.feed(&chunk),
+               Err(error) => {
+                  tracing::warn!(%error, frame = %event.data, "gemini chunk did not parse");
+                  Vec::new()
+               },
+            }
          },
          Ok(_) => Vec::new(),
-         Err(e) => {
-            tracing::warn!("gemini SSE parse error: {e}");
+         Err(err) => {
+            tracing::warn!("gemini SSE parse error: {err}");
             Vec::new()
          },
       };
-      futures_util::stream::iter(events)
+      stream::iter(events)
    });
    Box::pin(stream)
 }
 
-fn cutoff_frame(error: &crate::gemini::types::ApiError) -> Vec<u8> {
+fn cutoff_frame(error: &ApiError) -> Vec<u8> {
    let body = ChatError {
       error: ChatErrorBody {
          message: error.message.clone().unwrap_or_default(),
@@ -586,19 +605,19 @@ mod tests {
    use super::*;
    use serde_json::{Value, json};
 
-   fn chunk(v: Value) -> ChatChunk {
-      serde_json::from_value(v).unwrap()
+   fn chunk(value: Value) -> ChatChunk {
+      serde_json::from_value(value).unwrap()
    }
 
-   fn request(v: Value) -> ResponsesRequest {
-      serde_json::from_value(v).unwrap()
+   fn request(value: Value) -> ResponsesRequest {
+      serde_json::from_value(value).unwrap()
    }
 
    fn kinds(events: &[ResponsesEvent]) -> Vec<String> {
       events
          .iter()
-         .map(|e| {
-            serde_json::to_value(e).unwrap()["type"]
+         .map(|event| {
+            serde_json::to_value(event).unwrap()["type"]
                .as_str()
                .unwrap()
                .to_owned()
@@ -606,8 +625,8 @@ mod tests {
          .collect()
    }
 
-   fn feed(b: &mut ChatToResponses, v: Value) -> Vec<String> {
-      kinds(&b.feed(&chunk(v)))
+   fn feed(bridge: &mut ChatToResponses, value: Value) -> Vec<String> {
+      kinds(&bridge.feed(&chunk(value)))
    }
 
    fn item(event: &ResponsesEvent) -> Value {
@@ -616,8 +635,11 @@ mod tests {
 
    #[test]
    fn text_deltas_become_output_text() {
-      let mut b = ChatToResponses::default();
-      let first = feed(&mut b, json!({"choices": [{"delta": {"content": "hi"}}]}));
+      let mut bridge = ChatToResponses::default();
+      let first = feed(
+         &mut bridge,
+         json!({"choices": [{"delta": {"content": "hi"}}]}),
+      );
       assert_eq!(
          first,
          [
@@ -627,23 +649,26 @@ mod tests {
             "response.output_text.delta"
          ]
       );
-      let next = feed(&mut b, json!({"choices": [{"delta": {"content": "!"}}]}));
+      let next = feed(
+         &mut bridge,
+         json!({"choices": [{"delta": {"content": "!"}}]}),
+      );
       assert_eq!(next, ["response.output_text.delta"]);
    }
 
    #[test]
    fn a_tool_call_split_across_chunks_opens_once() {
-      let mut b = ChatToResponses::default();
-      b.feed(&chunk(json!({"choices": [{"delta": {"tool_calls": [
-            {"index": 0, "id": "c1", "function": {"name": "Read", "arguments": "{\"p"}}]}}]})));
+      let mut bridge = ChatToResponses::default();
+      bridge.feed(&chunk(json!({"choices": [{"delta": {"tool_calls": [
+            {"index": 0_u64, "id": "c1", "function": {"name": "Read", "arguments": "{\"p"}}]}}]})));
       let more = feed(
-         &mut b,
+         &mut bridge,
          json!({"choices": [{"delta": {"tool_calls": [
-                {"index": 0, "function": {"arguments": "ath\":1}"}}]}}]}),
+                {"index": 0_u64, "function": {"arguments": "ath\":1}"}}]}}]}),
       );
       assert_eq!(more, ["response.function_call_arguments.delta"]);
       let done = feed(
-         &mut b,
+         &mut bridge,
          json!({"choices": [{"finish_reason": "tool_calls"}]}),
       );
       assert_eq!(
@@ -654,7 +679,7 @@ mod tests {
          ]
       );
       // An item done without its arguments is a call the client cannot run.
-      let last = b.feed(&chunk(
+      let last = bridge.feed(&chunk(
          json!({"choices": [{"finish_reason": "tool_calls"}]}),
       ));
       assert!(last.is_empty(), "the turn closed twice: {last:?}");
@@ -662,12 +687,12 @@ mod tests {
 
    #[test]
    fn a_finished_tool_call_carries_its_arguments() {
-      let mut b = ChatToResponses::default();
-      b.feed(&chunk(json!({"choices": [{"delta": {"tool_calls": [
-            {"index": 0, "id": "c1", "function": {"name": "Read", "arguments": "{\"p"}}]}}]})));
-      b.feed(&chunk(json!({"choices": [{"delta": {"tool_calls": [
-            {"index": 0, "function": {"arguments": "ath\":1}"}}]}}]})));
-      let done = b.feed(&chunk(
+      let mut bridge = ChatToResponses::default();
+      bridge.feed(&chunk(json!({"choices": [{"delta": {"tool_calls": [
+            {"index": 0_u64, "id": "c1", "function": {"name": "Read", "arguments": "{\"p"}}]}}]})));
+      bridge.feed(&chunk(json!({"choices": [{"delta": {"tool_calls": [
+            {"index": 0_u64, "function": {"arguments": "ath\":1}"}}]}}]})));
+      let done = bridge.feed(&chunk(
          json!({"choices": [{"finish_reason": "tool_calls"}]}),
       ));
       let item = item(&done[1]);
@@ -679,9 +704,12 @@ mod tests {
    /// content and then ended it a second time, which codex rejects.
    #[test]
    fn the_response_closes_once_and_after_its_content() {
-      let mut b = ChatToResponses::default();
+      let mut bridge = ChatToResponses::default();
       assert_eq!(
-         feed(&mut b, json!({"choices": [{"delta": {"content": "hi"}}]})),
+         feed(
+            &mut bridge,
+            json!({"choices": [{"delta": {"content": "hi"}}]})
+         ),
          [
             "response.created",
             "response.output_item.added",
@@ -691,14 +719,14 @@ mod tests {
       );
       assert_eq!(
          feed(
-            &mut b,
-            json!({"choices": [{"delta": {}}], "usage": {"prompt_tokens": 1}})
+            &mut bridge,
+            json!({"choices": [{"delta": {}}], "usage": {"prompt_tokens": 1_i64}})
          ),
          Vec::<String>::new()
       );
       assert_eq!(
          feed(
-            &mut b,
+            &mut bridge,
             json!({"choices": [{"delta": {}, "finish_reason": "stop"}]})
          ),
          [
@@ -709,8 +737,8 @@ mod tests {
       );
       assert_eq!(
          feed(
-            &mut b,
-            json!({"choices": [{"delta": {}}], "usage": {"prompt_tokens": 1}})
+            &mut bridge,
+            json!({"choices": [{"delta": {}}], "usage": {"prompt_tokens": 1_i64}})
          ),
          Vec::<String>::new()
       );
@@ -718,13 +746,13 @@ mod tests {
 
    #[test]
    fn an_error_chunk_fails_the_response_and_closes_it() {
-      let mut b = ChatToResponses::default();
-      let events = b.feed(&chunk(json!({"error": {
+      let mut bridge = ChatToResponses::default();
+      let events = bridge.feed(&chunk(json!({"error": {
           "message": "high demand", "type": "server_error", "code": "UNAVAILABLE"
       }})));
       assert_eq!(kinds(&events), ["response.failed"]);
       let response = match &events[0] {
-         ResponsesEvent::Failed { response } => response,
+         &ResponsesEvent::Failed { ref response } => response,
          other => panic!("expected a failed event: {other:?}"),
       };
       let error = response.error.as_ref().unwrap();
@@ -732,7 +760,7 @@ mod tests {
       assert_eq!(error.code.as_deref(), Some("UNAVAILABLE"));
       assert!(
          feed(
-            &mut b,
+            &mut bridge,
             json!({"choices": [{"delta": {}, "finish_reason": "stop"}]})
          )
          .is_empty()
@@ -754,10 +782,10 @@ mod tests {
    /// for xhigh, so an unmapped value would 400 the turn rather than degrade.
    #[test]
    fn an_unsupported_effort_clamps_instead_of_failing() {
-      let with = |e: &str| {
+      let with = |effort: &str| {
          to_chat(&request(json!({
              "model": "gemini-3.8-flash", "instructions": "s", "stream": true,
-             "input": [], "reasoning": {"effort": e},
+             "input": [], "reasoning": {"effort": effort},
          })))
          .reasoning_effort
          .unwrap()
@@ -782,12 +810,12 @@ mod tests {
       let schema = &body["tools"][0]["function"]["parameters"];
       assert_eq!(schema["properties"]["input"]["type"], "string");
 
-      let mut b = ChatToResponses::with_custom(names);
-      b.feed(&chunk(
-         json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "c1",
+      let mut bridge = ChatToResponses::with_custom(names);
+      bridge.feed(&chunk(
+         json!({"choices": [{"delta": {"tool_calls": [{"index": 0_u64, "id": "c1",
             "function": {"name": "exec", "arguments": "{\"input\":\"ls -la\"}"}}]}}]}),
       ));
-      let done = b.feed(&chunk(
+      let done = bridge.feed(&chunk(
          json!({"choices": [{"finish_reason": "tool_calls"}]}),
       ));
       let item = item(&done[1]);
@@ -835,7 +863,7 @@ mod tests {
           "input": [],
       })));
       assert_eq!(out.stream, Some(true));
-      assert!(out.stream_options.is_some_and(|o| o.include_usage));
+      assert!(out.stream_options.is_some_and(|opts| opts.include_usage));
    }
 
    #[test]
@@ -883,7 +911,7 @@ mod tests {
       assert!(
          content
             .iter()
-            .any(|p| p.get("text").is_some_and(|t| t == "hi"))
+            .any(|part| part.get("text").is_some_and(|text| text == "hi"))
       );
    }
 
@@ -911,10 +939,13 @@ mod full_chain {
       let mut kinds = Vec::new();
       let mut text = String::new();
       // The network delivers arbitrary chunks, not whole frames.
-      let frames: Vec<Vec<u8>> = raw.chunks(64).flat_map(|c| native.feed(c)).collect();
+      let frames: Vec<Vec<u8>> = raw
+         .chunks(64)
+         .flat_map(|chunk| native.feed(chunk))
+         .collect();
       for frame in frames {
          let line = String::from_utf8_lossy(&frame);
-         for data in line.lines().filter_map(|l| l.strip_prefix("data:")) {
+         for data in line.lines().filter_map(|line| line.strip_prefix("data:")) {
             let data = data.trim();
             if data == "[DONE]" {
                continue;
@@ -922,11 +953,11 @@ mod full_chain {
             let Ok(chunk) = serde_json::from_str::<ChatChunk>(data) else {
                continue;
             };
-            for ev in bridge.feed(&chunk) {
-               if let ResponsesEvent::OutputTextDelta { delta, .. } = &ev {
+            for event in bridge.feed(&chunk) {
+               if let &ResponsesEvent::OutputTextDelta { ref delta, .. } = &event {
                   text.push_str(delta);
                }
-               kinds.push(serde_json::to_value(&ev).unwrap()["type"].to_string());
+               kinds.push(serde_json::to_value(&event).unwrap()["type"].to_string());
             }
          }
       }
@@ -944,8 +975,8 @@ mod real_chunk {
       let events = ChatToResponses::default().feed(&chunk);
       let kinds: Vec<_> = events
          .iter()
-         .map(|e| {
-            serde_json::to_value(e).unwrap()["type"]
+         .map(|event| {
+            serde_json::to_value(event).unwrap()["type"]
                .as_str()
                .unwrap()
                .to_owned()
@@ -963,7 +994,7 @@ mod real_chunk {
       assert!(
          events
             .iter()
-            .any(|e| matches!(e, ResponsesEvent::OutputTextDelta { .. })),
+            .any(|event| matches!(event, ResponsesEvent::OutputTextDelta { .. })),
          "no text delta survived: {events:?}"
       );
    }
@@ -975,22 +1006,25 @@ mod aggregate_path {
 
    #[test]
    fn a_finished_turn_restates_its_text_as_an_item() {
-      let mut b = ChatToResponses::default();
-      let chunk = |v| serde_json::from_value::<ChatChunk>(v).unwrap();
-      b.feed(&chunk(
+      let mut bridge = ChatToResponses::default();
+      let chunk = |value| serde_json::from_value::<ChatChunk>(value).unwrap();
+      bridge.feed(&chunk(
          serde_json::json!({"choices": [{"delta": {"content": "ok"}}]}),
       ));
-      let done = b.feed(&chunk(
+      let done = bridge.feed(&chunk(
          serde_json::json!({"choices": [{"finish_reason": "stop"}]}),
       ));
-      let text = done.iter().find_map(|e| match e {
+      let text = done.iter().find_map(|event| match *event {
          ResponsesEvent::OutputItemDone {
-            item: OutputItem::Message { content, .. },
+            item: OutputItem::Message { ref content, .. },
             ..
-         } => content.as_ref().and_then(|c| c.first()).map(|p| match p {
-            OutputContentPart::OutputText { text } => text.clone(),
-            OutputContentPart::Other => String::new(),
-         }),
+         } => content
+            .as_ref()
+            .and_then(|items| items.first())
+            .map(|part| match *part {
+               OutputContentPart::OutputText { ref text } => text.clone(),
+               OutputContentPart::Other => String::new(),
+            }),
          ResponsesEvent::OutputItemDone { .. }
          | ResponsesEvent::Created { .. }
          | ResponsesEvent::InProgress

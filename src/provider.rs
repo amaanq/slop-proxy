@@ -1,3 +1,5 @@
+use std::fmt;
+
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, pound::ValueEnum)]
@@ -10,8 +12,8 @@ pub enum Provider {
 }
 
 impl Provider {
-   pub fn from_str(s: &str) -> Option<Self> {
-      match s.trim() {
+   pub fn from_str(text: &str) -> Option<Self> {
+      match text.trim() {
          "openai" => Some(Self::OpenAi),
          "anthropic" => Some(Self::Anthropic),
          "gemini" => Some(Self::Gemini),
@@ -55,9 +57,9 @@ impl AuthMode {
    }
 }
 
-impl std::fmt::Display for AuthMode {
-   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-      f.write_str(self.as_str())
+impl fmt::Display for AuthMode {
+   fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+      formatter.write_str(self.as_str())
    }
 }
 
@@ -79,9 +81,9 @@ impl ToSql for AuthMode {
    }
 }
 
-impl std::fmt::Display for Provider {
-   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-      f.write_str(self.as_str())
+impl fmt::Display for Provider {
+   fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+      formatter.write_str(self.as_str())
    }
 }
 

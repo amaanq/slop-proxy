@@ -1,4 +1,6 @@
 use std::collections::BTreeMap;
+use std::env;
+use std::fs;
 use std::path::PathBuf;
 
 use eyre::{Result, WrapErr as _};
@@ -96,8 +98,8 @@ impl Default for ZenConfig {
 impl ZenConfig {
    pub fn proxy_urls(&self) -> Result<Vec<String>> {
       let mut urls = self.proxy_urls.clone();
-      if let Some(path) = &self.proxy_urls_file {
-         let contents = std::fs::read_to_string(path)
+      if let Some(path) = self.proxy_urls_file.as_ref() {
+         let contents = fs::read_to_string(path)
             .wrap_err_with(|| format!("reading zen proxy list {}", path.display()))?;
          urls.extend(
             contents
@@ -168,10 +170,10 @@ impl Default for CodexConfig {
 
 impl CodexConfig {
    pub fn instructions(&self) -> String {
-      if let Some(path) = &self.instructions_file
-         && let Ok(s) = std::fs::read_to_string(path)
+      if let Some(path) = self.instructions_file.as_ref()
+         && let Ok(text) = fs::read_to_string(path)
       {
-         return s;
+         return text;
       }
       self
          .instructions
@@ -226,7 +228,7 @@ impl ModelsConfig {
       for (provider, patterns) in self.sets() {
          let Some(score) = patterns
             .iter()
-            .filter_map(|p| pattern_specificity(p, model))
+            .filter_map(|pattern| pattern_specificity(pattern, model))
             .max()
          else {
             continue;
@@ -254,13 +256,17 @@ impl ModelsConfig {
          .sets()
          .into_iter()
          .flat_map(|(_, patterns)| patterns)
-         .filter_map(|p| p.strip_suffix('*'))
+         .filter_map(|pattern| pattern.strip_suffix('*'))
          .filter(|prefix| !model.starts_with(*prefix))
          .find_map(|prefix| {
             let kept = (1..prefix.len())
                .rev()
-               .filter(|n| prefix.is_char_boundary(*n))
-               .find(|n| prefix.get(*n..).is_some_and(|s| model.starts_with(s)))?;
+               .filter(|pos| prefix.is_char_boundary(*pos))
+               .find(|pos| {
+                  prefix
+                     .get(*pos..)
+                     .is_some_and(|text| model.starts_with(text))
+               })?;
             Some(format!("{}{model}", prefix.get(..kept).unwrap_or("")))
          })
    }
@@ -303,11 +309,11 @@ impl Config {
       let config_path = args
          .config
          .clone()
-         .or_else(|| std::env::var("SLOP_CONFIG").ok().map(PathBuf::from))
+         .or_else(|| env::var("SLOP_CONFIG").ok().map(PathBuf::from))
          .unwrap_or_else(|| xdg_dir("XDG_CONFIG_HOME", ".config").join("slop-proxy/config.toml"));
 
       let file = if config_path.exists() {
-         let raw = std::fs::read_to_string(&config_path)
+         let raw = fs::read_to_string(&config_path)
             .wrap_err_with(|| format!("reading {}", config_path.display()))?;
          toml::from_str::<FileConfig>(&raw)
             .wrap_err_with(|| format!("parsing {}", config_path.display()))?
@@ -318,11 +324,11 @@ impl Config {
       let db_path = args
          .db
          .clone()
-         .or_else(|| std::env::var("SLOP_DB").ok().map(PathBuf::from))
+         .or_else(|| env::var("SLOP_DB").ok().map(PathBuf::from))
          .or(file.db)
          .unwrap_or_else(|| xdg_dir("XDG_DATA_HOME", ".local/share").join("slop-proxy/slop.db"));
 
-      let bind = std::env::var("SLOP_BIND")
+      let bind = env::var("SLOP_BIND")
          .ok()
          .or(file.bind)
          .unwrap_or_else(|| "[::1]:8484".into());
@@ -343,12 +349,12 @@ impl Config {
 }
 
 fn xdg_dir(var: &str, fallback: &str) -> PathBuf {
-   std::env::var(var)
+   env::var(var)
       .ok()
-      .filter(|v| !v.is_empty())
+      .filter(|value| !value.is_empty())
       .map_or_else(
          || {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+            let home = env::var("HOME").unwrap_or_else(|_| ".".into());
             PathBuf::from(home).join(fallback)
          },
          PathBuf::from,
@@ -358,6 +364,7 @@ fn xdg_dir(var: &str, fallback: &str) -> PathBuf {
 #[cfg(test)]
 mod route_tests {
    use super::*;
+   use crate::translate::model_map;
 
    fn cfg() -> ModelsConfig {
       ModelsConfig {
@@ -381,13 +388,13 @@ mod route_tests {
 
    #[test]
    fn the_longer_prefix_wins_over_a_broader_one() {
-      let c = ModelsConfig {
+      let cfg = ModelsConfig {
          anthropic_patterns: vec!["gemini-*".into()],
          gemini_patterns: vec!["gemini-3-*".into()],
          ..cfg()
       };
-      assert_eq!(c.route("gemini-3-pro"), Provider::Gemini);
-      assert_eq!(c.route("gemini-2-flash"), Provider::Anthropic);
+      assert_eq!(cfg.route("gemini-3-pro"), Provider::Gemini);
+      assert_eq!(cfg.route("gemini-2-flash"), Provider::Anthropic);
    }
 
    fn with_zen(zen: &[&str]) -> ModelsConfig {
@@ -401,13 +408,16 @@ mod route_tests {
    /// `route()` attached to the model and must not decide the backend.
    #[test]
    fn an_effort_suffix_does_not_change_the_backend() {
-      let c = with_zen(&["muse-spark-1.3-contributor-free"]);
-      let resolve = |m: &str| crate::translate::model_map::resolve(&c, m).model;
+      let cfg = with_zen(&["muse-spark-1.3-contributor-free"]);
+      let resolve = |model: &str| model_map::resolve(&cfg, model).model;
       assert_eq!(
-         c.route(&resolve("muse-spark-1.3-contributor-free:high")),
+         cfg.route(&resolve("muse-spark-1.3-contributor-free:high")),
          Provider::Zen
       );
-      assert_eq!(c.route(&resolve("gemini-3.8-flash:low")), Provider::Gemini);
+      assert_eq!(
+         cfg.route(&resolve("gemini-3.8-flash:low")),
+         Provider::Gemini
+      );
    }
 
    /// Zen resells the other vendors under their own names, so a bare
@@ -415,9 +425,9 @@ mod route_tests {
    /// seats. The longer prefix has to win for that split to be expressible.
    #[test]
    fn a_zen_pattern_only_takes_what_it_is_more_specific_about() {
-      let c = with_zen(&["claude-haiku-*"]);
-      assert_eq!(c.route("claude-haiku-4-5"), Provider::Zen);
-      assert_eq!(c.route("claude-opus-5"), Provider::Anthropic);
+      let cfg = with_zen(&["claude-haiku-*"]);
+      assert_eq!(cfg.route("claude-haiku-4-5"), Provider::Zen);
+      assert_eq!(cfg.route("claude-opus-5"), Provider::Anthropic);
       assert_eq!(
          with_zen(&["claude-*"]).route("claude-opus-5"),
          Provider::Anthropic
@@ -431,8 +441,8 @@ mod zen_tests {
 
    #[test]
    fn proxy_urls_merge_inline_and_file_entries() {
-      let path = std::env::temp_dir().join(format!("slop-proxies-{}", uuid::Uuid::new_v4()));
-      std::fs::write(
+      let path = env::temp_dir().join(format!("slop-proxies-{}", uuid::Uuid::new_v4()));
+      fs::write(
          &path,
          " http://file-one.example:80\n\n# ignored\nhttp://file-two.example:80\n",
       )
@@ -451,7 +461,7 @@ mod zen_tests {
             "http://file-two.example:80",
          ]
       );
-      std::fs::remove_file(path).unwrap();
+      fs::remove_file(path).unwrap();
    }
 }
 

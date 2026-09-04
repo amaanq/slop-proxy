@@ -15,29 +15,29 @@ pub fn to_responses(req: &ChatRequest, cfg: &Config) -> Result<ResponsesRequest,
       convert_message(msg, &mut out.input)?;
    }
 
-   if let Some(tools) = &req.tools {
-      for t in tools {
-         let f = t.def();
-         let Some(name) = &f.name else {
+   if let Some(tools) = req.tools.as_ref() {
+      for tool in tools {
+         let def = tool.def();
+         let Some(name) = def.name.as_ref() else {
             continue;
          };
          out.tools.push(ToolDef {
             kind: "function".into(),
             name: name.clone(),
-            description: f.description.clone(),
+            description: def.description.clone(),
             strict: false,
-            parameters: Some(f.parameters.clone().unwrap_or_else(empty_schema)),
+            parameters: Some(def.parameters.clone().unwrap_or_else(empty_schema)),
          });
       }
    }
 
-   if let Some(tc) = &req.tool_choice {
-      out.tool_choice = Some(match tc {
-         ChatToolChoice::Mode(s) => ToolChoice::Mode(s.clone()),
-         ChatToolChoice::Named { function, .. } => ToolChoice::function(
+   if let Some(tool_choice) = req.tool_choice.as_ref() {
+      out.tool_choice = Some(match *tool_choice {
+         ChatToolChoice::Mode(ref mode) => ToolChoice::Mode(mode.clone()),
+         ChatToolChoice::Named { ref function, .. } => ToolChoice::function(
             function
                .as_ref()
-               .and_then(|f| f.name.clone())
+               .and_then(|named| named.name.clone())
                .unwrap_or_default(),
          ),
       });
@@ -89,7 +89,7 @@ fn convert_message(msg: &ChatMessage, out: &mut Vec<InputItem>) -> Result<(), Tr
                content: vec![ContentPart::OutputText { text }],
             });
          }
-         if let Some(calls) = &msg.tool_calls {
+         if let Some(calls) = msg.tool_calls.as_ref() {
             for call in calls {
                out.push(InputItem::FunctionCall {
                   call_id: call.id.clone().unwrap_or_default(),
@@ -119,12 +119,12 @@ fn convert_message(msg: &ChatMessage, out: &mut Vec<InputItem>) -> Result<(), Tr
 
 fn user_parts(content: Option<&ChatContent>) -> Vec<ContentPart> {
    match content {
-      Some(ChatContent::Text(s)) => vec![ContentPart::InputText { text: s.clone() }],
-      Some(ChatContent::Parts(parts)) => parts
+      Some(&ChatContent::Text(ref text)) => vec![ContentPart::InputText { text: text.clone() }],
+      Some(&ChatContent::Parts(ref parts)) => parts
          .iter()
-         .filter_map(|p| match p {
-            ChatPart::Text { text } => Some(ContentPart::InputText { text: text.clone() }),
-            ChatPart::ImageUrl { image_url } => Some(ContentPart::InputImage {
+         .filter_map(|part| match *part {
+            ChatPart::Text { ref text } => Some(ContentPart::InputText { text: text.clone() }),
+            ChatPart::ImageUrl { ref image_url } => Some(ContentPart::InputImage {
                image_url: image_url.url().to_owned(),
             }),
             ChatPart::InputAudio { .. } | ChatPart::Other => {

@@ -28,7 +28,7 @@ pub fn resolve(cfg: &ModelsConfig, requested: &str) -> ResolvedModel {
       let Some(specificity) = pattern_specificity(pattern, name) else {
          continue;
       };
-      if best.is_none_or(|(s, _)| specificity > s) {
+      if best.is_none_or(|(spec, _)| specificity > spec) {
          best = Some((specificity, alias));
       }
    }
@@ -57,12 +57,13 @@ pub fn clamp_effort(model: &str, effort: &str) -> String {
 #[cfg(test)]
 mod tests {
    use super::*;
+   use crate::config::ModelAlias;
 
    #[test]
    fn passthrough_and_suffix() {
       let cfg = ModelsConfig::default();
-      let r = resolve(&cfg, "gpt-5.6-terra");
-      assert_eq!(r.model, "gpt-5.6-terra");
+      let res = resolve(&cfg, "gpt-5.6-terra");
+      assert_eq!(res.model, "gpt-5.6-terra");
 
       let r_suffix = resolve(&cfg, "gpt-5.6-sol:high");
       assert_eq!(r_suffix.model, "gpt-5.6-sol");
@@ -74,14 +75,14 @@ mod tests {
       let mut cfg = ModelsConfig::default();
       cfg.aliases.insert(
          "claude-opus-*".into(),
-         crate::config::ModelAlias {
+         ModelAlias {
             model: "gpt-5.6-sol".into(),
             effort: Some("high".into()),
          },
       );
-      let r = resolve(&cfg, "claude-opus-4");
-      assert_eq!(r.model, "gpt-5.6-sol");
-      assert_eq!(r.effort.as_deref(), Some("high"));
+      let res = resolve(&cfg, "claude-opus-4");
+      assert_eq!(res.model, "gpt-5.6-sol");
+      assert_eq!(res.effort.as_deref(), Some("high"));
    }
 
    #[test]

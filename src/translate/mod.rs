@@ -8,9 +8,11 @@ pub mod openai_req;
 pub mod openai_stream;
 
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use data_encoding::BASE64URL_NOPAD;
 use futures_util::StreamExt as _;
+use serde::de::Error;
 use serde::{Deserialize, Serialize};
 use serde_json::value::{RawValue, to_raw_value};
 
@@ -24,7 +26,7 @@ where
    D: serde::Deserializer<'de>,
 {
    Option::<serde_json::Value>::deserialize(deserializer)?
-      .map(|value| to_raw_value(&value).map_err(serde::de::Error::custom))
+      .map(|value| to_raw_value(&value).map_err(Error::custom))
       .transpose()
 }
 
@@ -39,7 +41,8 @@ pub enum TranslateError {
 #[derive(Serialize, Deserialize)]
 struct SignaturePayload {
    id: Option<String>,
-   ec: Option<String>,
+   #[serde(rename = "ec")]
+   encrypted_content: Option<String>,
 }
 
 /// Anthropic thinking-block signatures are opaque round-tripped strings, so we
@@ -47,7 +50,7 @@ struct SignaturePayload {
 pub fn encode_signature(id: Option<&str>, encrypted_content: &str) -> String {
    let payload = SignaturePayload {
       id: id.map(String::from),
-      ec: Some(encrypted_content.to_owned()),
+      encrypted_content: Some(encrypted_content.to_owned()),
    };
    let payload = serde_json::to_string(&payload).unwrap_or_default();
    BASE64URL_NOPAD.encode(payload.as_bytes())
@@ -55,10 +58,10 @@ pub fn encode_signature(id: Option<&str>, encrypted_content: &str) -> String {
 
 pub fn decode_signature(sig: &str) -> (Option<String>, Option<String>) {
    if let Ok(bytes) = BASE64URL_NOPAD.decode(sig.as_bytes())
-      && let Ok(p) = serde_json::from_slice::<SignaturePayload>(&bytes)
-      && p.ec.is_some()
+      && let Ok(payload) = serde_json::from_slice::<SignaturePayload>(&bytes)
+      && payload.encrypted_content.is_some()
    {
-      return (p.id, p.ec);
+      return (payload.id, payload.encrypted_content);
    }
    (None, Some(sig.to_owned()))
 }
@@ -76,7 +79,7 @@ pub struct CapturedUsage {
    pub upstream_eof: bool,
    pub last_event: Option<String>,
    /// Separates a slow account from a long answer, which one duration cannot.
-   pub first_byte_at: Option<std::time::Instant>,
+   pub first_byte_at: Option<Instant>,
    pub response_bytes: i64,
    pub stop_reason: Option<String>,
    /// Names only. An argument is the caller's shell command or source.
@@ -99,24 +102,24 @@ impl UsageCapture {
    }
 
    pub fn record_partial(&self, usage: &Usage) {
-      let mut c = self.0.lock().unwrap();
+      let mut captured = self.0.lock().unwrap();
       let cached = usage.input_tokens_details.cached_tokens;
-      c.input_tokens = (usage.input_tokens - cached).max(0);
-      c.output_tokens = usage.output_tokens;
-      c.cache_read_tokens = cached;
-      c.reasoning_tokens = usage.output_tokens_details.reasoning_tokens;
+      captured.input_tokens = (usage.input_tokens - cached).max(0);
+      captured.output_tokens = usage.output_tokens;
+      captured.cache_read_tokens = cached;
+      captured.reasoning_tokens = usage.output_tokens_details.reasoning_tokens;
    }
 
    pub fn note_event(&self, name: &str) {
-      let mut c = self.0.lock().unwrap();
-      c.last_event = Some(name.to_owned());
-      c.first_byte_at.get_or_insert_with(std::time::Instant::now);
+      let mut captured = self.0.lock().unwrap();
+      captured.last_event = Some(name.to_owned());
+      captured.first_byte_at.get_or_insert_with(Instant::now);
    }
 
-   pub fn note_bytes(&self, n: usize) {
-      let mut c = self.0.lock().unwrap();
-      c.response_bytes += n as i64;
-      c.first_byte_at.get_or_insert_with(std::time::Instant::now);
+   pub fn note_bytes(&self, len: usize) {
+      let mut captured = self.0.lock().unwrap();
+      captured.response_bytes += len as i64;
+      captured.first_byte_at.get_or_insert_with(Instant::now);
    }
 
    pub fn note_stop_reason(&self, reason: &str) {
@@ -124,22 +127,22 @@ impl UsageCapture {
    }
 
    pub fn note_cutoff(&self, status: &str) {
-      let mut c = self.0.lock().unwrap();
-      c.error_kind = Some("upstream_cutoff".into());
-      c.stop_reason = Some(status.to_ascii_lowercase());
+      let mut captured = self.0.lock().unwrap();
+      captured.error_kind = Some("upstream_cutoff".into());
+      captured.stop_reason = Some(status.to_ascii_lowercase());
    }
 
    pub fn note_tool_call(&self, name: &str) {
-      let mut c = self.0.lock().unwrap();
-      if !c.tools_called.iter().any(|t| t == name) {
-         c.tools_called.push(name.to_owned());
+      let mut captured = self.0.lock().unwrap();
+      if !captured.tools_called.iter().any(|tool| tool == name) {
+         captured.tools_called.push(name.to_owned());
       }
    }
 
    pub fn note_upstream_head(&self, bytes: &[u8]) {
-      let mut c = self.0.lock().unwrap();
-      if c.upstream_head.is_none() {
-         c.upstream_head = Some(String::from_utf8_lossy(bytes).chars().take(400).collect());
+      let mut captured = self.0.lock().unwrap();
+      if captured.upstream_head.is_none() {
+         captured.upstream_head = Some(String::from_utf8_lossy(bytes).chars().take(400).collect());
       }
    }
 
@@ -148,9 +151,9 @@ impl UsageCapture {
    }
 
    pub fn fail(&self, kind: &str) {
-      let mut c = self.0.lock().unwrap();
-      if c.error_kind.is_none() {
-         c.error_kind = Some(kind.to_owned());
+      let mut captured = self.0.lock().unwrap();
+      if captured.error_kind.is_none() {
+         captured.error_kind = Some(kind.to_owned());
       }
    }
 
@@ -262,12 +265,12 @@ impl Walker {
       }
    }
 
-   pub fn step(&mut self, ev: ResponsesEvent) -> Vec<Step> {
+   pub fn step(&mut self, event: ResponsesEvent) -> Vec<Step> {
       let mut out = Vec::new();
       if self.done {
          return out;
       }
-      match ev {
+      match event {
          ResponsesEvent::Created { response } => out.push(Step::Start { id: response.id }),
          ResponsesEvent::OutputItemAdded { item, .. } => match item {
             OutputItem::Reasoning { .. } => self.open(&mut out, Open::Thinking),
@@ -310,14 +313,14 @@ impl Walker {
                let text = summary
                   .unwrap_or_default()
                   .iter()
-                  .map(|SummaryPart::SummaryText { text }| text.as_str())
+                  .map(|&SummaryPart::SummaryText { ref text }| text.as_str())
                   .collect::<Vec<_>>()
                   .join("\n\n");
                if !self.text_seen && !text.is_empty() {
                   out.push(Step::Thinking(text));
                }
-               if let Some(ec) = encrypted_content {
-                  out.push(Step::Signature(encode_signature(id.as_deref(), &ec)));
+               if let Some(content) = encrypted_content {
+                  out.push(Step::Signature(encode_signature(id.as_deref(), &content)));
                }
                self.close(&mut out);
             },
@@ -325,8 +328,8 @@ impl Walker {
                let text = content
                   .unwrap_or_default()
                   .iter()
-                  .filter_map(|p| match p {
-                     OutputContentPart::OutputText { text } => Some(text.as_str()),
+                  .filter_map(|part| match *part {
+                     OutputContentPart::OutputText { ref text } => Some(text.as_str()),
                      OutputContentPart::Other => None,
                   })
                   .collect::<String>();
@@ -347,7 +350,7 @@ impl Walker {
                   out.push(Step::OpenCall { id: call_id, name });
                }
                if !self.args_seen
-                  && let Some(args) = arguments.filter(|a| !a.is_empty())
+                  && let Some(args) = arguments.filter(|arg| !arg.is_empty())
                {
                   out.push(Step::Args(args));
                }
@@ -369,7 +372,7 @@ impl Walker {
          ResponsesEvent::Failed { response } => {
             let (message, code) = response
                .error
-               .map(|e| (e.message, e.code))
+               .map(|err| (err.message, err.code))
                .unwrap_or_default();
             let message = message.unwrap_or_else(|| "upstream response failed".into());
             self.capture.fail("upstream_failed");
@@ -450,8 +453,8 @@ pub async fn aggregate(mut stream: EventStream, capture: &UsageCapture) -> Aggre
    };
    let mut walker = Walker::new(capture.clone());
    let mut steps = Vec::new();
-   while let Some(ev) = stream.next().await {
-      steps.extend(walker.step(ev));
+   while let Some(event) = stream.next().await {
+      steps.extend(walker.step(event));
    }
    steps.extend(walker.eof());
    for step in steps {
@@ -476,16 +479,29 @@ impl Aggregated {
             name,
             arguments: String::new(),
          }),
-         (Step::Thinking(s), Some(Block::Thinking { text, .. }))
-         | (Step::Text(s), Some(Block::Text { text }))
+         (Step::Thinking(chunk), Some(&mut Block::Thinking { ref mut text, .. }))
+         | (Step::Text(chunk), Some(&mut Block::Text { ref mut text }))
          | (
-            Step::Args(s),
-            Some(Block::ToolCall {
-               arguments: text, ..
+            Step::Args(chunk),
+            Some(&mut Block::ToolCall {
+               arguments: ref mut text,
+               ..
             }),
-         ) => text.push_str(&s),
-         (Step::Signature(s), Some(Block::Thinking { signature, .. })) => *signature = Some(s),
-         (Step::CloseBlock, Some(Block::ToolCall { arguments, .. })) if arguments.is_empty() => {
+         ) => text.push_str(&chunk),
+         (
+            Step::Signature(sig),
+            Some(&mut Block::Thinking {
+               ref mut signature, ..
+            }),
+         ) => {
+            *signature = Some(sig);
+         },
+         (
+            Step::CloseBlock,
+            Some(&mut Block::ToolCall {
+               ref mut arguments, ..
+            }),
+         ) if arguments.is_empty() => {
             arguments.push_str("{}");
          },
          (Step::Stop { kind, usage }, _) => {

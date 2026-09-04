@@ -3,6 +3,7 @@ use axum::body::Bytes;
 use super::{AuthPolicy, Backend, Cooldown, Pool, Route, Slot};
 use crate::glm::client::GlmClient;
 use crate::provider::Provider;
+use crate::translate::chat::ChatError;
 use crate::upstream::SendError;
 
 /// Session-sticky pool over Z.ai keys.
@@ -25,7 +26,7 @@ impl Backend for GlmClient {
    type Response = reqwest::Response;
 
    fn reason(body: String) -> String {
-      crate::translate::chat::ChatError::reason(body)
+      ChatError::reason(body)
    }
 
    async fn send(

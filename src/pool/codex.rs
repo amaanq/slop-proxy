@@ -1,10 +1,14 @@
+use std::collections::BTreeMap;
+
 use axum::body::Bytes;
+use reqwest::header::HeaderMap;
 
 use super::{
    AccountUsage, AuthPolicy, Backend, Cooldown, Pool, PoolError, Route, Slot, UsageWindow,
 };
 use crate::codex::client::CodexClient;
 use crate::codex::models::ModelInfo;
+use crate::codex::types::ErrorEnvelope;
 use crate::provider::Provider;
 use crate::upstream::SendError;
 
@@ -23,7 +27,7 @@ impl Backend for CodexClient {
    type Response = reqwest::Response;
 
    fn reason(body: String) -> String {
-      crate::codex::types::ErrorEnvelope::reason(body)
+      ErrorEnvelope::reason(body)
    }
 
    fn soft_limit(&self) -> f64 {
@@ -67,17 +71,18 @@ impl Pool<CodexClient> {
    /// Averaged across accounts, so a client's figures do not jump when
    /// routing moves it.
    pub async fn pool_windows(&self) -> Vec<UsageWindow> {
-      let mut by_name: std::collections::BTreeMap<String, (f64, usize, Option<i64>)> =
-         std::collections::BTreeMap::default();
+      let mut by_name: BTreeMap<String, (f64, usize, Option<i64>)> = BTreeMap::default();
       for account in self.slots.snapshot().await {
          let Some(usage) = account.usage else { continue };
-         for w in usage.windows {
-            let slot = by_name.entry(w.name.clone()).or_insert((0.0, 0, None));
-            slot.0 += w.utilization;
+         for window in usage.windows {
+            let slot = by_name
+               .entry(window.name.clone())
+               .or_insert((0.0_f64, 0_usize, None));
+            slot.0 += window.utilization;
             slot.1 += 1;
-            slot.2 = match (slot.2, w.resets_at) {
-               (Some(a), Some(b)) => Some(a.min(b)),
-               (a, b) => a.or(b),
+            slot.2 = match (slot.2, window.resets_at) {
+               (Some(left), Some(right)) => Some(left.min(right)),
+               (left, right) => left.or(right),
             };
          }
       }
@@ -104,11 +109,11 @@ impl Pool<CodexClient> {
                let windows = usage
                   .rate_limit
                   .windows()
-                  .filter(|w| w.limit_window_seconds > 0)
-                  .map(|w| UsageWindow {
-                     name: window_name(w.limit_window_seconds / 60),
-                     utilization: w.used_percent / 100.0,
-                     resets_at: w.reset_at,
+                  .filter(|window| window.limit_window_seconds > 0)
+                  .map(|window| UsageWindow {
+                     name: window_name(window.limit_window_seconds / 60),
+                     utilization: window.used_percent / 100.0,
+                     resets_at: window.reset_at,
                   })
                   .collect::<Vec<_>>();
                if windows.is_empty() {
@@ -127,7 +132,7 @@ impl Pool<CodexClient> {
                   )
                   .await;
             },
-            Err(e) => tracing::debug!("usage for {}: {e}", slot.display),
+            Err(err) => tracing::debug!("usage for {}: {err}", slot.display),
          }
       }
    }
@@ -183,7 +188,7 @@ impl Pool<CodexClient> {
 /// The codex backend reports quota on every successful response rather than
 /// from a queryable endpoint, so consumption is only known once an account
 /// has served traffic.
-fn usage_from_headers(headers: &reqwest::header::HeaderMap) -> Option<AccountUsage> {
+fn usage_from_headers(headers: &HeaderMap) -> Option<AccountUsage> {
    let get = |name: &str| headers.get(name)?.to_str().ok()?.parse::<i64>().ok();
    let mut windows = Vec::new();
    for tier in ["primary", "secondary"] {
@@ -224,9 +229,11 @@ fn session_uuid(session_key: &str) -> String {
 }
 
 fn window_name(minutes: i64) -> String {
-   match minutes {
-      m if m % 1440 == 0 => format!("{}d", m / 1440),
-      m if m % 60 == 0 => format!("{}h", m / 60),
-      m => format!("{m}m"),
+   if minutes % 1440 == 0 {
+      format!("{}d", minutes / 1440)
+   } else if minutes % 60 == 0 {
+      format!("{}h", minutes / 60)
+   } else {
+      format!("{minutes}m")
    }
 }

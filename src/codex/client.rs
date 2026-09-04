@@ -1,4 +1,7 @@
+use std::time::Duration;
+
 use axum::body::Bytes;
+use reqwest::header;
 use serde::{Deserialize, Serialize};
 
 use crate::config::CodexConfig;
@@ -63,8 +66,8 @@ impl CodexClient {
    pub fn new(cfg: CodexConfig) -> Self {
       let http = reqwest::Client::builder()
          .cookie_store(true)
-         .connect_timeout(std::time::Duration::from_secs(30))
-         .tcp_keepalive(std::time::Duration::from_secs(30))
+         .connect_timeout(Duration::from_secs(30))
+         .tcp_keepalive(Duration::from_secs(30))
          .user_agent(cfg.user_agent.clone())
          .build()
          .expect("building http client");
@@ -125,12 +128,12 @@ impl CodexClient {
          .header("version", self.cfg.version.clone())
          .send()
          .await
-         .map_err(|e| SendError::Network(e.to_string()))?;
+         .map_err(|err| SendError::Network(err.to_string()))?;
       let resp = classify(resp, Classify::STRICT).await?;
       let status = resp.status().as_u16();
-      resp.json().await.map_err(|e| SendError::Upstream {
+      resp.json().await.map_err(|err| SendError::Upstream {
          status,
-         body: format!("parsing usage response: {e}"),
+         body: format!("parsing usage response: {err}"),
       })
    }
 
@@ -161,7 +164,7 @@ impl CodexClient {
          .header("version", self.cfg.version.clone())
          .send()
          .await
-         .map_err(|e| SendError::Network(e.to_string()))
+         .map_err(|err| SendError::Network(err.to_string()))
    }
 
    pub async fn models_raw(
@@ -174,9 +177,9 @@ impl CodexClient {
          .await?;
       let status = resp.status();
       let status_u16 = status.as_u16();
-      let body = resp.text().await.map_err(|e| SendError::Upstream {
+      let body = resp.text().await.map_err(|err| SendError::Upstream {
          status: status_u16,
-         body: format!("reading models response: {e}"),
+         body: format!("reading models response: {err}"),
       })?;
       Ok((status, body))
    }
@@ -192,9 +195,9 @@ impl CodexClient {
       let resp = classify(resp, Classify::STRICT).await?;
       let status = resp.status().as_u16();
       let parsed: super::models::ModelsResponse =
-         resp.json().await.map_err(|e| SendError::Upstream {
+         resp.json().await.map_err(|err| SendError::Upstream {
             status,
-            body: format!("parsing models response: {e}"),
+            body: format!("parsing models response: {err}"),
          })?;
       Ok(parsed.models)
    }
@@ -219,11 +222,11 @@ impl CodexClient {
          .header("session_id", session_id)
          .header("session-id", session_id)
          .header("Accept", "text/event-stream")
-         .header(reqwest::header::CONTENT_TYPE, "application/json")
+         .header(header::CONTENT_TYPE, "application/json")
          .body(req.clone())
          .send()
          .await
-         .map_err(|e| SendError::Network(e.to_string()))?;
+         .map_err(|err| SendError::Network(err.to_string()))?;
       classify(resp, RULES).await
    }
 }

@@ -3,12 +3,15 @@ pub mod models;
 pub mod sse;
 pub mod types;
 
+use axum::body::Bytes;
 use eyre::{Result, bail, eyre};
 use futures_util::StreamExt as _;
 
+use crate::clock;
 use crate::config::Config;
 use crate::db::Db;
 use crate::db::accounts::AccountStatus;
+use crate::oauth::refresh;
 use crate::pool::codex::CodexPool;
 use crate::provider::Provider;
 
@@ -25,10 +28,10 @@ pub async fn debug_models(db: &Db, cfg: &Config) -> Result<()> {
       .client()
       .models_raw(&access, &account_id)
       .await
-      .map_err(|e| eyre!(e))?;
+      .map_err(|err| eyre!(err))?;
    println!("status: {status}\n");
    match serde_json::from_str::<serde_json::Value>(&body) {
-      Ok(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap_or(body)),
+      Ok(value) => println!("{}", serde_json::to_string_pretty(&value).unwrap_or(body)),
       Err(_) => println!("{body}"),
    }
    Ok(())
@@ -43,14 +46,16 @@ pub async fn debug_ping(
    let accounts = db.list_accounts().await?;
    let account = accounts
       .iter()
-      .find(|a| a.provider == Provider::OpenAi && a.status != AccountStatus::Disabled)
+      .find(|account| {
+         account.provider == Provider::OpenAi && account.status != AccountStatus::Disabled
+      })
       .ok_or_else(|| eyre!("no usable account; run `slop-proxy login`"))?
       .clone();
 
-   let now = crate::clock::unix_now();
+   let now = clock::unix_now();
    let account = if account.access_expires_at.unwrap_or(0) < now + 60 {
       println!("refreshing access token for account {}...", account.id);
-      let tokens = crate::oauth::refresh::refresh(&account.refresh_token).await?;
+      let tokens = refresh::refresh(&account.refresh_token).await?;
       db.update_account_tokens(account.id, &tokens).await?;
       db.find_account(&account.id.to_string())
          .await?
@@ -60,7 +65,7 @@ pub async fn debug_ping(
    };
 
    let model = model
-      .or_else(|| Some(cfg.models.default.clone()).filter(|m| !m.is_empty()))
+      .or_else(|| Some(cfg.models.default.clone()).filter(|configured| !configured.is_empty()))
       .ok_or_else(|| eyre!("pass --model (no default configured); see `slop-proxy models`"))?;
    let mut req = types::ResponsesRequest::new(model.clone(), cfg.codex.instructions());
    req.input.push(types::InputItem::Message {
@@ -81,7 +86,7 @@ pub async fn debug_ping(
       cfg.codex.base_url, account.id
    );
    let client = client::CodexClient::new(cfg.codex.clone());
-   let req = axum::body::Bytes::from(serde_json::to_vec(&req)?);
+   let req = Bytes::from(serde_json::to_vec(&req)?);
    let mut stream = match client
       .post(
          &account.access_token,
@@ -92,13 +97,13 @@ pub async fn debug_ping(
       .await
    {
       Ok(resp) => sse::event_stream(resp),
-      Err(e) => bail!("upstream error: {e}"),
+      Err(err) => bail!("upstream error: {err}"),
    };
 
-   while let Some(ev) = stream.next().await {
+   while let Some(event) = stream.next().await {
       println!(
          "{}",
-         serde_json::to_string_pretty(&ev)
+         serde_json::to_string_pretty(&event)
             .unwrap_or_else(|_| String::from("<unserializable event>"))
       );
    }

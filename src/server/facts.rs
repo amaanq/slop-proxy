@@ -1,3 +1,6 @@
+use axum::http::HeaderMap;
+use axum::http::header::CONTENT_LENGTH;
+
 use crate::codex::types::{ContentPart, InputItem, ResponsesRequest};
 use crate::gemini::types::GenerateContentRequest;
 use crate::translate::anthropic_req::{AnthropicRequest, ContentBlock, MessageContent};
@@ -16,42 +19,44 @@ pub struct RequestFacts {
 }
 
 impl RequestFacts {
-   pub fn empty(headers: &axum::http::HeaderMap) -> Self {
+   pub fn empty(headers: &HeaderMap) -> Self {
       Self {
          request_bytes: request_bytes(headers),
          ..Default::default()
       }
    }
 
-   pub fn from_chat(req: &ChatRequest, headers: &axum::http::HeaderMap) -> Self {
+   pub fn from_chat(req: &ChatRequest, headers: &HeaderMap) -> Self {
       Self {
          request_bytes: request_bytes(headers),
          turn_index: req.messages.len() as i64,
-         tools_declared: req.tools.as_ref().map_or(0, |t| t.len() as i64),
+         tools_declared: req.tools.as_ref().map_or(0, |tool| tool.len() as i64),
          thinking_budget: 0,
          image_count: req
             .messages
             .iter()
-            .filter_map(|m| match &m.content {
-               Some(ChatContent::Parts(parts)) => Some(parts),
+            .filter_map(|msg| match msg.content {
+               Some(ChatContent::Parts(ref parts)) => Some(parts),
                _ => None,
             })
             .flatten()
-            .filter(|p| matches!(p, ChatPart::ImageUrl { .. }))
+            .filter(|part| matches!(part, ChatPart::ImageUrl { .. }))
             .count() as i64,
       }
    }
 
-   pub fn from_responses(req: &ResponsesRequest, headers: &axum::http::HeaderMap) -> Self {
+   pub fn from_responses(req: &ResponsesRequest, headers: &HeaderMap) -> Self {
       let mut tools = req.tools.len() as i64;
       let mut images = 0;
       for item in &req.input {
-         match item {
-            InputItem::AdditionalTools { tools: t, .. } => tools += t.len() as i64,
-            InputItem::Message { content, .. } => {
+         match *item {
+            InputItem::AdditionalTools {
+               tools: ref defs, ..
+            } => tools += defs.len() as i64,
+            InputItem::Message { ref content, .. } => {
                images += content
                   .iter()
-                  .filter(|p| matches!(p, ContentPart::InputImage { .. }))
+                  .filter(|part| matches!(part, ContentPart::InputImage { .. }))
                   .count() as i64;
             },
             InputItem::FunctionCall { .. }
@@ -71,30 +76,30 @@ impl RequestFacts {
       }
    }
 
-   pub fn from_anthropic(req: &AnthropicRequest, headers: &axum::http::HeaderMap) -> Self {
+   pub fn from_anthropic(req: &AnthropicRequest, headers: &HeaderMap) -> Self {
       Self {
          request_bytes: request_bytes(headers),
          turn_index: req.messages.len() as i64,
-         tools_declared: req.tools.as_ref().map_or(0, |t| t.len() as i64),
+         tools_declared: req.tools.as_ref().map_or(0, |tool| tool.len() as i64),
          thinking_budget: req
             .thinking
             .as_ref()
-            .and_then(|t| t.budget_tokens)
+            .and_then(|thinking| thinking.budget_tokens)
             .unwrap_or(0) as i64,
          image_count: req
             .messages
             .iter()
-            .filter_map(|m| match &m.content {
-               MessageContent::Blocks(blocks) => Some(blocks),
+            .filter_map(|msg| match msg.content {
+               MessageContent::Blocks(ref blocks) => Some(blocks),
                MessageContent::Text(_) | MessageContent::Empty => None,
             })
             .flatten()
-            .filter(|b| matches!(b, ContentBlock::Image { .. }))
+            .filter(|block| matches!(block, ContentBlock::Image { .. }))
             .count() as i64,
       }
    }
 
-   pub fn from_native(req: &GenerateContentRequest, headers: &axum::http::HeaderMap) -> Self {
+   pub fn from_native(req: &GenerateContentRequest, headers: &HeaderMap) -> Self {
       Self {
          request_bytes: request_bytes(headers),
          turn_index: req.contents.len() as i64,
@@ -102,19 +107,19 @@ impl RequestFacts {
             .tools
             .iter()
             .flatten()
-            .map(|t| t.function_declarations.len() as i64)
+            .map(|tool| tool.function_declarations.len() as i64)
             .sum(),
          thinking_budget: req
             .generation_config
             .as_ref()
-            .and_then(|g| g.thinking_config.as_ref())
-            .and_then(|t| t.thinking_budget)
+            .and_then(|generation| generation.thinking_config.as_ref())
+            .and_then(|thinking| thinking.thinking_budget)
             .unwrap_or(0),
          image_count: req
             .contents
             .iter()
-            .flat_map(|c| &c.parts)
-            .filter(|p| p.inline_data.is_some())
+            .flat_map(|content| &content.parts)
+            .filter(|part| part.inline_data.is_some())
             .count() as i64,
       }
    }
@@ -122,11 +127,11 @@ impl RequestFacts {
 
 /// The decompressor rewrites `content-length` to the decoded size, so this
 /// measures what the handler parsed rather than what arrived on the wire.
-fn request_bytes(headers: &axum::http::HeaderMap) -> i64 {
+fn request_bytes(headers: &HeaderMap) -> i64 {
    headers
-      .get(axum::http::header::CONTENT_LENGTH)
-      .and_then(|v| v.to_str().ok())
-      .and_then(|v| v.parse().ok())
+      .get(CONTENT_LENGTH)
+      .and_then(|value| value.to_str().ok())
+      .and_then(|value| value.parse().ok())
       .unwrap_or(0)
 }
 
@@ -146,12 +151,12 @@ mod tests {
               {"role": "assistant", "content": [{"type": "text"}]},
           ],
           "tools": [{"name": "Read"}, {"name": "Bash"}],
-          "thinking": {"budget_tokens": 10000},
+          "thinking": {"budget_tokens": 10000_u64},
       }))
       .unwrap();
-      let f = RequestFacts::from_anthropic(&req, &HeaderMap::new());
-      assert_eq!((f.turn_index, f.tools_declared), (2, 2));
-      assert_eq!((f.thinking_budget, f.image_count), (10000, 1));
+      let facts = RequestFacts::from_anthropic(&req, &HeaderMap::new());
+      assert_eq!((facts.turn_index, facts.tools_declared), (2, 2));
+      assert_eq!((facts.thinking_budget, facts.image_count), (10000, 1));
    }
 
    #[test]
@@ -159,12 +164,16 @@ mod tests {
       let req = serde_json::from_value(json!({
           "contents": [{"role": "user", "parts": [{"inlineData": {}}]}],
           "tools": [{"functionDeclarations": [{"name": "a"}, {"name": "b"}]}],
-          "generationConfig": {"thinkingConfig": {"thinkingBudget": 512}},
+          "generationConfig": {"thinkingConfig": {"thinkingBudget": 512_i64}},
       }))
       .unwrap();
-      let f = RequestFacts::from_native(&req, &HeaderMap::new());
+      let facts = RequestFacts::from_native(&req, &HeaderMap::new());
       assert_eq!(
-         (f.tools_declared, f.thinking_budget, f.image_count),
+         (
+            facts.tools_declared,
+            facts.thinking_budget,
+            facts.image_count
+         ),
          (2, 512, 1)
       );
    }
@@ -179,14 +188,14 @@ mod tests {
           ],
       }))
       .unwrap();
-      let f = RequestFacts::from_responses(&req, &HeaderMap::new());
-      assert_eq!((f.turn_index, f.tools_declared), (2, 2));
+      let facts = RequestFacts::from_responses(&req, &HeaderMap::new());
+      assert_eq!((facts.turn_index, facts.tools_declared), (2, 2));
    }
 
    #[test]
    fn a_bare_chat_request_yields_zeroes() {
       let req = serde_json::from_value(json!({"model": "m"})).unwrap();
-      let f = RequestFacts::from_chat(&req, &HeaderMap::new());
-      assert_eq!((f.turn_index, f.tools_declared), (0, 0));
+      let facts = RequestFacts::from_chat(&req, &HeaderMap::new());
+      assert_eq!((facts.turn_index, facts.tools_declared), (0, 0));
    }
 }

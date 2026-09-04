@@ -65,9 +65,9 @@ pub async fn read_body(
    dialect: Dialect,
    resp: reqwest::Response,
 ) -> Result<Bytes, Response> {
-   resp.bytes().await.map_err(|e| {
+   resp.bytes().await.map_err(|err| {
       log_error(state, record.clone(), 502, "upstream_read");
-      error_response(dialect, 502, "api_error", &e.to_string())
+      error_response(dialect, 502, "api_error", &err.to_string())
    })
 }
 
@@ -101,9 +101,9 @@ where
          let _ = &guard;
          match item {
             Ok(bytes) => Ok(each(bytes)),
-            Err(e) => {
+            Err(err) => {
                capture.fail("upstream_stream_error");
-               Err(e)
+               Err(err)
             },
          }
       })
@@ -113,7 +113,7 @@ where
       }));
    builder
       .body(Body::from_stream(stream))
-      .unwrap_or_else(|e| error_response(dialect, 502, "api_error", &e.to_string()))
+      .unwrap_or_else(|err| error_response(dialect, 502, "api_error", &err.to_string()))
 }
 
 /// Responses events rendered as another dialect's SSE. `step` gets `None`
@@ -122,31 +122,31 @@ pub fn translated<S>(upstream: EventStream, guard: LogGuard, step: S) -> Respons
 where
    S: FnMut(Option<ResponsesEvent>) -> Vec<Event> + Send + 'static,
 {
-   struct St<F> {
+   struct State<F> {
       upstream: EventStream,
       step: F,
       queue: VecDeque<Event>,
       finished: bool,
       _guard: LogGuard,
    }
-   let st = St {
+   let state = State {
       upstream,
       step,
       queue: VecDeque::new(),
       finished: false,
       _guard: guard,
    };
-   let stream = stream::unfold(st, |mut st| async move {
+   let stream = stream::unfold(state, |mut state| async move {
       loop {
-         if let Some(ev) = st.queue.pop_front() {
-            return Some((Ok::<_, Infallible>(ev), st));
+         if let Some(event) = state.queue.pop_front() {
+            return Some((Ok::<_, Infallible>(event), state));
          }
-         if st.finished {
+         if state.finished {
             return None;
          }
-         let next = st.upstream.next().await;
-         st.finished = next.is_none();
-         st.queue.extend((st.step)(next));
+         let next = state.upstream.next().await;
+         state.finished = next.is_none();
+         state.queue.extend((state.step)(next));
       }
    });
    Sse::new(stream)

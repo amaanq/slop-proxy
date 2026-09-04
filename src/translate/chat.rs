@@ -26,8 +26,8 @@ pub struct ChatRequest {
    pub temperature: Option<f64>,
    #[serde(skip_serializing_if = "Option::is_none")]
    pub top_p: Option<f64>,
-   #[serde(skip_serializing_if = "Option::is_none")]
-   pub n: Option<u64>,
+   #[serde(rename = "n", skip_serializing_if = "Option::is_none")]
+   pub choice_count: Option<u64>,
    #[serde(skip_serializing_if = "Option::is_none")]
    pub presence_penalty: Option<f64>,
    #[serde(skip_serializing_if = "Option::is_none")]
@@ -49,7 +49,7 @@ impl ChatRequest {
       self
          .stream_options
          .as_ref()
-         .is_some_and(|o| o.include_usage)
+         .is_some_and(|options| options.include_usage)
    }
 }
 
@@ -69,8 +69,8 @@ pub enum StopSequences {
 impl StopSequences {
    pub fn into_vec(self) -> Vec<String> {
       match self {
-         Self::One(s) => vec![s],
-         Self::Many(v) => v,
+         Self::One(seq) => vec![seq],
+         Self::Many(seqs) => seqs,
       }
    }
 }
@@ -119,12 +119,12 @@ fn default_role() -> String {
 
 impl ChatMessage {
    pub fn text(&self) -> String {
-      match &self.content {
-         Some(ChatContent::Text(s)) => s.clone(),
-         Some(ChatContent::Parts(parts)) => parts
+      match self.content {
+         Some(ChatContent::Text(ref text)) => text.clone(),
+         Some(ChatContent::Parts(ref parts)) => parts
             .iter()
-            .filter_map(|p| match p {
-               ChatPart::Text { text } => Some(text.as_str()),
+            .filter_map(|part| match *part {
+               ChatPart::Text { ref text } => Some(text.as_str()),
                ChatPart::ImageUrl { .. } | ChatPart::InputAudio { .. } | ChatPart::Other => None,
             })
             .collect::<Vec<_>>()
@@ -170,8 +170,8 @@ pub enum ImageRef {
 
 impl ImageRef {
    pub fn url(&self) -> &str {
-      match self {
-         Self::Url(url) | Self::Object { url } => url,
+      match *self {
+         Self::Url(ref url) | Self::Object { ref url } => url,
       }
    }
 }
@@ -339,18 +339,18 @@ pub struct CompletionTokensDetails {
 impl From<ChatUsage> for Usage {
    /// Google leaves thinking out of `completion_tokens` and reports it only
    /// in `total_tokens`.
-   fn from(c: ChatUsage) -> Self {
-      let billed_output = (c.total_tokens - c.prompt_tokens).max(c.completion_tokens);
-      let mut reasoning_tokens = c.completion_tokens_details.reasoning_tokens;
+   fn from(chat: ChatUsage) -> Self {
+      let billed_output = (chat.total_tokens - chat.prompt_tokens).max(chat.completion_tokens);
+      let mut reasoning_tokens = chat.completion_tokens_details.reasoning_tokens;
       if reasoning_tokens == 0 {
-         reasoning_tokens = billed_output - c.completion_tokens;
+         reasoning_tokens = billed_output - chat.completion_tokens;
       }
       Self {
-         input_tokens: c.prompt_tokens,
+         input_tokens: chat.prompt_tokens,
          output_tokens: billed_output,
-         total_tokens: c.prompt_tokens + billed_output,
+         total_tokens: chat.prompt_tokens + billed_output,
          input_tokens_details: TokenDetails {
-            cached_tokens: c.prompt_tokens_details.cached_tokens,
+            cached_tokens: chat.prompt_tokens_details.cached_tokens,
             reasoning_tokens: 0,
          },
          output_tokens_details: TokenDetails {
@@ -362,16 +362,16 @@ impl From<ChatUsage> for Usage {
 }
 
 impl From<&Usage> for ChatUsage {
-   fn from(u: &Usage) -> Self {
+   fn from(usage: &Usage) -> Self {
       Self {
-         prompt_tokens: u.input_tokens,
-         completion_tokens: u.output_tokens,
-         total_tokens: u.input_tokens + u.output_tokens,
+         prompt_tokens: usage.input_tokens,
+         completion_tokens: usage.output_tokens,
+         total_tokens: usage.input_tokens + usage.output_tokens,
          prompt_tokens_details: PromptTokensDetails {
-            cached_tokens: u.input_tokens_details.cached_tokens,
+            cached_tokens: usage.input_tokens_details.cached_tokens,
          },
          completion_tokens_details: CompletionTokensDetails {
-            reasoning_tokens: u.output_tokens_details.reasoning_tokens,
+            reasoning_tokens: usage.output_tokens_details.reasoning_tokens,
          },
       }
    }
@@ -513,20 +513,20 @@ mod tests {
 
    #[test]
    fn thinking_is_recovered_from_the_total() {
-      let u: Usage = ChatUsage {
+      let usage: Usage = ChatUsage {
          prompt_tokens: 3,
          completion_tokens: 2,
          total_tokens: 71,
          ..Default::default()
       }
       .into();
-      assert_eq!(u.output_tokens, 68);
-      assert_eq!(u.output_tokens_details.reasoning_tokens, 66);
+      assert_eq!(usage.output_tokens, 68);
+      assert_eq!(usage.output_tokens_details.reasoning_tokens, 66);
    }
 
    #[test]
    fn cached_prompt_tokens_survive() {
-      let u: Usage = ChatUsage {
+      let usage: Usage = ChatUsage {
          prompt_tokens: 100,
          completion_tokens: 10,
          total_tokens: 110,
@@ -534,12 +534,12 @@ mod tests {
          ..Default::default()
       }
       .into();
-      assert_eq!(u.input_tokens_details.cached_tokens, 90);
+      assert_eq!(usage.input_tokens_details.cached_tokens, 90);
    }
 
    #[test]
    fn usage_details_carry_only_their_own_key() {
-      let v = serde_json::to_value(ChatUsage::from(&Usage {
+      let value = serde_json::to_value(ChatUsage::from(&Usage {
          input_tokens: 5,
          output_tokens: 7,
          input_tokens_details: TokenDetails {
@@ -553,16 +553,19 @@ mod tests {
          ..Default::default()
       }))
       .unwrap();
-      assert_eq!(v["prompt_tokens_details"], json!({"cached_tokens": 2}));
       assert_eq!(
-         v["completion_tokens_details"],
-         json!({"reasoning_tokens": 3})
+         value["prompt_tokens_details"],
+         json!({"cached_tokens": 2_i64})
+      );
+      assert_eq!(
+         value["completion_tokens_details"],
+         json!({"reasoning_tokens": 3_i64})
       );
    }
 
    #[test]
    fn an_error_frame_always_carries_a_code_key() {
-      let v = serde_json::to_value(ChatError {
+      let value = serde_json::to_value(ChatError {
          error: ChatErrorBody {
             message: "m".into(),
             kind: Some("api_error".into()),
@@ -570,8 +573,8 @@ mod tests {
          },
       })
       .unwrap();
-      assert!(v["error"].get("code").is_some());
-      assert_eq!(v["error"]["code"], serde_json::Value::Null);
+      assert!(value["error"].get("code").is_some());
+      assert_eq!(value["error"]["code"], serde_json::Value::Null);
    }
 
    #[test]

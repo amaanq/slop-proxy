@@ -2,7 +2,13 @@ use axum::body::Bytes;
 use serde::{Deserialize, Serialize};
 
 use crate::config::CodexConfig;
-use crate::upstream::{SendError, retry_after_secs};
+use crate::upstream::{Classify, SendError, classify};
+
+const RULES: Classify = Classify {
+    pass: |_| false,
+    auth: &[401],
+    reset_headers: &["x-codex-primary-reset-at"],
+};
 
 /// One rolling limit window as the usage endpoint reports it.
 #[derive(Debug, Default, Clone, serde::Deserialize)]
@@ -118,18 +124,10 @@ impl CodexClient {
             .send()
             .await
             .map_err(|e| SendError::Network(e.to_string()))?;
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            let body = body.chars().take(2000).collect::<String>();
-            return Err(match status.as_u16() {
-                401 | 403 => SendError::Auth(body),
-                s => SendError::Upstream { status: s, body },
-            });
-        }
-        let status_u16 = status.as_u16();
+        let resp = classify(resp, Classify::STRICT).await?;
+        let status = resp.status().as_u16();
         resp.json().await.map_err(|e| SendError::Upstream {
-            status: status_u16,
+            status,
             body: format!("parsing usage response: {e}"),
         })
     }
@@ -146,13 +144,12 @@ impl CodexClient {
         )
     }
 
-    pub async fn models_raw(
+    async fn models_response(
         &self,
         access_token: &str,
         chatgpt_account_id: &str,
-    ) -> Result<(reqwest::StatusCode, String), SendError> {
-        let resp = self
-            .http
+    ) -> Result<reqwest::Response, SendError> {
+        self.http
             .get(self.models_url())
             .bearer_auth(access_token)
             .header("ChatGPT-Account-ID", chatgpt_account_id)
@@ -161,7 +158,17 @@ impl CodexClient {
             .header("version", self.cfg.version.clone())
             .send()
             .await
-            .map_err(|e| SendError::Network(e.to_string()))?;
+            .map_err(|e| SendError::Network(e.to_string()))
+    }
+
+    pub async fn models_raw(
+        &self,
+        access_token: &str,
+        chatgpt_account_id: &str,
+    ) -> Result<(reqwest::StatusCode, String), SendError> {
+        let resp = self
+            .models_response(access_token, chatgpt_account_id)
+            .await?;
         let status = resp.status();
         let status_u16 = status.as_u16();
         let body = resp.text().await.map_err(|e| SendError::Upstream {
@@ -176,23 +183,16 @@ impl CodexClient {
         access_token: &str,
         chatgpt_account_id: &str,
     ) -> Result<Vec<super::models::ModelInfo>, SendError> {
-        let (status, body) = self.models_raw(access_token, chatgpt_account_id).await?;
-        if !status.is_success() {
-            let s = status.as_u16();
-            return Err(match s {
-                401 | 403 => SendError::Auth(body.chars().take(400).collect::<String>()),
-                _ => SendError::Upstream {
-                    status: s,
-                    body: body.chars().take(400).collect::<String>(),
-                },
-            });
-        }
-        let parsed = serde_json::from_str::<super::models::ModelsResponse>(&body).map_err(|e| {
-            SendError::Upstream {
-                status: status.as_u16(),
+        let resp = self
+            .models_response(access_token, chatgpt_account_id)
+            .await?;
+        let resp = classify(resp, Classify::STRICT).await?;
+        let status = resp.status().as_u16();
+        let parsed: super::models::ModelsResponse =
+            resp.json().await.map_err(|e| SendError::Upstream {
+                status,
                 body: format!("parsing models response: {e}"),
-            }
-        })?;
+            })?;
         Ok(parsed.models)
     }
 
@@ -221,20 +221,6 @@ impl CodexClient {
             .send()
             .await
             .map_err(|e| SendError::Network(e.to_string()))?;
-
-        let status = resp.status();
-        if status.is_success() {
-            return Ok(resp);
-        }
-
-        let retry_after = retry_after_secs(resp.headers(), &["x-codex-primary-reset-at"]);
-        let body = resp.text().await.unwrap_or_default();
-        let body = body.chars().take(2000).collect::<String>();
-        Err(match status.as_u16() {
-            401 => SendError::Auth(body),
-            429 => SendError::RateLimited { retry_after, body },
-            400 => SendError::BadRequest(body),
-            s => SendError::Upstream { status: s, body },
-        })
+        classify(resp, RULES).await
     }
 }

@@ -16,6 +16,14 @@ use serde::{Deserialize, Serialize};
 use crate::codex::sse::EventStream;
 use crate::codex::types::{OutputContentPart, OutputItem, ResponsesEvent, SummaryPart, Usage};
 
+#[derive(Debug, thiserror::Error)]
+pub enum TranslateError {
+    #[error("tool message without tool_call_id")]
+    ToolMessageWithoutCallId,
+    #[error("unsupported message role {0:?}")]
+    UnsupportedRole(String),
+}
+
 #[derive(Serialize, Deserialize)]
 struct SignaturePayload {
     id: Option<String>,

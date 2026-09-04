@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::value::{RawValue, to_raw_value};
 
-use super::{decode_signature, model_map};
+use super::{TranslateError, decode_signature, model_map};
 use crate::codex::types::{
     ContentPart, InputItem, ReasoningConfig, ResponsesRequest, SummaryPart, ToolChoice, ToolDef,
     ToolOutput,
@@ -211,7 +211,10 @@ pub fn empty_schema() -> Box<RawValue> {
     to_raw_value(&ObjectSchema::empty()).expect("schema serializes")
 }
 
-pub fn to_responses(req: &AnthropicRequest, cfg: &Config) -> Result<ResponsesRequest, String> {
+pub fn to_responses(
+    req: &AnthropicRequest,
+    cfg: &Config,
+) -> Result<ResponsesRequest, TranslateError> {
     let resolved = model_map::resolve(&cfg.models, &req.model);
     let mut out = ResponsesRequest::new(resolved.model.clone(), cfg.codex.instructions());
 
@@ -299,7 +302,7 @@ fn system_text(system: &SystemPrompt) -> String {
     }
 }
 
-fn convert_message(msg: &AnthMessage, out: &mut Vec<InputItem>) -> Result<(), String> {
+fn convert_message(msg: &AnthMessage, out: &mut Vec<InputItem>) -> Result<(), TranslateError> {
     let assistant = msg.role == "assistant";
     let role = if assistant { "assistant" } else { "user" };
 

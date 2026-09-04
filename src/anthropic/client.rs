@@ -139,7 +139,7 @@ impl AnthropicClient {
         self.cfg.soft_utilization_limit
     }
 
-    pub async fn usage(&self, access_token: &str) -> Result<Usage, String> {
+    pub async fn usage(&self, access_token: &str) -> Result<Usage, SendError> {
         let resp = self
             .http
             .get(format!(
@@ -150,11 +150,21 @@ impl AnthropicClient {
             .header("anthropic-beta", OAUTH_BETA)
             .send()
             .await
-            .map_err(|e| e.to_string())?;
-        if !resp.status().is_success() {
-            return Err(resp.status().to_string());
+            .map_err(|e| SendError::Network(e.to_string()))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            let body = body.chars().take(2000).collect::<String>();
+            return Err(match status.as_u16() {
+                401 | 403 => SendError::Auth(body),
+                s => SendError::Upstream { status: s, body },
+            });
         }
-        resp.json().await.map_err(|e| e.to_string())
+        let status_u16 = status.as_u16();
+        resp.json().await.map_err(|e| SendError::Upstream {
+            status: status_u16,
+            body: format!("parsing usage response: {e}"),
+        })
     }
 
     /// The catalog exactly as the backend sends it. Relayed rather than
@@ -163,7 +173,7 @@ impl AnthropicClient {
     pub async fn models_raw(
         &self,
         access_token: &str,
-    ) -> Result<(reqwest::StatusCode, String), String> {
+    ) -> Result<(reqwest::StatusCode, String), SendError> {
         let resp = self
             .http
             .get(format!(
@@ -175,9 +185,13 @@ impl AnthropicClient {
             .header("anthropic-version", "2023-06-01")
             .send()
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| SendError::Network(e.to_string()))?;
         let status = resp.status();
-        let body = resp.text().await.map_err(|e| e.to_string())?;
+        let status_u16 = status.as_u16();
+        let body = resp.text().await.map_err(|e| SendError::Upstream {
+            status: status_u16,
+            body: format!("reading models response: {e}"),
+        })?;
         Ok((status, body))
     }
 

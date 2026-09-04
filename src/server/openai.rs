@@ -12,10 +12,11 @@ use futures_util::StreamExt;
 use super::auth::AuthInfo;
 use super::error::{Dialect, pool_error_response, pool_error_status, translation_error};
 use super::{AppState, LogGuard, cache_key, log_error, log_rejected, log_usage};
-use crate::codex::sse::{EventStream, event_stream};
+use crate::codex::sse::EventStream;
 use crate::codex::types::{OutputItem, ResponsesEvent, ResponsesRequest, Usage};
 use crate::db::usage::UsageRecord;
 use crate::pool::Route;
+use crate::pool::pools::{Dispatched, Upstream};
 use crate::provider::Provider;
 use crate::translate::chat::ChatRequest;
 use crate::translate::openai_req;
@@ -72,7 +73,7 @@ pub async fn chat_completions(
         Ok(r) => r,
         Err(e) => {
             log_rejected(&state, &auth, "chat", &req.model);
-            return translation_error(DIALECT, &e);
+            return translation_error(DIALECT, &e.to_string());
         }
     };
     upstream_req.prompt_cache_key = Some(cache_key(&auth.user, &upstream_req));
@@ -99,43 +100,17 @@ pub async fn chat_completions(
         ..Default::default()
     };
 
-    let req_bytes = match serde_json::to_vec(&upstream_req) {
-        Ok(v) => Bytes::from(v),
-        Err(e) => {
-            log_error(&state, record, 400, "invalid_request");
-            return translation_error(DIALECT, &format!("serializing request: {e}"));
-        }
-    };
     let session_key = upstream_req.prompt_cache_key.clone().unwrap_or_default();
-    let dispatched = if provider == Provider::Zen {
-        state
-            .pools
-            .zen
-            .execute(
-                Route {
-                    session_key: &session_key,
-                    model: &req.model,
-                    prefer_trusted: false,
-                },
-                req_bytes.clone(),
-            )
-            .await
-    } else {
-        state
-            .pools
-            .codex
-            .execute(
-                Route {
-                    session_key: &session_key,
-                    model: &req.model,
-                    prefer_trusted: auth.prefer_trusted,
-                },
-                req_bytes.clone(),
-            )
-            .await
+    let route = Route {
+        session_key: &session_key,
+        model: &req.model,
+        prefer_trusted: auth.prefer_trusted,
     };
-    let (account_id, resp) = match dispatched {
-        Ok(r) => r,
+    let Dispatched {
+        account_id,
+        upstream,
+    } = match state.pools.responses(provider, route, &upstream_req).await {
+        Ok(d) => d,
         Err(e) => {
             log_error(&state, record, pool_error_status(&e), "pool");
             return pool_error_response(DIALECT, &state.cfg.models, e);
@@ -146,7 +121,7 @@ pub async fn chat_completions(
     record.session_key = session_key;
 
     let capture = UsageCapture::default();
-    let events = event_stream(resp);
+    let events = upstream.events(&upstream_req.model, capture.clone());
 
     if req.stream.unwrap_or(false) {
         let translator = OpenAiStream::new(req.model.clone(), req.include_usage(), capture.clone());
@@ -359,7 +334,8 @@ pub async fn models(
     .into_response()
 }
 
-/// The fields the proxy rewrites on a `/v1/responses` request
+/// The fields the proxy rewrites on a `/v1/responses` request. Everything
+/// else stays in `rest` and goes upstream as the caller wrote it.
 #[derive(serde::Deserialize, serde::Serialize)]
 struct PassthroughRequest {
     model: Option<String>,
@@ -470,45 +446,20 @@ pub async fn responses_passthrough(
         request_bytes: facts.request_bytes,
         ..Default::default()
     };
-    if provider == Provider::Gemini {
-        let Some(typed) = typed else {
-            log_error(&state, record, 400, "invalid_request");
-            return translation_error(
-                DIALECT,
-                "this request cannot be bridged to gemini; see the proxy log for the field that failed",
-            );
-        };
-        return gemini_responses(state, record, typed, session_key, client_streams, started).await;
-    }
-    let dispatched = if provider == Provider::Zen {
-        state
-            .pools
-            .zen
-            .execute(
-                Route {
-                    session_key: &session_key,
-                    model: &record.requested_model,
-                    prefer_trusted: false,
-                },
-                body.clone(),
-            )
-            .await
-    } else {
-        state
-            .pools
-            .codex
-            .execute(
-                Route {
-                    session_key: &session_key,
-                    model: &record.requested_model,
-                    prefer_trusted: auth.prefer_trusted,
-                },
-                body.clone(),
-            )
-            .await
+    let route = Route {
+        session_key: &session_key,
+        model: &record.requested_model,
+        prefer_trusted: auth.prefer_trusted,
     };
-    let (account_id, resp) = match dispatched {
-        Ok(r) => r,
+    let Dispatched {
+        account_id,
+        upstream,
+    } = match state
+        .pools
+        .responses_raw(provider, route, body, typed.as_ref())
+        .await
+    {
+        Ok(d) => d,
         Err(e) => {
             log_error(&state, record, pool_error_status(&e), "pool");
             return pool_error_response(DIALECT, &state.cfg.models, e);
@@ -517,6 +468,13 @@ pub async fn responses_passthrough(
     let mut record = record;
     record.account_id = account_id;
     let capture = UsageCapture::default();
+    let resp = match upstream {
+        Upstream::Responses(resp) => resp,
+        bridged => {
+            let model = record.upstream_model.clone();
+            return bridged_responses(state, record, bridged, model, client_streams, started).await;
+        }
+    };
 
     if client_streams {
         let limits = rate_limit_headers(&state.pools.codex.pool_windows().await);
@@ -568,56 +526,17 @@ pub async fn responses_passthrough(
     }
 }
 
-/// Gemini speaks chat completions, so the responses surface reaches it through
-/// the same bridge Claude Code uses, relaying the bridge's frames rather than
-/// the events they parse into.
-async fn gemini_responses(
+/// The bridge's frames are relayed rather than the events they parse into.
+async fn bridged_responses(
     state: AppState,
     mut record: UsageRecord,
-    req: ResponsesRequest,
-    session_key: String,
+    upstream: crate::pool::pools::Upstream,
+    model: String,
     client_streams: bool,
     started: std::time::Instant,
 ) -> Response {
-    let model = req.model.clone();
-    let custom = crate::translate::gemini_bridge::custom_tools(&req);
-    let chat = crate::translate::gemini_bridge::to_chat(&req);
-    let (account_id, upstream) = match state
-        .pools
-        .gemini
-        .execute(
-            Route {
-                session_key: &session_key,
-                model: &req.model,
-                prefer_trusted: false,
-            },
-            crate::pool::gemini::Call::OpenAi(Box::new(chat)),
-        )
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            log_error(&state, record, pool_error_status(&e), "pool");
-            return pool_error_response(DIALECT, &state.cfg.models, e);
-        }
-    };
-    record.account_id = account_id;
-    if !upstream.response.status().is_success() {
-        let status = upstream.response.status().as_u16() as i64;
-        let body = upstream.response.text().await.unwrap_or_default();
-        let reason = <crate::gemini::client::GeminiClient as crate::pool::Backend>::reason(body);
-        tracing::warn!(status, model = %model, "gemini rejected the request: {reason}");
-        log_error(&state, record, status, "upstream_rejected");
-        return super::error::error_response(DIALECT, 400, "invalid_request_error", &reason);
-    }
     let capture = UsageCapture::default();
-    let mut events = crate::translate::gemini_bridge::event_stream(
-        upstream.response,
-        upstream.protocol,
-        &model,
-        custom,
-        capture.clone(),
-    );
+    let mut events = upstream.events(&model, capture.clone());
 
     if client_streams {
         let guard = LogGuard::new(state.clone(), capture.clone(), record, started);
@@ -856,6 +775,23 @@ mod passthrough_tests {
         assert_eq!(req.service_tier.as_deref(), Some("priority"));
         let out = serde_json::to_value(&req).unwrap();
         assert_eq!(out["service_tier"], "priority");
+    }
+
+    /// The typed request would serialise an item it does not know as
+    /// `{"type":"Other"}` and drop a custom tool's grammar.
+    #[test]
+    fn what_the_proxy_has_no_opinion_on_goes_upstream_as_written() {
+        let body = serde_json::json!({
+            "model": "gpt-5.6-sol",
+            "input": [{"type": "apply_patch_call", "call_id": "c1", "status": "completed"}],
+            "tools": [{"type": "custom", "name": "apply_patch", "format": {"type": "grammar", "syntax": "lark"}}],
+            "reasoning": {"summary": "auto"},
+        });
+        let req: PassthroughRequest = serde_json::from_value(body.clone()).unwrap();
+        let out = serde_json::to_value(&req).unwrap();
+        assert_eq!(out["input"], body["input"]);
+        assert_eq!(out["tools"], body["tools"]);
+        assert_eq!(out["reasoning"], body["reasoning"]);
     }
 }
 

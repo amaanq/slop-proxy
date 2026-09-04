@@ -107,7 +107,7 @@ impl CodexClient {
         &self,
         access_token: &str,
         chatgpt_account_id: &str,
-    ) -> Result<Usage, String> {
+    ) -> Result<Usage, SendError> {
         let resp = self
             .http
             .get(format!("{}/usage", self.cfg.base_url.trim_end_matches('/')))
@@ -117,11 +117,21 @@ impl CodexClient {
             .header("version", self.cfg.version.clone())
             .send()
             .await
-            .map_err(|e| e.to_string())?;
-        if !resp.status().is_success() {
-            return Err(resp.status().to_string());
+            .map_err(|e| SendError::Network(e.to_string()))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            let body = body.chars().take(2000).collect::<String>();
+            return Err(match status.as_u16() {
+                401 | 403 => SendError::Auth(body),
+                s => SendError::Upstream { status: s, body },
+            });
         }
-        resp.json().await.map_err(|e| e.to_string())
+        let status_u16 = status.as_u16();
+        resp.json().await.map_err(|e| SendError::Upstream {
+            status: status_u16,
+            body: format!("parsing usage response: {e}"),
+        })
     }
 
     pub fn soft_utilization_limit(&self) -> f64 {
@@ -140,7 +150,7 @@ impl CodexClient {
         &self,
         access_token: &str,
         chatgpt_account_id: &str,
-    ) -> Result<(reqwest::StatusCode, String), String> {
+    ) -> Result<(reqwest::StatusCode, String), SendError> {
         let resp = self
             .http
             .get(self.models_url())
@@ -151,9 +161,13 @@ impl CodexClient {
             .header("version", self.cfg.version.clone())
             .send()
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| SendError::Network(e.to_string()))?;
         let status = resp.status();
-        let body = resp.text().await.map_err(|e| e.to_string())?;
+        let status_u16 = status.as_u16();
+        let body = resp.text().await.map_err(|e| SendError::Upstream {
+            status: status_u16,
+            body: format!("reading models response: {e}"),
+        })?;
         Ok((status, body))
     }
 
@@ -161,16 +175,24 @@ impl CodexClient {
         &self,
         access_token: &str,
         chatgpt_account_id: &str,
-    ) -> Result<Vec<super::models::ModelInfo>, String> {
+    ) -> Result<Vec<super::models::ModelInfo>, SendError> {
         let (status, body) = self.models_raw(access_token, chatgpt_account_id).await?;
         if !status.is_success() {
-            return Err(format!(
-                "{status}: {}",
-                body.chars().take(400).collect::<String>()
-            ));
+            let s = status.as_u16();
+            return Err(match s {
+                401 | 403 => SendError::Auth(body.chars().take(400).collect::<String>()),
+                _ => SendError::Upstream {
+                    status: s,
+                    body: body.chars().take(400).collect::<String>(),
+                },
+            });
         }
-        let parsed = serde_json::from_str::<super::models::ModelsResponse>(&body)
-            .map_err(|e| format!("parsing models response: {e}"))?;
+        let parsed = serde_json::from_str::<super::models::ModelsResponse>(&body).map_err(|e| {
+            SendError::Upstream {
+                status: status.as_u16(),
+                body: format!("parsing models response: {e}"),
+            }
+        })?;
         Ok(parsed.models)
     }
 

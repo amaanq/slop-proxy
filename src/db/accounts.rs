@@ -5,6 +5,35 @@ use super::Db;
 use crate::oauth::TokenSet;
 use crate::provider::{AuthMode, Provider};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountStatus {
+    Active,
+    Cooldown,
+    Disabled,
+}
+
+impl AccountStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Cooldown => "cooldown",
+            Self::Disabled => "disabled",
+        }
+    }
+}
+
+impl std::str::FromStr for AccountStatus {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "active" => Ok(Self::Active),
+            "cooldown" => Ok(Self::Cooldown),
+            "disabled" => Ok(Self::Disabled),
+            other => Err(format!("unknown account status {other:?}")),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Account {
     pub id: i64,
@@ -19,7 +48,7 @@ pub struct Account {
     pub refresh_token: String,
     pub http_referer: Option<String>,
     pub access_expires_at: Option<i64>,
-    pub status: String,
+    pub status: AccountStatus,
     pub cooldown_until: Option<i64>,
     pub disabled_reason: Option<String>,
 }
@@ -38,7 +67,11 @@ fn from_row(row: &Row) -> rusqlite::Result<Account> {
         refresh_token: row.get("refresh_token")?,
         http_referer: row.get("http_referer")?,
         access_expires_at: row.get("access_expires_at")?,
-        status: row.get("status")?,
+        status: {
+            let raw: String = row.get("status")?;
+            raw.parse()
+                .map_err(|e: String| rusqlite::types::FromSqlError::Other(e.into()))?
+        },
         cooldown_until: row.get("cooldown_until")?,
         disabled_reason: row.get("disabled_reason")?,
     })
@@ -160,7 +193,7 @@ impl Db {
     pub async fn set_account_status(
         &self,
         id: i64,
-        status: &str,
+        status: AccountStatus,
         cooldown_until: Option<i64>,
         disabled_reason: Option<&str>,
     ) -> Result<()> {
@@ -168,7 +201,7 @@ impl Db {
         conn.execute(
             "UPDATE accounts SET status = ?2, cooldown_until = ?3, disabled_reason = ?4, updated_at = unixepoch()
              WHERE id = ?1",
-            params![id, status, cooldown_until, disabled_reason],
+            params![id, status.as_str(), cooldown_until, disabled_reason],
         )?;
         Ok(())
     }

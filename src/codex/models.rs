@@ -45,6 +45,7 @@ struct ZenEntry<'a> {
    description: &'static str,
    tool_mode: &'static str,
    shell_type: &'static str,
+   web_search_tool_type: &'static str,
    apply_patch_tool_type: Option<()>,
    use_responses_lite: bool,
    prefer_websockets: bool,
@@ -104,6 +105,7 @@ pub fn with_zen_entries(raw: &str, template: &str, ids: &[String]) -> Option<Str
          description: "Served by opencode zen",
          tool_mode: "direct",
          shell_type: "unified_exec",
+         web_search_tool_type: "text",
          apply_patch_tool_type: None,
          use_responses_lite: false,
          prefer_websockets: false,
@@ -133,6 +135,7 @@ mod zen_entry_tests {
    const CATALOG: &str = r#"{"models":[
       {"slug":"gpt-5.6-sol","visibility":"list","tool_mode":"code_mode_only","apply_patch_tool_type":"freeform",
        "use_responses_lite":true,"prefer_websockets":true,"shell_type":"unified_exec","priority":1,
+       "web_search_tool_type":"text_and_image",
        "supported_reasoning_levels":[{"effort":"low"},{"effort":"xhigh"},{"effort":"ultra"}],
        "model_messages":{"instructions_template":"be codex"}},
       {"slug":"muse-old","visibility":"list","tool_mode":"direct"}
@@ -154,6 +157,7 @@ mod zen_entry_tests {
       assert!(muse["apply_patch_tool_type"].is_null());
       assert_eq!(muse["use_responses_lite"], false);
       assert_eq!(muse["prefer_websockets"], false);
+      assert_eq!(muse["web_search_tool_type"], "text");
       assert_eq!(muse["model_messages"]["instructions_template"], "be codex");
       let efforts: Vec<_> = muse["supported_reasoning_levels"]
          .as_array()

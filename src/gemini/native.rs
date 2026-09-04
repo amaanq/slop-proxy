@@ -376,7 +376,7 @@ fn choice(
         images: (!images.is_empty()).then_some(images),
         ..Default::default()
     };
-    let mut reason = finish_reason(candidate.finish_reason);
+    let mut reason = finish_reason(candidate.finish_reason.clone());
     if used_tools && reason == Some(chat::FinishReason::Stop) {
         reason = Some(chat::FinishReason::ToolCalls);
     }
@@ -421,7 +421,7 @@ fn finish_reason(reason: Option<FinishReason>) -> Option<chat::FinishReason> {
         FinishReason::MalformedFunctionCall | FinishReason::UnexpectedToolCall => {
             Some(chat::FinishReason::Stop)
         }
-        FinishReason::Other => Some(chat::FinishReason::ContentFilter),
+        FinishReason::Other(_) => Some(chat::FinishReason::ContentFilter),
     }
 }
 
@@ -448,7 +448,7 @@ pub struct NativeStream {
     id: String,
     model: String,
     created: i64,
-    buf: Vec<u8>,
+    frames: crate::gemini::sse::Frames,
     sent_roles: BTreeSet<u64>,
     done: bool,
 }
@@ -459,26 +459,25 @@ impl NativeStream {
             id: format!("chatcmpl-{}", uuid::Uuid::new_v4()),
             model: model.to_string(),
             created: crate::clock::unix_now(),
-            buf: Vec::new(),
+            frames: crate::gemini::sse::Frames::default(),
             sent_roles: BTreeSet::new(),
             done: false,
         }
     }
 
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<Vec<u8>> {
-        self.buf.extend_from_slice(bytes);
         let mut output = Vec::new();
-        while let Some(nl) = self.buf.iter().position(|b| *b == b'\n') {
-            let line: Vec<u8> = self.buf.drain(..=nl).collect();
-            let line = line.strip_suffix(b"\n").unwrap_or(&line);
-            let line = line.strip_suffix(b"\r").unwrap_or(line);
-            let Some(data) = line.strip_prefix(b"data:") else {
-                continue;
-            };
-            let data = data.strip_prefix(b" ").unwrap_or(data);
-            if let Ok(event) = serde_json::from_slice::<GenerateContentResponse>(data) {
+        for data in self.frames.feed(bytes) {
+            if let Ok(event) = serde_json::from_slice::<GenerateContentResponse>(&data) {
                 output.extend(self.event(&event));
             }
+        }
+        if !self.done
+            && let Some(error) = self.frames.cutoff()
+        {
+            self.done = true;
+            output.push(sse(&ErrorFrame { error: &error }));
+            output.push(b"data: [DONE]\n\n".to_vec());
         }
         output
     }
@@ -523,6 +522,7 @@ impl NativeStream {
             model: self.model.clone(),
             choices,
             usage: event.usage_metadata.as_ref().map(chat_usage),
+            error: None,
         };
         let mut output = vec![sse(&chunk)];
         if finished && !self.done {
@@ -667,6 +667,32 @@ mod signature_tests {
         assert_eq!(
             out.body.contents[1].parts[0].thought_signature.as_deref(),
             Some("EtUBCtIB")
+        );
+    }
+}
+
+#[cfg(test)]
+mod cutoff_tests {
+    use super::NativeStream;
+
+    #[test]
+    fn a_cutoff_ends_the_translated_stream_with_an_error_frame() {
+        let mut stream = NativeStream::new("gemini-3.8-flash");
+        let mut frames = Vec::new();
+        for chunk in include_bytes!("fixtures/native_cutoff.sse").chunks(64) {
+            frames.extend(stream.feed(chunk));
+        }
+        let tail: Vec<String> = frames
+            .iter()
+            .rev()
+            .take(2)
+            .map(|f| String::from_utf8_lossy(f).into_owned())
+            .collect();
+        assert_eq!(tail[0], "data: [DONE]\n\n");
+        assert!(
+            tail[1].contains("\"error\"") && tail[1].contains("UNAVAILABLE"),
+            "{}",
+            tail[1]
         );
     }
 }

@@ -1,0 +1,17 @@
+data: {"candidates": [{"content": {"parts": [{"text": "1\n2\n"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 26,"candidatesTokenCount": 4,"totalTokenCount": 30,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 26}],"serviceTier": "standard"},"modelVersion": "gemini-3.8-flash","responseId": "_U-aatOFFO6YjrEP_pfRyAY","turnToken": "v1_ChdfVS1hYXRPRkZPNllqckVQX3BmUnlBWRIXX1UtYWF0T0ZGTzZZanJFUF9wZlJ5QVk"}
+
+data: {"candidates": [{"content": {"parts": [{"text": "3\n4\n5\n6\n7\n8\n9\n10"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 26,"candidatesTokenCount": 20,"totalTokenCount": 46,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 26}],"serviceTier": "standard"},"modelVersion": "gemini-3.8-flash","responseId": "_U-aatOFFO6YjrEP_pfRyAY","turnToken": "v1_ChdfVS1hYXRPRkZPNllqckVQX3BmUnlBWRIXX1UtYWF0T0ZGTzZZanJFUF9wZlJ5QVk"}
+
+data: {"candidates": [{"content": {"parts": [{"text": "\n11\n12\n1"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 26,"candidatesTokenCount": 28,"totalTokenCount": 54,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 26}],"serviceTier": "standard"},"modelVersion": "gemini-3.8-flash","responseId": "_U-aatOFFO6YjrEP_pfRyAY","turnToken": "v1_ChdfVS1hYXRPRkZPNllqckVQX3BmUnlBWRIXX1UtYWF0T0ZGTzZZanJFUF9wZlJ5QVk"}
+
+data: {"candidates": [{"content": {"parts": [{"text": "3\n14\n15\n16\n17\n18\n1"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 26,"candidatesTokenCount": 46,"totalTokenCount": 72,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 26}],"serviceTier": "standard"},"modelVersion": "gemini-3.8-flash","responseId": "_U-aatOFFO6YjrEP_pfRyAY","turnToken": "v1_ChdfVS1hYXRPRkZPNllqckVQX3BmUnlBWRIXX1UtYWF0T0ZGTzZZanJFUF9wZlJ5QVk"}
+
+data: {"candidates": [{"content": {"parts": [{"text": "9\n20\n21\n22\n23\n24\n25\n26\n27\n28\n2"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 26,"candidatesTokenCount": 76,"totalTokenCount": 102,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 26}],"serviceTier": "standard"},"modelVersion": "gemini-3.8-flash","responseId": "_U-aatOFFO6YjrEP_pfRyAY","turnToken": "v1_ChdfVS1hYXRPRkZPNllqckVQX3BmUnlBWRIXX1UtYWF0T0ZGTzZZanJFUF9wZlJ5QVk"}
+
+{
+  "error": {
+    "code": 503,
+    "message": "This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.",
+    "status": "UNAVAILABLE"
+  }
+}

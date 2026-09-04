@@ -546,10 +546,14 @@ async fn bridged_responses(
         let guard = LogGuard::new(state.clone(), capture.clone(), record, started);
         let stream = events.map(move |event| {
             let _ = &guard;
-            if let ResponsesEvent::Completed { response } = &event
-                && let Some(u) = &response.usage
+            if let ResponsesEvent::Completed { response }
+            | ResponsesEvent::Incomplete { response }
+            | ResponsesEvent::Failed { response } = &event
             {
-                capture.record(u);
+                if let Some(u) = &response.usage {
+                    capture.record(u);
+                }
+                capture.note_stop_reason(response.status.as_deref().unwrap_or("completed"));
             }
             let data = serde_json::to_string(&event).unwrap_or_default();
             capture.note_bytes(data.len());
@@ -563,10 +567,13 @@ async fn bridged_responses(
     let mut output = Vec::new();
     while let Some(event) = events.next().await {
         match event {
-            ResponsesEvent::Completed { response } => {
+            ResponsesEvent::Completed { response }
+            | ResponsesEvent::Incomplete { response }
+            | ResponsesEvent::Failed { response } => {
                 if let Some(u) = response.usage {
                     capture.record(&u);
                 }
+                capture.note_stop_reason(response.status.as_deref().unwrap_or("completed"));
             }
             ResponsesEvent::OutputItemDone { item, .. } => output.push(item),
             _ => {}

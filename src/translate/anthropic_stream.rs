@@ -351,6 +351,7 @@ impl AnthropicStream {
         self.close_open(out);
         let usage = usage.unwrap_or_default();
         self.capture.record(&usage);
+        self.capture.note_stop_reason(stop_reason);
         out.push(
             AnthEvent::MessageDelta {
                 delta: StopDelta {

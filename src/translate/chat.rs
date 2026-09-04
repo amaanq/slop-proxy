@@ -423,6 +423,8 @@ pub struct ChatChunk {
     pub choices: Vec<ChunkChoice>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<ChatUsage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<ChatErrorBody>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -25,6 +25,16 @@ fn to_json<T: Serialize>(payload: T) -> String {
     serde_json::to_string(&payload).expect("chunk serializes")
 }
 
+fn finish_reason_str(reason: FinishReason) -> &'static str {
+    match reason {
+        FinishReason::Stop => "stop",
+        FinishReason::Length => "length",
+        FinishReason::ToolCalls => "tool_calls",
+        FinishReason::ContentFilter => "content_filter",
+        FinishReason::Other => "other",
+    }
+}
+
 impl OpenAiStream {
     pub fn new(model: String, include_usage: bool, capture: UsageCapture) -> Self {
         Self {
@@ -183,6 +193,7 @@ impl OpenAiStream {
     fn finish(&mut self, out: &mut Vec<String>, usage: Option<Usage>, reason: FinishReason) {
         let usage = usage.unwrap_or_default();
         self.capture.record(&usage);
+        self.capture.note_stop_reason(finish_reason_str(reason));
         out.push(self.chunk(ChatDelta::default(), Some(reason)));
         if self.include_usage {
             out.push(to_json(ChatChunk {
@@ -192,6 +203,7 @@ impl OpenAiStream {
                 model: self.model.clone(),
                 choices: Vec::new(),
                 usage: Some(ChatUsage::from(&usage)),
+                error: None,
             }));
         }
         self.done = true;
@@ -227,6 +239,7 @@ impl OpenAiStream {
                 logprobs: None,
             }],
             usage: None,
+            error: None,
         })
     }
 }

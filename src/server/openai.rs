@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::convert::Infallible;
 
 use std::pin::Pin;
@@ -12,6 +13,7 @@ use axum::response::{IntoResponse as _, Response};
 use axum::{Extension, Json};
 use eventsource_stream::Eventsource as _;
 use futures_util::StreamExt as _;
+use serde_json::Value;
 use serde_json::value::RawValue;
 
 use super::auth::AuthInfo;
@@ -319,6 +321,42 @@ struct ReasoningPatch {
    rest: serde_json::Map<String, serde_json::Value>,
 }
 
+/// Zen 400s the whole request when a `*_call` item and its `*_call_output`
+/// do not both appear, which is what a client that truncated its history
+/// mid-cycle sends. Every other item is left where it was.
+fn drop_unpaired_tool_items(rest: &mut serde_json::Map<String, Value>) -> usize {
+   let Some(&mut Value::Array(ref mut items)) = rest.get_mut("input") else {
+      return 0;
+   };
+   let side = |item: &Value| -> Option<(bool, String)> {
+      let kind = item.get("type")?.as_str()?;
+      let call_id = item.get("call_id")?.as_str()?.to_owned();
+      if kind.ends_with("_call_output") {
+         Some((false, call_id))
+      } else if kind.ends_with("_call") {
+         Some((true, call_id))
+      } else {
+         None
+      }
+   };
+   let mut calls = HashSet::new();
+   let mut outputs = HashSet::new();
+   for item in items.iter() {
+      match side(item) {
+         Some((true, call_id)) => calls.insert(call_id),
+         Some((false, call_id)) => outputs.insert(call_id),
+         None => false,
+      };
+   }
+   let before = items.len();
+   items.retain(|item| match side(item) {
+      Some((true, ref call_id)) => outputs.contains(call_id),
+      Some((false, ref call_id)) => calls.contains(call_id),
+      None => true,
+   });
+   before - items.len()
+}
+
 pub async fn responses_passthrough(
    State(state): State<AppState>,
    Extension(auth): Extension<AuthInfo>,
@@ -351,6 +389,13 @@ pub async fn responses_passthrough(
    if let Some(effort) = model_map::suffix_effort(&requested_model) {
       req.reasoning.get_or_insert_default().effort =
          Some(model_map::clamp_effort(&resolved.model, &effort));
+   }
+
+   if provider == Provider::Zen {
+      let dropped = drop_unpaired_tool_items(&mut req.rest);
+      if dropped > 0 {
+         tracing::warn!(dropped, user = %auth.user, "dropped tool items zen rejects as unpaired");
+      }
    }
 
    let client_streams = req.stream.unwrap_or(false);
@@ -756,6 +801,56 @@ mod passthrough_tests {
       assert_eq!(out["input"], body["input"]);
       assert_eq!(out["tools"], body["tools"]);
       assert_eq!(out["reasoning"], body["reasoning"]);
+   }
+}
+
+#[cfg(test)]
+mod unpaired_tool_tests {
+   use super::*;
+
+   fn input(items: serde_json::Value) -> serde_json::Map<String, Value> {
+      let mut rest = serde_json::Map::new();
+      rest.insert("input".into(), items);
+      rest
+   }
+
+   #[test]
+   fn a_call_without_its_output_and_an_output_without_its_call_both_go() {
+      let mut rest = input(serde_json::json!([
+          {"type": "message", "role": "user", "content": "hi"},
+          {"type": "function_call", "call_id": "kept", "name": "ls", "arguments": "{}"},
+          {"type": "function_call_output", "call_id": "kept", "output": "ok"},
+          {"type": "function_call", "call_id": "orphan-call", "name": "ls", "arguments": "{}"},
+          {"type": "custom_tool_call_output", "call_id": "orphan-output", "output": "late"},
+          {"type": "reasoning", "summary": []},
+      ]));
+      assert_eq!(drop_unpaired_tool_items(&mut rest), 2);
+      let kinds: Vec<_> = rest["input"]
+         .as_array()
+         .unwrap()
+         .iter()
+         .map(|item| item["type"].as_str().unwrap())
+         .collect();
+      assert_eq!(
+         kinds,
+         [
+            "message",
+            "function_call",
+            "function_call_output",
+            "reasoning"
+         ]
+      );
+   }
+
+   #[test]
+   fn a_paired_history_is_untouched() {
+      let items = serde_json::json!([
+          {"type": "apply_patch_call", "call_id": "p1", "status": "completed"},
+          {"type": "apply_patch_call_output", "call_id": "p1", "output": "done"},
+      ]);
+      let mut rest = input(items.clone());
+      assert_eq!(drop_unpaired_tool_items(&mut rest), 0);
+      assert_eq!(rest["input"], items);
    }
 }
 

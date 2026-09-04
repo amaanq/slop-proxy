@@ -4,9 +4,9 @@ use reqwest::Url;
 use serde::Deserialize;
 
 use super::TokenSet;
-use super::refresh::RefreshError;
+use super::refresh::{RefreshError, RefreshRequest, post_token, token_set};
 use crate::db::Db;
-use crate::provider::{AuthMode, Provider};
+use crate::provider::Provider;
 
 pub const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 pub const AUTHORIZE_URL: &str = "https://claude.ai/oauth/authorize";
@@ -14,35 +14,6 @@ pub const TOKEN_URL: &str = "https://console.anthropic.com/v1/oauth/token";
 pub const REDIRECT_URI: &str = "https://console.anthropic.com/oauth/code/callback";
 pub const SCOPES: &str = "org:create_api_key user:profile user:inference";
 pub const PROFILE_URL: &str = "https://api.anthropic.com/api/oauth/profile";
-
-#[derive(Deserialize)]
-struct TokenResponse {
-    access_token: String,
-    refresh_token: Option<String>,
-    expires_in: Option<i64>,
-    account: Option<AccountInfo>,
-}
-
-#[derive(Deserialize)]
-struct AccountInfo {
-    uuid: Option<String>,
-    email_address: Option<String>,
-}
-
-impl TokenResponse {
-    /// Anthropic does not always rotate the refresh token, so the prior one
-    /// carries over when the response omits it.
-    fn into_token_set(self, prior_refresh: Option<&str>) -> Option<TokenSet> {
-        Some(TokenSet {
-            expires_at: self.expires_in.map(|s| crate::clock::unix_now() + s),
-            access_token: self.access_token,
-            refresh_token: self
-                .refresh_token
-                .or_else(|| prior_refresh.map(String::from))?,
-            id_token: None,
-        })
-    }
-}
 
 pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
     let mut raw = [0u8; 32];
@@ -75,6 +46,9 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
     let (code, state) = pasted
         .split_once('#')
         .unwrap_or((pasted, verifier.as_str()));
+    if state != verifier {
+        bail!("state mismatch, paste the whole code");
+    }
 
     #[derive(serde::Serialize)]
     struct ExchangeRequest<'a> {
@@ -99,15 +73,7 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
         .send()
         .await
         .wrap_err("token exchange request failed")?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        bail!("token exchange failed: {status}: {body}");
-    }
-    let parsed = resp
-        .json::<TokenResponse>()
-        .await
-        .wrap_err("parsing token response")?;
+    let parsed = super::exchanged(resp).await?;
 
     let account = parsed.account.as_ref();
     let account_id = account
@@ -119,23 +85,16 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
         .into_token_set(None)
         .ok_or_else(|| eyre!("no refresh_token in token response"))?;
 
-    let db_id = db
-        .upsert_account(
-            Provider::Anthropic,
-            &account_id,
-            email.as_deref(),
-            label.as_deref(),
-            plan.as_deref(),
-            &tokens,
-            AuthMode::OAuth,
-        )
-        .await?;
-    println!(
-        "logged in: anthropic account {} ({})",
-        db_id,
-        email.as_deref().unwrap_or("unknown email")
-    );
-    Ok(())
+    super::finish_login(
+        db,
+        Provider::Anthropic,
+        &account_id,
+        email.as_deref(),
+        label.as_deref(),
+        plan.as_deref(),
+        &tokens,
+    )
+    .await
 }
 
 /// The subscription tier lives on the profile rather than the token
@@ -164,39 +123,14 @@ async fn subscription_tier(access_token: &str) -> Option<String> {
 }
 
 pub async fn refresh(refresh_token: &str) -> Result<TokenSet, RefreshError> {
-    #[derive(serde::Serialize)]
-    struct RefreshRequest<'a> {
-        grant_type: &'a str,
-        refresh_token: &'a str,
-        client_id: &'a str,
-    }
-
-    let resp = super::http()
-        .post(TOKEN_URL)
-        .json(&RefreshRequest {
+    let (status, body) = post_token(
+        TOKEN_URL,
+        &RefreshRequest {
+            client_id: CLIENT_ID,
             grant_type: "refresh_token",
             refresh_token,
-            client_id: CLIENT_ID,
-        })
-        .send()
-        .await
-        .map_err(|e| RefreshError::Transient(e.to_string()))?;
-
-    let status = resp.status();
-    let body = resp
-        .text()
-        .await
-        .map_err(|e| RefreshError::Transient(e.to_string()))?;
-    if !status.is_success() {
-        let msg = format!("{status}: {body}");
-        if body.contains("invalid_grant") || status == reqwest::StatusCode::FORBIDDEN {
-            return Err(RefreshError::Terminal(msg));
-        }
-        return Err(RefreshError::Transient(msg));
-    }
-
-    serde_json::from_str::<TokenResponse>(&body)
-        .map_err(|e| RefreshError::Transient(format!("bad token response: {e}")))?
-        .into_token_set(Some(refresh_token))
-        .ok_or_else(|| RefreshError::Transient("token response missing refresh_token".into()))
+        },
+    )
+    .await?;
+    token_set(status, &body, Some(refresh_token))
 }

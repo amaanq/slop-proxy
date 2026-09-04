@@ -501,7 +501,11 @@ async fn debug_refresh(db: &Db, account: &str) -> Result<()> {
         .find_account(account)
         .await?
         .ok_or_else(|| eyre!("no account matched"))?;
-    let tokens = crate::oauth::refresh::refresh(&acc.refresh_token).await?;
+    let tokens = match acc.provider {
+        Provider::OpenAi => crate::oauth::refresh::refresh(&acc.refresh_token).await?,
+        Provider::Anthropic => crate::oauth::anthropic::refresh(&acc.refresh_token).await?,
+        _ => bail!("this provider has no refresh flow"),
+    };
     db.update_account_tokens(acc.id, &tokens).await?;
     println!(
         "refreshed account {} ({})",

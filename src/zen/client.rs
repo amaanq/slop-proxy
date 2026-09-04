@@ -9,6 +9,11 @@ use axum::body::Bytes;
 use crate::config::ZenConfig;
 use crate::upstream::{SendError, retry_after_secs};
 
+/// 250 proxies at one round trip each is minutes of hanging before the
+/// caller sees anything. Cooldowns persist, so the next request skips what
+/// this one benched and walks the next batch.
+const EGRESS_ATTEMPTS: usize = 8;
+
 pub struct ZenClient {
     base_url: String,
     egresses: Vec<Egress>,
@@ -71,21 +76,49 @@ impl ZenClient {
         let anonymous = key.is_none_or(str::is_empty);
         let mut rate_limit_body = None;
         let mut network_error = None;
-        for index in self.available_egresses(anonymous)? {
+        let available = self.available_egresses(anonymous)?;
+        let mut tried = 0;
+        for index in available.iter().copied().take(EGRESS_ATTEMPTS) {
+            tried += 1;
             match self.send_via(index, key, req).await {
-                Ok(response) => return Ok(response),
+                Ok(response) => {
+                    if tried > 1 {
+                        tracing::info!(
+                            egress = index,
+                            failed = tried - 1,
+                            "zen egress served after failover"
+                        );
+                    }
+                    return Ok(response);
+                }
                 Err(SendError::RateLimited { retry_after, body }) if anonymous => {
+                    tracing::warn!(
+                        egress = index,
+                        "zen egress rate limited: {}",
+                        body.chars().take(200).collect::<String>()
+                    );
                     self.cool_anonymous(index, retry_after.unwrap_or(60));
                     rate_limit_body = Some(body);
                 }
                 Err(SendError::Network(error)) => {
+                    tracing::warn!(egress = index, "zen egress unreachable: {error}");
                     self.cool_unavailable(index, 30);
                     network_error = Some(error);
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    tracing::warn!(egress = index, "zen egress rejected the request: {error}");
+                    return Err(error);
+                }
             }
         }
-        Err(self.exhausted_error(rate_limit_body, network_error))
+        let untried = available.len().saturating_sub(tried);
+        tracing::warn!(
+            tried,
+            untried,
+            total = self.egresses.len(),
+            "zen egresses exhausted for this request"
+        );
+        Err(self.exhausted_error(rate_limit_body, network_error, untried))
     }
 
     async fn send_via(
@@ -121,10 +154,12 @@ impl ZenClient {
         }
         let mut rate_limit_body = None;
         let mut network_error = None;
-        for index in self
+        let available = self
             .available_egresses(true)
-            .map_err(|error| error.to_string())?
-        {
+            .map_err(|error| error.to_string())?;
+        let mut tried = 0;
+        for index in available.iter().copied().take(EGRESS_ATTEMPTS) {
+            tried += 1;
             let response = match self.egresses[index]
                 .http
                 .get(format!("{}/models", self.base_url.trim_end_matches('/')))
@@ -156,7 +191,11 @@ impl ZenClient {
             }
         }
         Err(self
-            .exhausted_error(rate_limit_body, network_error)
+            .exhausted_error(
+                rate_limit_body,
+                network_error,
+                available.len().saturating_sub(tried),
+            )
             .to_string())
     }
 
@@ -181,11 +220,19 @@ impl ZenClient {
                 .iter()
                 .any(|egress| egress.anonymous_cooldown_until.load(Ordering::Relaxed) > now);
         if has_rate_limit {
+            tracing::warn!(
+                total = self.egresses.len(),
+                "no zen egress available: all cooling down"
+            );
             return Err(SendError::RateLimited {
                 retry_after: Some(self.retry_after(now, true)),
                 body: "all zen egresses are cooling down".into(),
             });
         }
+        tracing::warn!(
+            total = self.egresses.len(),
+            "no zen egress available: all unreachable"
+        );
         Err(SendError::Network(
             "all zen egresses are temporarily unavailable".into(),
         ))
@@ -226,14 +273,25 @@ impl ZenClient {
         &self,
         rate_limit_body: Option<String>,
         network_error: Option<String>,
+        untried: usize,
     ) -> SendError {
         if let Some(body) = rate_limit_body {
+            let retry_after = if untried > 0 {
+                1
+            } else {
+                self.retry_after(crate::clock::unix_now(), true)
+            };
             return SendError::RateLimited {
-                retry_after: Some(self.retry_after(crate::clock::unix_now(), true)),
+                retry_after: Some(retry_after),
                 body,
             };
         }
-        SendError::Network(network_error.unwrap_or_else(|| "all zen egresses failed".into()))
+        let error = network_error.unwrap_or_else(|| "all zen egresses failed".into());
+        SendError::Network(if untried > 0 {
+            format!("{error}, {untried} egresses untried")
+        } else {
+            error
+        })
     }
 }
 
@@ -369,5 +427,52 @@ mod tests {
         .to_string();
         assert_eq!(error, "invalid zen proxy URL at position 1");
         assert!(!error.contains("secret"));
+    }
+
+    #[tokio::test]
+    async fn an_exhausted_walk_stops_at_the_cap_and_asks_for_a_quick_retry() {
+        let mut proxies = Vec::new();
+        for _ in 0..EGRESS_ATTEMPTS + 4 {
+            proxies.push(spawn_proxy(StatusCode::TOO_MANY_REQUESTS).await);
+        }
+        let client = ZenClient::new(ZenConfig {
+            base_url: "http://zen.invalid/v1".into(),
+            proxy_urls: proxies.iter().map(|(url, _)| authenticated(url)).collect(),
+            proxy_urls_file: None,
+        })
+        .unwrap();
+        async fn seen(proxies: &[(String, Requests)]) -> usize {
+            let mut total = 0;
+            for (_, requests) in proxies {
+                total += requests.lock().await.len();
+            }
+            total
+        }
+
+        let err = client
+            .send(None, &Bytes::from_static(b"{}"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                SendError::RateLimited {
+                    retry_after: Some(1),
+                    ..
+                }
+            ),
+            "{err}"
+        );
+        assert_eq!(seen(&proxies).await, EGRESS_ATTEMPTS);
+
+        let err = client
+            .send(None, &Bytes::from_static(b"{}"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, SendError::RateLimited { retry_after: Some(secs), .. } if secs > 1),
+            "{err}"
+        );
+        assert_eq!(seen(&proxies).await, EGRESS_ATTEMPTS + 4);
     }
 }

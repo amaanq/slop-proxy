@@ -113,6 +113,18 @@ pub fn translation_error(dialect: Dialect, msg: &str) -> Response {
     error_response(dialect, 400, "invalid_request_error", msg)
 }
 
+/// An untagged enum reports only that nothing matched, so the column serde
+/// stopped at is the sole evidence of which block the caller actually sent.
+pub fn body_at(body: &[u8], error: &serde_json::Error) -> String {
+    let column = error.column();
+    if column == 0 || column > body.len() {
+        return String::new();
+    }
+    let start = column.saturating_sub(220);
+    let end = (column + 60).min(body.len());
+    String::from_utf8_lossy(&body[start..end]).into_owned()
+}
+
 pub fn pool_error_status(e: &PoolError) -> i64 {
     match e {
         PoolError::NoAccounts(_) => 503,

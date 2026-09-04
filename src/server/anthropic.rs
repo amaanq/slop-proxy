@@ -94,7 +94,7 @@ pub async fn messages(
     let route = Route {
         session_key: &session_key,
         model: &req.model,
-        prefer_trusted: auth.prefer_trusted,
+        prefer_trusted: auth.limits.prefer_trusted,
     };
     let Dispatched {
         account_id,

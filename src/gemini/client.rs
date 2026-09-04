@@ -7,317 +7,321 @@ use crate::gemini::native;
 use crate::upstream::{Classify, SendError, classify};
 
 const RULES: Classify = Classify {
-    pass: |s| !matches!(s, 401 | 403 | 429 | 500..=599),
-    // A key restricted to an origin or with the API disabled answers
-    // 403, and no retry on another account makes that key work.
-    auth: &[401, 403],
-    reset_headers: &["x-ratelimit-reset-requests", "x-ratelimit-reset-tokens"],
+   pass: |s| !matches!(s, 401 | 403 | 429 | 500..=599),
+   // A key restricted to an origin or with the API disabled answers
+   // 403, and no retry on another account makes that key work.
+   auth: &[401, 403],
+   reset_headers: &["x-ratelimit-reset-requests", "x-ratelimit-reset-tokens"],
 };
 
 pub struct GeminiClient {
-    http: reqwest::Client,
-    cfg: GeminiConfig,
+   http: reqwest::Client,
+   cfg: GeminiConfig,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GeminiProtocol {
-    OpenAi,
-    Native,
+   OpenAi,
+   Native,
 }
 
 pub struct GeminiResponse {
-    pub response: reqwest::Response,
-    pub protocol: GeminiProtocol,
+   pub response: reqwest::Response,
+   pub protocol: GeminiProtocol,
 }
 
 impl GeminiClient {
-    pub fn new(cfg: GeminiConfig) -> Self {
-        let http = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(30))
-            .tcp_keepalive(std::time::Duration::from_secs(30))
-            .build()
-            .expect("building http client");
-        Self { http, cfg }
-    }
+   pub fn new(cfg: GeminiConfig) -> Self {
+      let http = reqwest::Client::builder()
+         .connect_timeout(std::time::Duration::from_secs(30))
+         .tcp_keepalive(std::time::Duration::from_secs(30))
+         .build()
+         .expect("building http client");
+      Self { http, cfg }
+   }
 
-    pub const fn soft_utilization_limit(&self) -> f64 {
-        self.cfg.soft_utilization_limit
-    }
+   pub const fn soft_utilization_limit(&self) -> f64 {
+      self.cfg.soft_utilization_limit
+   }
 
-    pub const fn retry_budget_duration(&self) -> std::time::Duration {
-        std::time::Duration::from_secs(self.cfg.retry_budget_secs)
-    }
+   pub const fn retry_budget_duration(&self) -> std::time::Duration {
+      std::time::Duration::from_secs(self.cfg.retry_budget_secs)
+   }
 
-    /// Google's OpenAI-compatible surface drops `Referer` before API-key
-    /// validation, so origin-restricted keys have to use the native surface.
-    pub async fn post(
-        &self,
-        api_key: &str,
-        account_referer: Option<&str>,
-        body: &ChatRequest,
-    ) -> Result<GeminiResponse, SendError> {
-        let configured_referer = self
+   /// Google's OpenAI-compatible surface drops `Referer` before API-key
+   /// validation, so origin-restricted keys have to use the native surface.
+   pub async fn post(
+      &self,
+      api_key: &str,
+      account_referer: Option<&str>,
+      body: &ChatRequest,
+   ) -> Result<GeminiResponse, SendError> {
+      let configured_referer = self
+         .cfg
+         .headers
+         .iter()
+         .find(|(name, _)| name.eq_ignore_ascii_case("referer"))
+         .map(|(_, value)| value.as_str());
+      let referer = account_referer.or(configured_referer);
+      let (mut req, protocol) = if let Some(referer) = referer {
+         let translated =
+            native::request(body).map_err(|e| SendError::BadRequest(e.to_string()))?;
+         let base = self.cfg.base_url.trim_end_matches('/');
+         let base = base.strip_suffix("/openai").unwrap_or(base);
+         let action = if translated.streaming {
+            "streamGenerateContent?alt=sse"
+         } else {
+            "generateContent"
+         };
+         let url = format!("{base}/models/{}:{action}", translated.model);
+         (
+            self
+               .http
+               .post(url)
+               .header("x-goog-api-key", api_key)
+               .header("referer", referer)
+               .json(&translated.body),
+            GeminiProtocol::Native,
+         )
+      } else {
+         (
+            self
+               .http
+               .post(format!(
+                  "{}/chat/completions",
+                  self.cfg.base_url.trim_end_matches('/')
+               ))
+               .bearer_auth(api_key)
+               .json(body),
+            GeminiProtocol::OpenAi,
+         )
+      };
+      for (name, value) in &self.cfg.headers {
+         if name.eq_ignore_ascii_case("referer") && referer.is_some() {
+            continue;
+         }
+         req = req.header(name, value);
+      }
+
+      let resp = req
+         .send()
+         .await
+         .map_err(|e| SendError::Network(e.to_string()))?;
+      let response = classify(resp, RULES).await?;
+      Ok(GeminiResponse { response, protocol })
+   }
+
+   /// A caller that already speaks the native dialect is relayed as-is, so
+   /// nothing round-trips through the `OpenAI` shape and back.
+   pub async fn send_native(
+      &self,
+      api_key: &str,
+      account_referer: Option<&str>,
+      model: &str,
+      action: &str,
+      query: Option<&str>,
+      body: &Bytes,
+   ) -> Result<reqwest::Response, SendError> {
+      let base = self.cfg.base_url.trim_end_matches('/');
+      let base = base.strip_suffix("/openai").unwrap_or(base);
+      let query = forwarded_query(query);
+      let mut req = self
+         .http
+         .post(format!("{base}/models/{model}:{action}{query}"))
+         .header("x-goog-api-key", api_key)
+         .header(reqwest::header::CONTENT_TYPE, "application/json")
+         .body(body.clone());
+      let referer = account_referer.or_else(|| {
+         self
             .cfg
             .headers
             .iter()
             .find(|(name, _)| name.eq_ignore_ascii_case("referer"))
-            .map(|(_, value)| value.as_str());
-        let referer = account_referer.or(configured_referer);
-        let (mut req, protocol) = if let Some(referer) = referer {
-            let translated =
-                native::request(body).map_err(|e| SendError::BadRequest(e.to_string()))?;
-            let base = self.cfg.base_url.trim_end_matches('/');
+            .map(|(_, v)| v.as_str())
+      });
+      if let Some(referer) = referer {
+         req = req.header("referer", referer);
+      }
+      for (name, value) in &self.cfg.headers {
+         if name.eq_ignore_ascii_case("referer") && referer.is_some() {
+            continue;
+         }
+         req = req.header(name, value);
+      }
+
+      let resp = req
+         .send()
+         .await
+         .map_err(|e| SendError::Network(e.to_string()))?;
+      classify(resp, RULES).await
+   }
+
+   /// The catalog carries no per-key state, so a restricted key can read it
+   /// from the native surface with the same referer the send path uses.
+   pub async fn models(
+      &self,
+      api_key: &str,
+      account_referer: Option<&str>,
+   ) -> Result<Vec<String>, SendError> {
+      let base = self.cfg.base_url.trim_end_matches('/');
+      let mut req = account_referer.map_or_else(
+         || self.http.get(format!("{base}/models")).bearer_auth(api_key),
+         |referer| {
             let base = base.strip_suffix("/openai").unwrap_or(base);
-            let action = if translated.streaming {
-                "streamGenerateContent?alt=sse"
-            } else {
-                "generateContent"
-            };
-            let url = format!("{base}/models/{}:{action}", translated.model);
-            (
-                self.http
-                    .post(url)
-                    .header("x-goog-api-key", api_key)
-                    .header("referer", referer)
-                    .json(&translated.body),
-                GeminiProtocol::Native,
-            )
-        } else {
-            (
-                self.http
-                    .post(format!(
-                        "{}/chat/completions",
-                        self.cfg.base_url.trim_end_matches('/')
-                    ))
-                    .bearer_auth(api_key)
-                    .json(body),
-                GeminiProtocol::OpenAi,
-            )
-        };
-        for (name, value) in &self.cfg.headers {
-            if name.eq_ignore_ascii_case("referer") && referer.is_some() {
-                continue;
-            }
-            req = req.header(name, value);
-        }
-
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| SendError::Network(e.to_string()))?;
-        let response = classify(resp, RULES).await?;
-        Ok(GeminiResponse { response, protocol })
-    }
-
-    /// A caller that already speaks the native dialect is relayed as-is, so
-    /// nothing round-trips through the `OpenAI` shape and back.
-    pub async fn send_native(
-        &self,
-        api_key: &str,
-        account_referer: Option<&str>,
-        model: &str,
-        action: &str,
-        query: Option<&str>,
-        body: &Bytes,
-    ) -> Result<reqwest::Response, SendError> {
-        let base = self.cfg.base_url.trim_end_matches('/');
-        let base = base.strip_suffix("/openai").unwrap_or(base);
-        let query = forwarded_query(query);
-        let mut req = self
-            .http
-            .post(format!("{base}/models/{model}:{action}{query}"))
-            .header("x-goog-api-key", api_key)
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(body.clone());
-        let referer = account_referer.or_else(|| {
-            self.cfg
-                .headers
-                .iter()
-                .find(|(name, _)| name.eq_ignore_ascii_case("referer"))
-                .map(|(_, v)| v.as_str())
-        });
-        if let Some(referer) = referer {
-            req = req.header("referer", referer);
-        }
-        for (name, value) in &self.cfg.headers {
-            if name.eq_ignore_ascii_case("referer") && referer.is_some() {
-                continue;
-            }
-            req = req.header(name, value);
-        }
-
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| SendError::Network(e.to_string()))?;
-        classify(resp, RULES).await
-    }
-
-    /// The catalog carries no per-key state, so a restricted key can read it
-    /// from the native surface with the same referer the send path uses.
-    pub async fn models(
-        &self,
-        api_key: &str,
-        account_referer: Option<&str>,
-    ) -> Result<Vec<String>, SendError> {
-        let base = self.cfg.base_url.trim_end_matches('/');
-        let mut req = account_referer.map_or_else(
-            || self.http.get(format!("{base}/models")).bearer_auth(api_key),
-            |referer| {
-                let base = base.strip_suffix("/openai").unwrap_or(base);
-                self.http
-                    .get(format!("{base}/models"))
-                    .header("x-goog-api-key", api_key)
-                    .header("referer", referer)
-            },
-        );
-        for (name, value) in &self.cfg.headers {
-            if name.eq_ignore_ascii_case("referer") && account_referer.is_some() {
-                continue;
-            }
-            req = req.header(name, value);
-        }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| SendError::Network(e.to_string()))?;
-        let resp = classify(resp, Classify::STRICT).await?;
-        let status = resp.status().as_u16();
-        let body: crate::gemini::types::ModelList =
-            resp.json().await.map_err(|e| SendError::Upstream {
-                status,
-                body: format!("parsing models response: {e}"),
-            })?;
-        // The two surfaces name the array differently, and the native one
-        // prefixes every id with `models/`.
-        let entries = if body.data.is_empty() {
-            body.models
-        } else {
-            body.data
-        };
-        let ids = entries
-            .into_iter()
-            .filter_map(|m| m.id.or(m.name))
-            .map(|id| id.trim_start_matches("models/").to_owned())
-            .collect();
-        Ok(ids)
-    }
+            self
+               .http
+               .get(format!("{base}/models"))
+               .header("x-goog-api-key", api_key)
+               .header("referer", referer)
+         },
+      );
+      for (name, value) in &self.cfg.headers {
+         if name.eq_ignore_ascii_case("referer") && account_referer.is_some() {
+            continue;
+         }
+         req = req.header(name, value);
+      }
+      let resp = req
+         .send()
+         .await
+         .map_err(|e| SendError::Network(e.to_string()))?;
+      let resp = classify(resp, Classify::STRICT).await?;
+      let status = resp.status().as_u16();
+      let body: crate::gemini::types::ModelList =
+         resp.json().await.map_err(|e| SendError::Upstream {
+            status,
+            body: format!("parsing models response: {e}"),
+         })?;
+      // The two surfaces name the array differently, and the native one
+      // prefixes every id with `models/`.
+      let entries = if body.data.is_empty() {
+         body.models
+      } else {
+         body.data
+      };
+      let ids = entries
+         .into_iter()
+         .filter_map(|m| m.id.or(m.name))
+         .map(|id| id.trim_start_matches("models/").to_owned())
+         .collect();
+      Ok(ids)
+   }
 }
 
 /// `alt=sse` decides whether the reply streams, so it has to survive, but
 /// `key` holds the caller's own token and upstream would reject it.
 fn forwarded_query(query: Option<&str>) -> String {
-    query
-        .map(|q| {
-            q.split('&')
-                .filter(|p| !p.starts_with("key="))
-                .collect::<Vec<_>>()
-                .join("&")
-        })
-        .filter(|q| !q.is_empty())
-        .map(|q| format!("?{q}"))
-        .unwrap_or_default()
+   query
+      .map(|q| {
+         q.split('&')
+            .filter(|p| !p.starts_with("key="))
+            .collect::<Vec<_>>()
+            .join("&")
+      })
+      .filter(|q| !q.is_empty())
+      .map(|q| format!("?{q}"))
+      .unwrap_or_default()
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+   use std::sync::{Arc, Mutex};
 
-    use axum::Json;
-    use axum::extract::Request;
-    use axum::routing::{get, post};
-    use serde_json::json;
+   use axum::Json;
+   use axum::extract::Request;
+   use axum::routing::{get, post};
+   use serde_json::json;
 
-    use super::*;
+   use super::*;
 
-    #[test]
-    fn the_callers_own_token_is_not_forwarded_upstream() {
-        assert_eq!(forwarded_query(Some("key=sp-secret")), "");
-        assert_eq!(forwarded_query(Some("alt=sse&key=sp-secret")), "?alt=sse");
-        assert_eq!(forwarded_query(Some("key=sp-secret&alt=sse")), "?alt=sse");
-        assert_eq!(forwarded_query(Some("alt=sse")), "?alt=sse");
-        assert_eq!(forwarded_query(None), "");
-    }
+   #[test]
+   fn the_callers_own_token_is_not_forwarded_upstream() {
+      assert_eq!(forwarded_query(Some("key=sp-secret")), "");
+      assert_eq!(forwarded_query(Some("alt=sse&key=sp-secret")), "?alt=sse");
+      assert_eq!(forwarded_query(Some("key=sp-secret&alt=sse")), "?alt=sse");
+      assert_eq!(forwarded_query(Some("alt=sse")), "?alt=sse");
+      assert_eq!(forwarded_query(None), "");
+   }
 
-    #[tokio::test]
-    async fn restricted_keys_use_the_native_auth_surface() {
-        let seen = Arc::new(Mutex::new(None));
-        let captured = Arc::clone(&seen);
-        let app = axum::Router::new().fallback(post(move |request: Request| {
-            let captured = Arc::clone(&captured);
-            async move {
-                let headers = request.headers().clone();
-                let uri = request.uri().clone();
-                *captured.lock().unwrap() = Some((headers, uri));
-                Json(json!({"candidates": []}))
-            }
-        }));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+   #[tokio::test]
+   async fn restricted_keys_use_the_native_auth_surface() {
+      let seen = Arc::new(Mutex::new(None));
+      let captured = Arc::clone(&seen);
+      let app = axum::Router::new().fallback(post(move |request: Request| {
+         let captured = Arc::clone(&captured);
+         async move {
+            let headers = request.headers().clone();
+            let uri = request.uri().clone();
+            *captured.lock().unwrap() = Some((headers, uri));
+            Json(json!({"candidates": []}))
+         }
+      }));
+      let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+      let address = listener.local_addr().unwrap();
+      tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-        let client = GeminiClient::new(GeminiConfig {
-            base_url: format!("http://{address}/v1beta/openai"),
-            ..GeminiConfig::default()
-        });
-        let response = client
-            .post(
-                "test-key",
-                Some("https://example.test/"),
-                &serde_json::from_value(json!({
-                    "model": "gemini-flash-latest",
-                    "messages": [{"role": "user", "content": "hi"}]
-                }))
-                .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.protocol, GeminiProtocol::Native);
+      let client = GeminiClient::new(GeminiConfig {
+         base_url: format!("http://{address}/v1beta/openai"),
+         ..GeminiConfig::default()
+      });
+      let response = client
+         .post(
+            "test-key",
+            Some("https://example.test/"),
+            &serde_json::from_value(json!({
+                "model": "gemini-flash-latest",
+                "messages": [{"role": "user", "content": "hi"}]
+            }))
+            .unwrap(),
+         )
+         .await
+         .unwrap();
+      assert_eq!(response.protocol, GeminiProtocol::Native);
 
-        let (headers, uri) = seen.lock().unwrap().take().unwrap();
-        assert_eq!(headers["x-goog-api-key"], "test-key");
-        assert_eq!(headers["referer"], "https://example.test/");
-        assert!(!headers.contains_key("authorization"));
-        assert_eq!(
-            uri.path(),
-            "/v1beta/models/gemini-flash-latest:generateContent"
-        );
-    }
+      let (headers, uri) = seen.lock().unwrap().take().unwrap();
+      assert_eq!(headers["x-goog-api-key"], "test-key");
+      assert_eq!(headers["referer"], "https://example.test/");
+      assert!(!headers.contains_key("authorization"));
+      assert_eq!(
+         uri.path(),
+         "/v1beta/models/gemini-flash-latest:generateContent"
+      );
+   }
 
-    #[tokio::test]
-    async fn an_empty_catalog_is_not_an_error() {
-        let app = axum::Router::new().route("/models", get(|| async { Json(json!({"data": []})) }));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+   #[tokio::test]
+   async fn an_empty_catalog_is_not_an_error() {
+      let app = axum::Router::new().route("/models", get(|| async { Json(json!({"data": []})) }));
+      let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+      let address = listener.local_addr().unwrap();
+      tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-        let client = GeminiClient::new(GeminiConfig {
-            base_url: format!("http://{address}"),
-            ..GeminiConfig::default()
-        });
-        assert_eq!(
-            client.models("test-key", None).await.unwrap(),
-            Vec::<String>::new()
-        );
-    }
+      let client = GeminiClient::new(GeminiConfig {
+         base_url: format!("http://{address}"),
+         ..GeminiConfig::default()
+      });
+      assert_eq!(
+         client.models("test-key", None).await.unwrap(),
+         Vec::<String>::new()
+      );
+   }
 
-    #[tokio::test]
-    async fn the_native_catalog_strips_the_models_prefix() {
-        let app = axum::Router::new().route(
-            "/models",
-            get(|| async { Json(json!({"models": [{"name": "models/gemini-x"}]})) }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+   #[tokio::test]
+   async fn the_native_catalog_strips_the_models_prefix() {
+      let app = axum::Router::new().route(
+         "/models",
+         get(|| async { Json(json!({"models": [{"name": "models/gemini-x"}]})) }),
+      );
+      let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+      let address = listener.local_addr().unwrap();
+      tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-        let client = GeminiClient::new(GeminiConfig {
-            base_url: format!("http://{address}"),
-            ..GeminiConfig::default()
-        });
-        assert_eq!(
-            client.models("test-key", None).await.unwrap(),
-            vec!["gemini-x".to_owned()]
-        );
-    }
+      let client = GeminiClient::new(GeminiConfig {
+         base_url: format!("http://{address}"),
+         ..GeminiConfig::default()
+      });
+      assert_eq!(
+         client.models("test-key", None).await.unwrap(),
+         vec!["gemini-x".to_owned()]
+      );
+   }
 }

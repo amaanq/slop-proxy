@@ -11,13 +11,13 @@ use crate::upstream::SendError;
 /// the translation entirely, but shares the retry and cooldown policy.
 #[derive(Clone)]
 pub enum Call {
-    OpenAi(Box<ChatRequest>),
-    Native {
-        model: String,
-        action: String,
-        query: Option<String>,
-        body: Bytes,
-    },
+   OpenAi(Box<ChatRequest>),
+   Native {
+      model: String,
+      action: String,
+      query: Option<String>,
+      body: Bytes,
+   },
 }
 
 /// Google answers a 429 with no retry-after and refills a token bucket rather
@@ -35,81 +35,79 @@ const STICKY_WAIT_SECS: i64 = RATE_LIMIT_COOLDOWN_SECS;
 pub type GeminiPool = Pool<GeminiClient>;
 
 impl Backend for GeminiClient {
-    const PROVIDER: Provider = Provider::Gemini;
-    const RATE_LIMIT: Cooldown = Cooldown {
-        max: 3600,
-        base: RATE_LIMIT_COOLDOWN_SECS,
-    };
-    // A static key cannot be refreshed into a working one, so a
-    // rejected key sits out rather than retrying in place.
-    const ON_AUTH: AuthPolicy = AuthPolicy::CoolKey(15 * 60);
-    const STICKY_WAIT_SECS: i64 = STICKY_WAIT_SECS;
-    type Request = Call;
-    type Response = GeminiResponse;
+   const PROVIDER: Provider = Provider::Gemini;
+   const RATE_LIMIT: Cooldown = Cooldown {
+      max: 3600,
+      base: RATE_LIMIT_COOLDOWN_SECS,
+   };
+   // A static key cannot be refreshed into a working one, so a
+   // rejected key sits out rather than retrying in place.
+   const ON_AUTH: AuthPolicy = AuthPolicy::CoolKey(15 * 60);
+   const STICKY_WAIT_SECS: i64 = STICKY_WAIT_SECS;
+   type Request = Call;
+   type Response = GeminiResponse;
 
-    fn reason(body: String) -> String {
-        crate::translate::chat::ChatError::reason(body)
-    }
+   fn reason(body: String) -> String {
+      crate::translate::chat::ChatError::reason(body)
+   }
 
-    fn soft_limit(&self) -> f64 {
-        self.soft_utilization_limit()
-    }
+   fn soft_limit(&self) -> f64 {
+      self.soft_utilization_limit()
+   }
 
-    fn retry_budget(&self) -> std::time::Duration {
-        Self::retry_budget_duration(self)
-    }
+   fn retry_budget(&self) -> std::time::Duration {
+      Self::retry_budget_duration(self)
+   }
 
-    async fn send(
-        &self,
-        token: &str,
-        slot: &Slot,
-        _route: Route<'_>,
-        req: &Self::Request,
-    ) -> Result<Self::Response, SendError> {
-        match req {
-            Call::OpenAi(body) => {
-                Self::post(self, token, slot.http_referer.as_deref(), body).await
-            }
-            Call::Native {
-                model,
-                action,
-                query,
-                body,
-            } => Self::send_native(
-                self,
-                token,
-                slot.http_referer.as_deref(),
-                model,
-                action,
-                query.as_deref(),
-                body,
-            )
-            .await
-            .map(|response| GeminiResponse {
-                response,
-                protocol: GeminiProtocol::Native,
-            }),
-        }
-    }
+   async fn send(
+      &self,
+      token: &str,
+      slot: &Slot,
+      _route: Route<'_>,
+      req: &Self::Request,
+   ) -> Result<Self::Response, SendError> {
+      match req {
+         Call::OpenAi(body) => Self::post(self, token, slot.http_referer.as_deref(), body).await,
+         Call::Native {
+            model,
+            action,
+            query,
+            body,
+         } => Self::send_native(
+            self,
+            token,
+            slot.http_referer.as_deref(),
+            model,
+            action,
+            query.as_deref(),
+            body,
+         )
+         .await
+         .map(|response| GeminiResponse {
+            response,
+            protocol: GeminiProtocol::Native,
+         }),
+      }
+   }
 }
 
 impl Pool<GeminiClient> {
-    /// The first account that answers. Every key sees the same catalog, so
-    /// there is nothing to merge across accounts.
-    pub async fn models(&self) -> Vec<String> {
-        for slot in self.slots.list().await {
-            let Ok(key) = self.slots.fresh_token(&slot, false).await else {
-                continue;
-            };
-            match self
-                .backend
-                .models(&key, slot.http_referer.as_deref())
-                .await
-            {
-                Ok(ids) => return ids,
-                Err(e) => tracing::debug!("models for {}: {e}", slot.display),
-            }
-        }
-        Vec::new()
-    }
+   /// The first account that answers. Every key sees the same catalog, so
+   /// there is nothing to merge across accounts.
+   pub async fn models(&self) -> Vec<String> {
+      for slot in self.slots.list().await {
+         let Ok(key) = self.slots.fresh_token(&slot, false).await else {
+            continue;
+         };
+         match self
+            .backend
+            .models(&key, slot.http_referer.as_deref())
+            .await
+         {
+            Ok(ids) => return ids,
+            Err(e) => tracing::debug!("models for {}: {e}", slot.display),
+         }
+      }
+      Vec::new()
+   }
 }

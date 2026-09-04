@@ -4,35 +4,40 @@ use super::chat::{
     ChatChoice, ChatChunk, ChatCompletion, ChatContent, ChatDelta, ChatError, ChatErrorBody,
     ChatMessage, ChatToolCall, ChatUsage, ChunkChoice, FinishReason, FunctionBody,
 };
-use super::{Aggregated, Block, StopKind, UsageCapture};
-use crate::codex::types::{OutputItem, ResponsesEvent, Usage};
+use super::{Aggregated, Block, Step, StopKind, UsageCapture, Walker};
+use crate::codex::types::ResponsesEvent;
 
 pub struct OpenAiStream {
     model: String,
     id: String,
     created: i64,
     include_usage: bool,
-    tool_index: u64,
-    tool_open: bool,
-    tool_args_seen: bool,
-    saw_tool: bool,
+    tool_index: Option<u64>,
     reasoning_seen: bool,
-    pub done: bool,
-    capture: UsageCapture,
+    separator_due: bool,
+    walker: Walker,
 }
 
 fn to_json<T: Serialize>(payload: T) -> String {
     serde_json::to_string(&payload).expect("chunk serializes")
 }
 
-fn finish_reason_str(reason: FinishReason) -> &'static str {
-    match reason {
-        FinishReason::Stop => "stop",
-        FinishReason::Length => "length",
-        FinishReason::ToolCalls => "tool_calls",
-        FinishReason::ContentFilter => "content_filter",
-        FinishReason::Other => "other",
+fn finish_reason(kind: StopKind) -> FinishReason {
+    match kind {
+        StopKind::ToolUse => FinishReason::ToolCalls,
+        StopKind::MaxTokens => FinishReason::Length,
+        StopKind::EndTurn | StopKind::Error => FinishReason::Stop,
     }
+}
+
+fn error_chunk(message: String) -> String {
+    to_json(ChatError {
+        error: ChatErrorBody {
+            message,
+            kind: Some("api_error".into()),
+            code: None,
+        },
+    })
 }
 
 impl OpenAiStream {
@@ -42,21 +47,33 @@ impl OpenAiStream {
             id: format!("chatcmpl-{}", uuid::Uuid::new_v4().simple()),
             created: crate::clock::unix_now(),
             include_usage,
-            tool_index: 0,
-            tool_open: false,
-            tool_args_seen: false,
-            saw_tool: false,
+            tool_index: None,
             reasoning_seen: false,
-            done: false,
-            capture,
+            separator_due: false,
+            walker: Walker::new(capture),
         }
     }
 
     pub fn handle(&mut self, ev: ResponsesEvent) -> Vec<String> {
         let mut out = Vec::new();
-        match ev {
-            ResponsesEvent::Created { response } => {
-                if let Some(id) = response.id {
+        for step in self.walker.step(ev) {
+            self.render(&mut out, step);
+        }
+        out
+    }
+
+    pub fn finalize(&mut self) -> Vec<String> {
+        let mut out = Vec::new();
+        for step in self.walker.eof() {
+            self.render(&mut out, step);
+        }
+        out
+    }
+
+    fn render(&mut self, out: &mut Vec<String>, step: Step) {
+        match step {
+            Step::Start { id } => {
+                if let Some(id) = id {
                     self.id = format!("chatcmpl-{id}");
                 }
                 out.push(self.chunk(
@@ -68,52 +85,37 @@ impl OpenAiStream {
                     None,
                 ));
             }
-            ResponsesEvent::OutputTextDelta { delta, .. } => {
-                out.push(self.chunk(
-                    ChatDelta {
-                        content: Some(delta),
-                        ..Default::default()
-                    },
-                    None,
-                ));
-            }
-            ResponsesEvent::ReasoningSummaryTextDelta { delta }
-            | ResponsesEvent::ReasoningTextDelta { delta } => {
+            Step::Text(content) => out.push(self.chunk(
+                ChatDelta {
+                    content: Some(content),
+                    ..Default::default()
+                },
+                None,
+            )),
+            Step::OpenThinking => self.separator_due = self.reasoning_seen,
+            Step::Thinking(delta) => {
+                let reasoning_content = if std::mem::take(&mut self.separator_due) {
+                    format!("\n\n{delta}")
+                } else {
+                    delta
+                };
                 self.reasoning_seen = true;
                 out.push(self.chunk(
                     ChatDelta {
-                        reasoning_content: Some(delta),
+                        reasoning_content: Some(reasoning_content),
                         ..Default::default()
                     },
                     None,
                 ));
             }
-            ResponsesEvent::ReasoningSummaryPartAdded {} => {
-                if self.reasoning_seen {
-                    out.push(self.chunk(
-                        ChatDelta {
-                            reasoning_content: Some("\n\n".into()),
-                            ..Default::default()
-                        },
-                        None,
-                    ));
-                }
-            }
-            ResponsesEvent::OutputItemAdded {
-                item: OutputItem::FunctionCall { call_id, name, .. },
-                ..
-            } => {
-                if self.saw_tool {
-                    self.tool_index += 1;
-                }
-                self.tool_open = true;
-                self.tool_args_seen = false;
-                self.saw_tool = true;
+            Step::OpenCall { id, name } => {
+                let index = self.tool_index.map_or(0, |i| i + 1);
+                self.tool_index = Some(index);
                 out.push(self.chunk(
                     ChatDelta {
                         tool_calls: Some(vec![ChatToolCall {
-                            index: Some(self.tool_index),
-                            id: Some(call_id),
+                            index: Some(index),
+                            id: Some(id),
                             kind: Some("function".into()),
                             function: FunctionBody {
                                 name: Some(name),
@@ -126,104 +128,37 @@ impl OpenAiStream {
                     None,
                 ));
             }
-            ResponsesEvent::FunctionCallArgumentsDelta { delta, .. } => {
-                if self.tool_open {
-                    self.tool_args_seen = true;
-                    out.push(self.args_chunk(delta));
-                }
-            }
-            ResponsesEvent::OutputItemDone {
-                item: OutputItem::FunctionCall { arguments, .. },
-                ..
-            } => {
-                if self.tool_open
-                    && !self.tool_args_seen
-                    && let Some(args) = arguments.filter(|a| !a.is_empty())
-                {
-                    out.push(self.args_chunk(args));
-                }
-                self.tool_open = false;
-            }
-            ResponsesEvent::Completed { response } => {
-                let reason = if self.saw_tool {
-                    FinishReason::ToolCalls
-                } else {
-                    FinishReason::Stop
-                };
-                self.finish(&mut out, response.usage, reason);
-            }
-            ResponsesEvent::Incomplete { response } => {
-                self.finish(&mut out, response.usage, FinishReason::Length);
-            }
-            ResponsesEvent::Failed { response } => {
-                let msg = response
-                    .error
-                    .and_then(|e| e.message)
-                    .unwrap_or_else(|| "upstream response failed".into());
-                out.push(to_json(ChatError {
-                    error: ChatErrorBody {
-                        message: msg,
-                        kind: Some("api_error".into()),
-                        code: None,
-                    },
-                }));
-                self.capture.fail("upstream_failed");
-                self.done = true;
-            }
-            _ => {}
-        }
-        out
-    }
-
-    pub fn finalize(&mut self) -> Vec<String> {
-        if self.done {
-            return Vec::new();
-        }
-        self.done = true;
-        self.capture.fail("midstream");
-        vec![to_json(ChatError {
-            error: ChatErrorBody {
-                message: "upstream stream ended unexpectedly".into(),
-                kind: Some("api_error".into()),
-                code: None,
-            },
-        })]
-    }
-
-    fn finish(&mut self, out: &mut Vec<String>, usage: Option<Usage>, reason: FinishReason) {
-        let usage = usage.unwrap_or_default();
-        self.capture.record(&usage);
-        self.capture.note_stop_reason(finish_reason_str(reason));
-        out.push(self.chunk(ChatDelta::default(), Some(reason)));
-        if self.include_usage {
-            out.push(to_json(ChatChunk {
-                id: self.id.clone(),
-                object: "chat.completion.chunk".into(),
-                created: self.created,
-                model: self.model.clone(),
-                choices: Vec::new(),
-                usage: Some(ChatUsage::from(&usage)),
-                error: None,
-            }));
-        }
-        self.done = true;
-    }
-
-    fn args_chunk(&self, arguments: String) -> String {
-        self.chunk(
-            ChatDelta {
-                tool_calls: Some(vec![ChatToolCall {
-                    index: Some(self.tool_index),
-                    function: FunctionBody {
-                        name: None,
-                        arguments: Some(arguments),
-                    },
+            Step::Args(arguments) => out.push(self.chunk(
+                ChatDelta {
+                    tool_calls: Some(vec![ChatToolCall {
+                        index: self.tool_index,
+                        function: FunctionBody {
+                            name: None,
+                            arguments: Some(arguments),
+                        },
+                        ..Default::default()
+                    }]),
                     ..Default::default()
-                }]),
-                ..Default::default()
-            },
-            None,
-        )
+                },
+                None,
+            )),
+            Step::Stop { kind, usage } => {
+                out.push(self.chunk(ChatDelta::default(), Some(finish_reason(kind))));
+                if self.include_usage {
+                    out.push(to_json(ChatChunk {
+                        id: self.id.clone(),
+                        object: "chat.completion.chunk".into(),
+                        created: self.created,
+                        model: self.model.clone(),
+                        choices: Vec::new(),
+                        usage: Some(ChatUsage::from(&usage)),
+                        error: None,
+                    }));
+                }
+            }
+            Step::Failed { message, .. } => out.push(error_chunk(message)),
+            Step::OpenText | Step::Signature(_) | Step::CloseBlock => {}
+        }
     }
 
     fn chunk(&self, delta: ChatDelta, finish_reason: Option<FinishReason>) -> String {
@@ -275,11 +210,6 @@ pub fn render_aggregated(agg: &Aggregated, model: &str) -> ChatCompletion {
         }
     }
 
-    let finish_reason = match agg.stop {
-        StopKind::ToolUse => FinishReason::ToolCalls,
-        StopKind::MaxTokens => FinishReason::Length,
-        _ => FinishReason::Stop,
-    };
     ChatCompletion {
         id: format!("chatcmpl-{}", agg.id),
         object: "chat.completion".into(),
@@ -294,7 +224,7 @@ pub fn render_aggregated(agg: &Aggregated, model: &str) -> ChatCompletion {
                 tool_calls: Some(tool_calls).filter(|t| !t.is_empty()),
                 ..Default::default()
             },
-            finish_reason: Some(finish_reason),
+            finish_reason: Some(finish_reason(agg.stop)),
             logprobs: None,
         }],
         usage: Some(ChatUsage::from(&agg.usage)),
@@ -306,7 +236,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::codex::types::{ResponseObj, UpstreamError};
+    use crate::codex::types::{OutputItem, ResponseObj, UpstreamError};
 
     #[test]
     fn tool_call_indices_start_at_zero_and_count_up() {

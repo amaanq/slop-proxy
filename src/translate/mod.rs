@@ -204,6 +204,227 @@ pub struct Aggregated {
     pub completed: bool,
 }
 
+pub enum Step {
+    Start {
+        id: Option<String>,
+    },
+    OpenThinking,
+    Thinking(String),
+    Signature(String),
+    OpenText,
+    Text(String),
+    OpenCall {
+        id: String,
+        name: String,
+    },
+    Args(String),
+    CloseBlock,
+    Stop {
+        kind: StopKind,
+        usage: Usage,
+    },
+    Failed {
+        message: String,
+        code: Option<String>,
+    },
+}
+
+#[derive(PartialEq, Clone, Copy)]
+enum Open {
+    Thinking,
+    Text,
+    Call,
+}
+
+/// The one state machine every consumer of a Responses stream shares.
+pub struct Walker {
+    open: Option<Open>,
+    saw_tool: bool,
+    text_seen: bool,
+    args_seen: bool,
+    done: bool,
+    capture: UsageCapture,
+}
+
+impl Walker {
+    pub fn new(capture: UsageCapture) -> Self {
+        Self {
+            open: None,
+            saw_tool: false,
+            text_seen: false,
+            args_seen: false,
+            done: false,
+            capture,
+        }
+    }
+
+    pub fn step(&mut self, ev: ResponsesEvent) -> Vec<Step> {
+        let mut out = Vec::new();
+        if self.done {
+            return out;
+        }
+        match ev {
+            ResponsesEvent::Created { response } => out.push(Step::Start { id: response.id }),
+            ResponsesEvent::OutputItemAdded { item, .. } => match item {
+                OutputItem::Reasoning { .. } => self.open(&mut out, Open::Thinking),
+                OutputItem::FunctionCall { call_id, name, .. } => {
+                    self.open(&mut out, Open::Call);
+                    out.push(Step::OpenCall { id: call_id, name });
+                }
+                _ => {}
+            },
+            ResponsesEvent::ReasoningSummaryPartAdded {} => {
+                if self.open == Some(Open::Thinking) && self.text_seen {
+                    out.push(Step::Thinking("\n\n".into()));
+                }
+            }
+            ResponsesEvent::ReasoningSummaryTextDelta { delta }
+            | ResponsesEvent::ReasoningTextDelta { delta } => {
+                self.ensure(&mut out, Open::Thinking);
+                self.text_seen = true;
+                out.push(Step::Thinking(delta));
+            }
+            ResponsesEvent::OutputTextDelta { delta, .. } => {
+                self.ensure(&mut out, Open::Text);
+                self.text_seen = true;
+                out.push(Step::Text(delta));
+            }
+            ResponsesEvent::FunctionCallArgumentsDelta { delta, .. } => {
+                if self.open == Some(Open::Call) {
+                    self.args_seen = true;
+                    out.push(Step::Args(delta));
+                }
+            }
+            ResponsesEvent::OutputItemDone { item, .. } => match item {
+                OutputItem::Reasoning {
+                    id,
+                    summary,
+                    encrypted_content,
+                } => {
+                    self.ensure(&mut out, Open::Thinking);
+                    let text = summary
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|SummaryPart::SummaryText { text }| text.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n\n");
+                    if !self.text_seen && !text.is_empty() {
+                        out.push(Step::Thinking(text));
+                    }
+                    if let Some(ec) = encrypted_content {
+                        out.push(Step::Signature(encode_signature(id.as_deref(), &ec)));
+                    }
+                    self.close(&mut out);
+                }
+                OutputItem::Message { content, .. } => {
+                    let text = content
+                        .unwrap_or_default()
+                        .iter()
+                        .filter_map(|p| match p {
+                            OutputContentPart::OutputText { text } => Some(text.as_str()),
+                            OutputContentPart::Other => None,
+                        })
+                        .collect::<String>();
+                    if self.open != Some(Open::Text) && !text.is_empty() {
+                        self.open(&mut out, Open::Text);
+                        out.push(Step::Text(text));
+                    }
+                    self.close(&mut out);
+                }
+                OutputItem::FunctionCall {
+                    call_id,
+                    name,
+                    arguments,
+                    ..
+                } => {
+                    if self.open != Some(Open::Call) {
+                        self.open(&mut out, Open::Call);
+                        out.push(Step::OpenCall { id: call_id, name });
+                    }
+                    if !self.args_seen
+                        && let Some(args) = arguments.filter(|a| !a.is_empty())
+                    {
+                        out.push(Step::Args(args));
+                    }
+                    self.close(&mut out);
+                }
+                OutputItem::Other | OutputItem::CustomToolCall { .. } => {}
+            },
+            ResponsesEvent::Completed { response } => {
+                let kind = if self.saw_tool {
+                    StopKind::ToolUse
+                } else {
+                    StopKind::EndTurn
+                };
+                self.stop(&mut out, kind, response.usage);
+            }
+            ResponsesEvent::Incomplete { response } => {
+                self.stop(&mut out, StopKind::MaxTokens, response.usage);
+            }
+            ResponsesEvent::Failed { response } => {
+                let (message, code) = response
+                    .error
+                    .map(|e| (e.message, e.code))
+                    .unwrap_or_default();
+                let message = message.unwrap_or_else(|| "upstream response failed".into());
+                self.capture.fail("upstream_failed");
+                self.capture.note_stop_reason(StopKind::Error.as_str());
+                self.done = true;
+                out.push(Step::Failed { message, code });
+            }
+            _ => {}
+        }
+        out
+    }
+
+    pub fn eof(&mut self) -> Vec<Step> {
+        if self.done {
+            return Vec::new();
+        }
+        self.done = true;
+        self.capture.fail("midstream");
+        vec![Step::Failed {
+            message: "upstream stream ended unexpectedly".into(),
+            code: None,
+        }]
+    }
+
+    fn ensure(&mut self, out: &mut Vec<Step>, kind: Open) {
+        if self.open != Some(kind) {
+            self.open(out, kind);
+        }
+    }
+
+    fn open(&mut self, out: &mut Vec<Step>, kind: Open) {
+        self.close(out);
+        self.open = Some(kind);
+        self.text_seen = false;
+        match kind {
+            Open::Thinking => out.push(Step::OpenThinking),
+            Open::Text => out.push(Step::OpenText),
+            Open::Call => {
+                self.saw_tool = true;
+                self.args_seen = false;
+            }
+        }
+    }
+
+    fn close(&mut self, out: &mut Vec<Step>) {
+        if self.open.take().is_some() {
+            out.push(Step::CloseBlock);
+        }
+    }
+
+    fn stop(&mut self, out: &mut Vec<Step>, kind: StopKind, usage: Option<Usage>) {
+        self.close(out);
+        let usage = usage.unwrap_or_default();
+        self.capture.record(&usage);
+        self.capture.note_stop_reason(kind.as_str());
+        self.done = true;
+        out.push(Step::Stop { kind, usage });
+    }
+}
+
 pub async fn aggregate(mut stream: EventStream, capture: &UsageCapture) -> Aggregated {
     let mut agg = Aggregated {
         id: format!("resp_{}", uuid::Uuid::new_v4().simple()),
@@ -213,100 +434,58 @@ pub async fn aggregate(mut stream: EventStream, capture: &UsageCapture) -> Aggre
         error_message: None,
         completed: false,
     };
-    let mut saw_tool = false;
-
+    let mut walker = Walker::new(capture.clone());
+    let mut steps = Vec::new();
     while let Some(ev) = stream.next().await {
-        match ev {
-            ResponsesEvent::Created { response } => {
-                if let Some(id) = response.id {
-                    agg.id = id;
-                }
+        steps.extend(walker.step(ev));
+    }
+    steps.extend(walker.eof());
+    for step in steps {
+        agg.fold(step);
+    }
+    agg
+}
+
+impl Aggregated {
+    fn fold(&mut self, step: Step) {
+        match (step, self.blocks.last_mut()) {
+            (Step::Start { id: Some(id) }, _) => self.id = id,
+            (Step::OpenThinking, _) => self.blocks.push(Block::Thinking {
+                text: String::new(),
+                signature: None,
+            }),
+            (Step::OpenText, _) => self.blocks.push(Block::Text {
+                text: String::new(),
+            }),
+            (Step::OpenCall { id, name }, _) => self.blocks.push(Block::ToolCall {
+                id,
+                name,
+                arguments: String::new(),
+            }),
+            (Step::Thinking(s), Some(Block::Thinking { text, .. }))
+            | (Step::Text(s), Some(Block::Text { text }))
+            | (
+                Step::Args(s),
+                Some(Block::ToolCall {
+                    arguments: text, ..
+                }),
+            ) => text.push_str(&s),
+            (Step::Signature(s), Some(Block::Thinking { signature, .. })) => *signature = Some(s),
+            (Step::CloseBlock, Some(Block::ToolCall { arguments, .. })) if arguments.is_empty() => {
+                arguments.push_str("{}");
             }
-            ResponsesEvent::OutputItemDone { item, .. } => match item {
-                OutputItem::Message { content, .. } => {
-                    let text = content
-                        .unwrap_or_default()
-                        .iter()
-                        .filter_map(|p| match p {
-                            OutputContentPart::OutputText { text } => Some(text.as_str()),
-                            OutputContentPart::Other => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join("");
-                    agg.blocks.push(Block::Text { text });
-                }
-                OutputItem::Reasoning {
-                    id,
-                    summary,
-                    encrypted_content,
-                } => {
-                    let text = summary
-                        .unwrap_or_default()
-                        .iter()
-                        .map(|SummaryPart::SummaryText { text }| text.clone())
-                        .collect::<Vec<_>>()
-                        .join("\n\n");
-                    let signature =
-                        encrypted_content.map(|ec| encode_signature(id.as_deref(), &ec));
-                    agg.blocks.push(Block::Thinking { text, signature });
-                }
-                OutputItem::FunctionCall {
-                    call_id,
-                    name,
-                    arguments,
-                    ..
-                } => {
-                    saw_tool = true;
-                    agg.blocks.push(Block::ToolCall {
-                        id: call_id,
-                        name,
-                        arguments: arguments.unwrap_or_else(|| "{}".into()),
-                    });
-                }
-                OutputItem::Other | OutputItem::CustomToolCall { .. } => {}
-            },
-            ResponsesEvent::Completed { response } => {
-                if let Some(u) = &response.usage {
-                    agg.usage = u.clone();
-                    capture.record(u);
-                }
-                agg.stop = if saw_tool {
-                    StopKind::ToolUse
-                } else {
-                    StopKind::EndTurn
-                };
-                agg.completed = true;
-                capture.note_stop_reason(agg.stop.as_str());
+            (Step::Stop { kind, usage }, _) => {
+                self.stop = kind;
+                self.usage = usage;
+                self.completed = true;
             }
-            ResponsesEvent::Incomplete { response } => {
-                if let Some(u) = &response.usage {
-                    agg.usage = u.clone();
-                    capture.record(u);
-                }
-                agg.stop = StopKind::MaxTokens;
-                agg.completed = true;
-                capture.note_stop_reason(agg.stop.as_str());
-            }
-            ResponsesEvent::Failed { response } => {
-                let msg = response
-                    .error
-                    .and_then(|e| e.message)
-                    .unwrap_or_else(|| "upstream response failed".into());
-                agg.error_message = Some(msg);
-                agg.stop = StopKind::Error;
-                agg.completed = true;
-                capture.fail("upstream_failed");
-                capture.note_stop_reason(agg.stop.as_str());
+            (Step::Failed { message, .. }, _) => {
+                self.error_message = Some(message);
+                self.stop = StopKind::Error;
             }
             _ => {}
         }
     }
-    if !agg.completed {
-        agg.error_message = Some("upstream stream ended unexpectedly".into());
-        agg.stop = StopKind::Error;
-        capture.fail("midstream");
-    }
-    agg
 }
 
 #[cfg(test)]

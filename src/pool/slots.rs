@@ -148,9 +148,9 @@ pub struct AccountSnapshot {
 /// The per-account state machine shared by both backend pools: cooldown
 /// bookkeeping and serialized token refresh. Selection strategy stays with
 /// the owning pool.
-pub(crate) struct Slots {
+pub struct Slots {
     provider: Provider,
-    slots: RwLock<Vec<Arc<Slot>>>,
+    inner: RwLock<Vec<Arc<Slot>>>,
     db: Db,
 }
 
@@ -158,7 +158,7 @@ impl Slots {
     pub async fn load(db: Db, provider: Provider) -> eyre::Result<Self> {
         let slots = Self {
             provider,
-            slots: RwLock::new(Vec::new()),
+            inner: RwLock::new(Vec::new()),
             db,
         };
         slots.reload().await?;
@@ -178,7 +178,7 @@ impl Slots {
             .filter(|a| a.provider == self.provider)
             .collect();
 
-        let mut slots = self.slots.write().await;
+        let mut slots = self.inner.write().await;
         let mut next = Vec::with_capacity(accounts.len());
         let mut added = 0;
         for a in accounts {
@@ -189,7 +189,7 @@ impl Slots {
             match existing {
                 // Swapping an unchanged slot would strand an in-flight
                 // cooldown write on the orphaned Arc.
-                Some(s) if slot_matches(s, &a) => next.push(s.clone()),
+                Some(s) if slot_matches(s, &a) => next.push(Arc::clone(s)),
                 Some(s) => next.push(Arc::new(reslot(&a, s).await)),
                 None => {
                     added += 1;
@@ -212,15 +212,12 @@ impl Slots {
     }
 
     pub async fn len(&self) -> usize {
-        self.slots.read().await.len()
+        self.inner.read().await.len()
     }
 
-    pub async fn is_empty(&self) -> bool {
-        self.slots.read().await.is_empty()
-    }
 
     pub async fn list(&self) -> Vec<Arc<Slot>> {
-        self.slots.read().await.clone()
+        self.inner.read().await.clone()
     }
 
     /// Claims the slot for a request if it is not disabled or cooling down.
@@ -230,7 +227,7 @@ impl Slots {
         match st.status {
             Status::Disabled => false,
             Status::Cooldown { until } if until > now => false,
-            _ => {
+            Status::Active | Status::Cooldown { .. } => {
                 st.status = Status::Active;
                 true
             }
@@ -266,9 +263,8 @@ impl Slots {
         for slot in &slots {
             let st = slot.state.lock().await;
             let (status, cooldown_seconds) = match st.status {
-                Status::Active => (0, 0),
                 Status::Cooldown { until } if until > now => (1, until - now),
-                Status::Cooldown { .. } => (0, 0),
+                Status::Active | Status::Cooldown { .. } => (0, 0),
                 Status::Disabled => (2, 0),
             };
             out.push(AccountSnapshot {
@@ -294,7 +290,7 @@ impl Slots {
         if !slot.auth_mode.refreshable() {
             return Ok(st.access_token.clone());
         }
-        if !force && st.expires_at.map(|e| e - now > 60).unwrap_or(false) {
+        if !force && st.expires_at.is_some_and(|e| e - now > 60) {
             return Ok(st.access_token.clone());
         }
         tracing::info!(
@@ -321,7 +317,7 @@ impl Slots {
                     tracing::error!("persisting refreshed tokens for {}: {e}", slot.display);
                     return Err(());
                 }
-                st.access_token = tokens.access_token.clone();
+                st.access_token.clone_from(&tokens.access_token);
                 st.refresh_token = tokens.refresh_token;
                 st.expires_at = tokens.expires_at;
                 Ok(tokens.access_token)
@@ -375,14 +371,14 @@ impl Slots {
     ) {
         let fails = slot.state.lock().await.consecutive_fails;
         let secs = retry_after
-            .unwrap_or(base.saturating_mul(1 << fails.min(6)))
+            .unwrap_or_else(|| base.saturating_mul(1 << fails.min(6)))
             .clamp(base.min(30), max);
         self.cool(slot, secs, "rate limited").await;
     }
 
     pub async fn cool_failure(&self, slot: &Slot) {
         let fails = slot.state.lock().await.consecutive_fails;
-        let secs = 15i64.saturating_mul(1 << fails.min(6)).min(900);
+        let secs = 15_i64.saturating_mul(1 << fails.min(6)).min(900);
         self.cool(slot, secs, "upstream failure").await;
     }
 
@@ -391,7 +387,7 @@ impl Slots {
         let now = crate::clock::unix_now();
         match slot.state.lock().await.status {
             Status::Cooldown { until } if until > now => until - now,
-            _ => 0,
+            Status::Active | Status::Disabled | Status::Cooldown { .. } => 0,
         }
     }
 
@@ -411,7 +407,7 @@ impl Slots {
 /// Rendezvous score for a session against a slot. Ordering by it keeps a
 /// conversation on one account, which is what lets an upstream prompt cache
 /// keep hitting instead of paying for the whole prefix again.
-pub(crate) fn rendezvous_score(session: &str, id: i64) -> u64 {
+pub fn rendezvous_score(session: &str, id: i64) -> u64 {
     let mut h = hmac_sha256::Hash::new();
     h.update(session.as_bytes());
     h.update(id.to_le_bytes());
@@ -426,10 +422,8 @@ fn display_for(a: &crate::db::accounts::Account) -> String {
 }
 
 fn slot_matches(s: &Slot, a: &crate::db::accounts::Account) -> bool {
-    s.trusted == a.trusted
-        && s.plan == a.plan_type
-        && s.display == display_for(a)
-        && s.http_referer == a.http_referer
+    (s.trusted, &s.plan, &s.display, &s.http_referer)
+        == (a.trusted, &a.plan_type, &display_for(a), &a.http_referer)
 }
 
 /// A fresh slot carrying the previous one's cooldown, tokens and quota sample.
@@ -461,7 +455,7 @@ fn slot_from_account(a: crate::db::accounts::Account) -> Slot {
         AccountStatus::Cooldown if a.cooldown_until.unwrap_or(0) > now => Status::Cooldown {
             until: a.cooldown_until.unwrap_or(0),
         },
-        _ => Status::Active,
+        AccountStatus::Active | AccountStatus::Cooldown => Status::Active,
     };
     Slot {
         id: a.id,
@@ -486,10 +480,10 @@ fn slot_from_account(a: crate::db::accounts::Account) -> Slot {
 }
 
 #[cfg(test)]
-pub(crate) fn test_slots(db: Db, provider: Provider, ids: &[(i64, bool)]) -> Slots {
+pub fn test_slots(db: Db, provider: Provider, ids: &[(i64, bool)]) -> Slots {
     Slots {
         provider,
-        slots: RwLock::new(
+        inner: RwLock::new(
             ids.iter()
                 .map(|&(id, trusted)| {
                     Arc::new(Slot {
@@ -499,7 +493,7 @@ pub(crate) fn test_slots(db: Db, provider: Provider, ids: &[(i64, bool)]) -> Slo
                         trusted,
                         auth_mode: match provider {
                             Provider::OpenAi | Provider::Anthropic => AuthMode::OAuth,
-                            _ => AuthMode::ApiKey,
+                            Provider::Gemini | Provider::Glm | Provider::Zen => AuthMode::ApiKey,
                         },
                         plan: None,
                         http_referer: None,
@@ -528,7 +522,7 @@ mod band_tests {
             windows: windows
                 .iter()
                 .map(|(name, utilization, resets_in)| UsageWindow {
-                    name: (*name).to_string(),
+                    name: (*name).to_owned(),
                     utilization: *utilization,
                     resets_at: Some(now + resets_in),
                 })

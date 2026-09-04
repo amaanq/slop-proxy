@@ -1,5 +1,5 @@
-use eyre::{Result, WrapErr, bail, eyre};
-use rand::RngCore;
+use eyre::{Result, WrapErr as _, bail, eyre};
+use rand::RngCore as _;
 use reqwest::Url;
 use serde::Deserialize;
 
@@ -16,7 +16,17 @@ pub const SCOPES: &str = "org:create_api_key user:profile user:inference";
 pub const PROFILE_URL: &str = "https://api.anthropic.com/api/oauth/profile";
 
 pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
-    let mut raw = [0u8; 32];
+    #[derive(serde::Serialize)]
+    struct ExchangeRequest<'a> {
+        grant_type: &'a str,
+        code: &'a str,
+        state: &'a str,
+        client_id: &'a str,
+        redirect_uri: &'a str,
+        code_verifier: &'a str,
+    }
+
+    let mut raw = [0_u8; 32];
     rand::thread_rng().fill_bytes(&mut raw);
     let verifier = data_encoding::BASE64URL_NOPAD.encode(&raw);
     let challenge =
@@ -48,16 +58,6 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
         .unwrap_or((pasted, verifier.as_str()));
     if state != verifier {
         bail!("state mismatch, paste the whole code");
-    }
-
-    #[derive(serde::Serialize)]
-    struct ExchangeRequest<'a> {
-        grant_type: &'a str,
-        code: &'a str,
-        state: &'a str,
-        client_id: &'a str,
-        redirect_uri: &'a str,
-        code_verifier: &'a str,
     }
 
     let resp = super::http()

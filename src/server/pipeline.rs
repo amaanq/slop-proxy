@@ -7,8 +7,10 @@ use std::convert::Infallible;
 use axum::body::{Body, Bytes};
 use axum::http::response::Builder;
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::response::{IntoResponse, Response};
-use futures_util::{StreamExt, stream};
+use axum::response::Response;
+use axum::response::IntoResponse as _;
+use futures_util::stream;
+use futures_util::StreamExt as _;
 
 use super::auth::AuthInfo;
 use super::error::{Dialect, error_response, pool_error_response, pool_error_status};
@@ -69,7 +71,7 @@ pub async fn read_body(
     })
 }
 
-pub fn apply_snapshot(record: &mut UsageRecord, snap: &CapturedUsage) {
+pub const fn apply_snapshot(record: &mut UsageRecord, snap: &CapturedUsage) {
     record.input_tokens = snap.input_tokens;
     record.output_tokens = snap.output_tokens;
     record.cache_read_tokens = snap.cache_read_tokens;
@@ -79,15 +81,19 @@ pub fn apply_snapshot(record: &mut UsageRecord, snap: &CapturedUsage) {
 
 /// Upstream bytes to the client, `each` seeing every chunk on the way (and
 /// free to rewrite it), `tail` appended once upstream closes.
-pub fn relayed(
+pub fn relayed<F, T>(
     builder: Builder,
     resp: reqwest::Response,
     guard: LogGuard,
     capture: UsageCapture,
     dialect: Dialect,
-    mut each: impl FnMut(Bytes) -> Bytes + Send + 'static,
-    tail: impl FnOnce() -> Bytes + Send + 'static,
-) -> Response {
+    mut each: F,
+    tail: T,
+) -> Response
+where
+    F: FnMut(Bytes) -> Bytes + Send + 'static,
+    T: FnOnce() -> Bytes + Send + 'static,
+{
     let eof = capture.clone();
     let stream = resp
         .bytes_stream()
@@ -112,11 +118,10 @@ pub fn relayed(
 
 /// Responses events rendered as another dialect's SSE. `step` gets `None`
 /// once upstream closes, for whatever the dialect ends with.
-pub fn translated(
-    upstream: EventStream,
-    guard: LogGuard,
-    step: impl FnMut(Option<ResponsesEvent>) -> Vec<Event> + Send + 'static,
-) -> Response {
+pub fn translated<S>(upstream: EventStream, guard: LogGuard, step: S) -> Response
+where
+    S: FnMut(Option<ResponsesEvent>) -> Vec<Event> + Send + 'static,
+{
     struct St<F> {
         upstream: EventStream,
         step: F,

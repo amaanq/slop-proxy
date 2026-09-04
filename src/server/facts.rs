@@ -54,7 +54,12 @@ impl RequestFacts {
                         .filter(|p| matches!(p, ContentPart::InputImage { .. }))
                         .count() as i64;
                 }
-                _ => {}
+                InputItem::FunctionCall { .. }
+                | InputItem::FunctionCallOutput { .. }
+                | InputItem::CustomToolCall { .. }
+                | InputItem::CustomToolCallOutput { .. }
+                | InputItem::Reasoning { .. }
+                | InputItem::Other => {}
             }
         }
         Self {

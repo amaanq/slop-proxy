@@ -1,12 +1,16 @@
 use std::sync::Arc;
 
 use axum::Router;
-use axum::response::IntoResponse;
+use axum::response::IntoResponse as _;
 use axum::routing::post;
 
 use super::{AppState, Inner, router};
 use crate::codex::client::CodexClient;
-use crate::config::{AnthropicConfig, CodexConfig, Config, ModelsConfig};
+use crate::db::accounts::NewAccount;
+use crate::config::{
+    AnthropicConfig, CodexConfig, Config, GeminiConfig, GlmConfig, ModelsConfig, PricingConfig,
+    ZenConfig,
+};
 use crate::db::Db;
 use crate::oauth::TokenSet;
 use crate::pool::Pools;
@@ -69,31 +73,31 @@ fn fresh_tokens() -> TokenSet {
 async fn spawn_proxy_with(models: ModelsConfig, anthropic_base: Option<String>) -> (String, Db) {
     let base_url = spawn_mock_upstream().await;
     let db_path = std::env::temp_dir().join(format!("slop-test-{}.db", uuid::Uuid::new_v4()));
-    let db = Db::open(&db_path).await.unwrap();
+    let db = Db::open(&db_path).unwrap();
     db.create_token("alice", "sp-test", "sp-test")
         .await
         .unwrap();
-    db.upsert_account(
-        Provider::OpenAi,
-        "acct-1",
-        Some("test@example.com"),
-        None,
-        Some("plus"),
-        &fresh_tokens(),
-        AuthMode::OAuth,
-    )
+    db.upsert_account(NewAccount {
+            provider: Provider::OpenAi,
+            id: "acct-1",
+            email: Some("test@example.com"),
+            label: None,
+            plan: Some("plus"),
+            tokens: &fresh_tokens(),
+            auth_mode: AuthMode::OAuth,
+        })
     .await
     .unwrap();
     if anthropic_base.is_some() {
-        db.upsert_account(
-            Provider::Anthropic,
-            "acct-a1",
-            None,
-            None,
-            None,
-            &fresh_tokens(),
-            AuthMode::OAuth,
-        )
+        db.upsert_account(NewAccount {
+            provider: Provider::Anthropic,
+            id: "acct-a1",
+            email: None,
+            label: None,
+            plan: None,
+            tokens: &fresh_tokens(),
+            auth_mode: AuthMode::OAuth,
+        })
         .await
         .unwrap();
     }
@@ -111,10 +115,10 @@ async fn spawn_proxy_with(models: ModelsConfig, anthropic_base: Option<String>) 
             base_url: anthropic_base.unwrap_or_default(),
             ..AnthropicConfig::default()
         },
-        gemini: Default::default(),
-        zen: Default::default(),
-        glm: Default::default(),
-        pricing: Default::default(),
+        gemini: GeminiConfig::default(),
+        zen: ZenConfig::default(),
+        glm: GlmConfig::default(),
+        pricing: PricingConfig::default(),
         models,
     };
     let pools = Pools::load(&db, &cfg).await.unwrap();
@@ -182,10 +186,13 @@ async fn anthropic_streaming_end_to_end() {
     ];
     let mut pos = 0;
     for needle in order {
-        let found = text[pos..]
-            .find(needle)
-            .unwrap_or_else(|| panic!("missing {needle:?} after byte {pos} in:\n{text}"));
-        pos += found;
+        let haystack = text.get(pos..).unwrap_or("");
+        let found = haystack.find(needle);
+        assert!(
+            found.is_some(),
+            "missing {needle:?} after byte {pos} in:\n{text}"
+        );
+        pos += found.unwrap();
     }
     assert!(text.contains("\"input_tokens\":80"));
     assert!(text.contains("\"cache_read_input_tokens\":20"));
@@ -312,7 +319,7 @@ async fn anthropic_relay_passthrough() {
     use axum::http::HeaderMap;
 
     let seen = Arc::new(std::sync::Mutex::new(HeaderMap::new()));
-    let seen2 = seen.clone();
+    let seen2 = Arc::clone(&seen);
     let app = Router::new().route(
         "/v1/messages",
         post(move |headers: HeaderMap| async move {
@@ -388,10 +395,10 @@ async fn metrics_render_accounts_and_usage() {
         metrics_bind: None,
         codex: CodexConfig::default(),
         anthropic: AnthropicConfig::default(),
-        gemini: Default::default(),
-        zen: Default::default(),
-        glm: Default::default(),
-        pricing: Default::default(),
+        gemini: GeminiConfig::default(),
+        zen: ZenConfig::default(),
+        glm: GlmConfig::default(),
+        pricing: PricingConfig::default(),
         models: ModelsConfig::default(),
     };
     let pools = Pools::load(&db, &cfg).await.unwrap();
@@ -422,21 +429,21 @@ async fn metrics_render_accounts_and_usage() {
 #[tokio::test]
 async fn pool_reload_picks_up_new_logins() {
     let db_path = std::env::temp_dir().join(format!("slop-reload-{}.db", uuid::Uuid::new_v4()));
-    let db = Db::open(&db_path).await.unwrap();
+    let db = Db::open(&db_path).unwrap();
     let pool = CodexPool::load(db.clone(), CodexClient::new(CodexConfig::default()))
         .await
         .unwrap();
     assert_eq!(pool.len().await, 0);
 
-    db.upsert_account(
-        Provider::OpenAi,
-        "acct-r1",
-        None,
-        None,
-        None,
-        &fresh_tokens(),
-        AuthMode::OAuth,
-    )
+    db.upsert_account(NewAccount {
+            provider: Provider::OpenAi,
+            id: "acct-r1",
+            email: None,
+            label: None,
+            plan: None,
+            tokens: &fresh_tokens(),
+            auth_mode: AuthMode::OAuth,
+        })
     .await
     .unwrap();
     pool.reload().await.unwrap();
@@ -514,19 +521,19 @@ async fn spawn_proxy_with_gemini() -> (String, Db) {
     });
 
     let db_path = std::env::temp_dir().join(format!("slop-test-{}.db", uuid::Uuid::new_v4()));
-    let db = Db::open(&db_path).await.unwrap();
+    let db = Db::open(&db_path).unwrap();
     db.create_token("alice", "sp-test", "sp-test")
         .await
         .unwrap();
-    db.upsert_account(
-        Provider::Gemini,
-        "gem-1",
-        None,
-        Some("gem1"),
-        None,
-        &fresh_tokens(),
-        AuthMode::ApiKey,
-    )
+    db.upsert_account(NewAccount {
+            provider: Provider::Gemini,
+            id: "gem-1",
+            email: None,
+            label: Some("gem1"),
+            plan: None,
+            tokens: &fresh_tokens(),
+            auth_mode: AuthMode::ApiKey,
+        })
     .await
     .unwrap();
 
@@ -539,11 +546,11 @@ async fn spawn_proxy_with_gemini() -> (String, Db) {
         anthropic: AnthropicConfig::default(),
         gemini: crate::config::GeminiConfig {
             base_url: format!("http://{addr}"),
-            ..Default::default()
+            ..GeminiConfig::default()
         },
-        zen: Default::default(),
-        glm: Default::default(),
-        pricing: Default::default(),
+        zen: ZenConfig::default(),
+        glm: GlmConfig::default(),
+        pricing: PricingConfig::default(),
         models: ModelsConfig::default(),
     };
     let pools = Pools::load(&db, &cfg).await.unwrap();
@@ -557,12 +564,12 @@ async fn spawn_proxy_with_gemini() -> (String, Db) {
         models: super::ModelCache::new(),
         pools,
     }));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
+    let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = proxy_listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, router(state)).await.unwrap();
+        axum::serve(proxy_listener, router(state)).await.unwrap();
     });
-    (format!("http://{addr}"), db)
+    (format!("http://{proxy_addr}"), db)
 }
 
 #[tokio::test]

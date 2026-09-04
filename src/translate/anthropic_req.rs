@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::value::{RawValue, to_raw_value};
 
-use super::{TranslateError, decode_signature, model_map};
+use super::{decode_signature, model_map};
 use crate::codex::types::{
     ContentPart, InputItem, ReasoningConfig, ResponsesRequest, SummaryPart, ToolChoice, ToolDef,
     ToolOutput,
@@ -81,7 +81,7 @@ pub enum ContentBlock {
         #[serde(default)]
         signature: Option<String>,
     },
-    RedactedThinking {},
+    RedactedThinking,
     #[serde(other)]
     Other,
 }
@@ -122,7 +122,7 @@ pub enum ToolResultBlock {
         #[serde(default)]
         text: String,
     },
-    Image {},
+    Image,
     #[serde(other)]
     Other,
 }
@@ -174,8 +174,7 @@ impl AnthropicRequest {
         self.thinking
             .as_ref()
             .and_then(|t| t.kind.as_deref())
-            .map(|t| t == "enabled" || t == "adaptive")
-            .unwrap_or(false)
+            .is_some_and(|t| t == "enabled" || t == "adaptive")
     }
 }
 
@@ -197,7 +196,7 @@ pub struct PropertySchema {
 }
 
 impl ObjectSchema {
-    pub fn empty() -> Self {
+    pub const fn empty() -> Self {
         Self {
             kind: "object",
             properties: BTreeMap::new(),
@@ -224,10 +223,7 @@ pub fn empty_schema() -> Box<RawValue> {
     to_raw_value(&ObjectSchema::empty()).expect("schema serializes")
 }
 
-pub fn to_responses(
-    req: &AnthropicRequest,
-    cfg: &Config,
-) -> Result<ResponsesRequest, TranslateError> {
+pub fn to_responses(req: &AnthropicRequest, cfg: &Config) -> ResponsesRequest {
     let resolved = model_map::resolve(&cfg.models, &req.model);
     let mut out = ResponsesRequest::new(resolved.model.clone(), cfg.codex.instructions());
 
@@ -242,7 +238,7 @@ pub fn to_responses(
     }
 
     for msg in &req.messages {
-        convert_message(msg, &mut out.input)?;
+        convert_message(msg, &mut out.input);
     }
 
     if let Some(tools) = &req.tools {
@@ -277,15 +273,15 @@ pub fn to_responses(
         .as_ref()
         .and_then(|t| {
             if !req.thinking_enabled() {
-                return Some("low".to_string());
+                return Some("low".to_owned());
             }
             t.budget_tokens.map(|b| {
                 if b < 4096 {
-                    "low".to_string()
-                } else if b < 16384 {
-                    "medium".to_string()
+                    "low".to_owned()
+                } else if b < 0x4000 {
+                    "medium".to_owned()
                 } else {
-                    "high".to_string()
+                    "high".to_owned()
                 }
             })
         })
@@ -300,7 +296,7 @@ pub fn to_responses(
         out.max_output_tokens = req.max_tokens;
     }
 
-    Ok(out)
+    out
 }
 
 fn system_text(system: &SystemPrompt) -> String {
@@ -315,7 +311,7 @@ fn system_text(system: &SystemPrompt) -> String {
     }
 }
 
-fn convert_message(msg: &AnthMessage, out: &mut Vec<InputItem>) -> Result<(), TranslateError> {
+fn convert_message(msg: &AnthMessage, out: &mut Vec<InputItem>) {
     let assistant = msg.role == "assistant";
     let role = if assistant { "assistant" } else { "user" };
 
@@ -330,11 +326,11 @@ fn convert_message(msg: &AnthMessage, out: &mut Vec<InputItem>) -> Result<(), Tr
     };
 
     let mut parts = Vec::<ContentPart>::new();
-    let flush = |parts: &mut Vec<ContentPart>, out: &mut Vec<InputItem>| {
-        if !parts.is_empty() {
-            out.push(InputItem::Message {
+    let flush = |buffer: &mut Vec<ContentPart>, dst: &mut Vec<InputItem>| {
+        if !buffer.is_empty() {
+            dst.push(InputItem::Message {
                 role: role.into(),
-                content: std::mem::take(parts),
+                content: std::mem::take(buffer),
             });
         }
     };
@@ -406,14 +402,13 @@ fn convert_message(msg: &AnthMessage, out: &mut Vec<InputItem>) -> Result<(), Tr
                     encrypted_content: ec,
                 });
             }
-            ContentBlock::RedactedThinking {} => {}
+            ContentBlock::RedactedThinking => {}
             ContentBlock::Other => {
                 tracing::debug!("dropping unsupported anthropic block");
             }
         }
     }
     flush(&mut parts, out);
-    Ok(())
 }
 
 fn tool_result_text(content: Option<&ToolResultContent>) -> String {
@@ -424,7 +419,7 @@ fn tool_result_text(content: Option<&ToolResultContent>) -> String {
             .iter()
             .filter_map(|b| match b {
                 ToolResultBlock::Text { text } => Some(text.clone()),
-                ToolResultBlock::Image {} => Some("[image omitted]".into()),
+                ToolResultBlock::Image => Some("[image omitted]".into()),
                 ToolResultBlock::Other => None,
             })
             .collect::<Vec<_>>()
@@ -437,7 +432,7 @@ fn tool_result_text(content: Option<&ToolResultContent>) -> String {
 mod tests {
     use super::AnthropicRequest;
 
-    fn parse(content: serde_json::Value) -> Result<AnthropicRequest, serde_json::Error> {
+    fn parse(content: &serde_json::Value) -> Result<AnthropicRequest, serde_json::Error> {
         serde_json::from_value(serde_json::json!({
             "model": "m", "max_tokens": 1,
             "messages": [{"role": "user", "content": content}]
@@ -445,7 +440,7 @@ mod tests {
     }
 
     /// A single block the API tolerates used to sink the whole request with
-    /// "did not match any variant of untagged enum MessageContent".
+    /// "did not match any variant of untagged enum `MessageContent`".
     #[test]
     fn a_tolerated_block_does_not_sink_the_request() {
         for content in [
@@ -455,7 +450,7 @@ mod tests {
             serde_json::json!([{"type": "text", "text": null}]),
             serde_json::json!([{"type": "thinking", "thinking": null, "signature": "s"}]),
         ] {
-            parse(content.clone()).unwrap_or_else(|e| panic!("{content}: {e}"));
+            parse(&content).unwrap_or_else(|e| panic!("{content}: {e}"));
         }
     }
 }

@@ -2,7 +2,7 @@ use super::types::ApiError;
 
 /// When Google gives up mid-answer it keeps the 200 and appends a bare JSON
 /// error after the frames, `{"error":..}` natively and `[{"error":..}]` on the
-/// OpenAI surface, where no SSE parser looks.
+/// `OpenAI` surface, where no `SSE` parser looks.
 #[derive(Default)]
 pub struct Frames {
     buf: Vec<u8>,

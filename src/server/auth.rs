@@ -120,7 +120,7 @@ fn insert_header(response: &mut Response, name: &'static str, value: i64) {
 /// Gemini CLI sends its key as `x-goog-api-key`, and the raw REST form puts it
 /// in a `key` query parameter, so neither of the other two headers is present.
 fn bearer_token(headers: &axum::http::HeaderMap, query: Option<&str>) -> Option<String> {
-    let header = |name: &str| headers.get(name)?.to_str().ok().map(str::to_string);
+    let header = |name: &str| headers.get(name)?.to_str().ok().map(str::to_owned);
     header("x-api-key")
         .or_else(|| header("x-goog-api-key"))
         .or_else(|| {
@@ -129,12 +129,12 @@ fn bearer_token(headers: &axum::http::HeaderMap, query: Option<&str>) -> Option<
                 .to_str()
                 .ok()?
                 .strip_prefix("Bearer ")
-                .map(str::to_string)
+                .map(str::to_owned)
         })
         .or_else(|| {
             query?
                 .split('&')
                 .find_map(|p| p.strip_prefix("key="))
-                .map(str::to_string)
+                .map(str::to_owned)
         })
 }

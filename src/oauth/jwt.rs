@@ -1,4 +1,4 @@
-use eyre::{Result, WrapErr, eyre};
+use eyre::{Result, WrapErr as _, eyre};
 use serde::Deserialize;
 
 pub struct IdTokenInfo {

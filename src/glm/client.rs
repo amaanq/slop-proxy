@@ -21,7 +21,7 @@ impl GlmClient {
         Self { http, cfg }
     }
 
-    pub async fn send(
+    pub async fn post(
         &self,
         key: &str,
         path: &str,
@@ -39,8 +39,8 @@ impl GlmClient {
             .await
             .map_err(|e| SendError::Network(e.to_string()))?;
         match classify(resp, Classify::STRICT).await {
-            Err(SendError::RateLimited { body, .. }) if body.contains("Insufficient balance") => {
-                Err(SendError::Auth(body))
+            Err(SendError::RateLimited { body: text, .. }) if text.contains("Insufficient balance") => {
+                Err(SendError::Auth(text))
             }
             other => other,
         }

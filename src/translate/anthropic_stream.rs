@@ -46,14 +46,14 @@ enum AnthEvent {
 impl AnthEvent {
     fn out(self) -> OutEvent {
         let name = match &self {
-            AnthEvent::MessageStart { .. } => "message_start",
-            AnthEvent::Ping => "ping",
-            AnthEvent::ContentBlockStart { .. } => "content_block_start",
-            AnthEvent::ContentBlockDelta { .. } => "content_block_delta",
-            AnthEvent::ContentBlockStop { .. } => "content_block_stop",
-            AnthEvent::MessageDelta { .. } => "message_delta",
-            AnthEvent::MessageStop => "message_stop",
-            AnthEvent::Error { .. } => "error",
+            Self::MessageStart { .. } => "message_start",
+            Self::Ping => "ping",
+            Self::ContentBlockStart { .. } => "content_block_start",
+            Self::ContentBlockDelta { .. } => "content_block_delta",
+            Self::ContentBlockStop { .. } => "content_block_stop",
+            Self::MessageDelta { .. } => "message_delta",
+            Self::MessageStop => "message_stop",
+            Self::Error { .. } => "error",
         };
         let value = serde_json::to_value(self).expect("event serializes");
         (name, value.to_string())
@@ -90,7 +90,7 @@ enum ContentBlockStart {
 }
 
 #[derive(Serialize)]
-struct EmptyObject {}
+struct EmptyObject;
 
 #[derive(Serialize)]
 #[serde(tag = "type")]
@@ -137,7 +137,7 @@ fn anthropic_usage(usage: &Usage) -> AnthUsage {
 }
 
 impl AnthropicStream {
-    pub fn new(
+    pub const fn new(
         model: String,
         est_input_tokens: i64,
         emit_thinking: bool,
@@ -165,9 +165,18 @@ impl AnthropicStream {
         self.walker
             .eof()
             .into_iter()
-            .map(|step| match step {
-                Step::Failed { message, .. } => error("overloaded_error", message),
-                _ => unreachable!("eof only fails"),
+            .filter_map(|step| match step {
+                Step::Failed { message, .. } => Some(error("overloaded_error", message)),
+                Step::Start { .. }
+                | Step::OpenThinking
+                | Step::Thinking(..)
+                | Step::Signature(..)
+                | Step::OpenText
+                | Step::Text(..)
+                | Step::OpenCall { .. }
+                | Step::Args(..)
+                | Step::CloseBlock
+                | Step::Stop { .. } => None,
             })
             .collect()
     }
@@ -210,7 +219,7 @@ impl AnthropicStream {
                 ContentBlockStart::ToolUse {
                     id,
                     name,
-                    input: EmptyObject {},
+                    input: EmptyObject,
                 },
             ),
             Step::Thinking(thinking) => out.push(self.delta(BlockDelta::Thinking { thinking })),
@@ -342,13 +351,13 @@ pub fn render_aggregated(agg: &Aggregated, model: &str, emit_thinking: bool) -> 
     let stop_reason = match agg.stop {
         StopKind::ToolUse => "tool_use",
         StopKind::MaxTokens => "max_tokens",
-        _ => "end_turn",
+        StopKind::EndTurn | StopKind::Error => "end_turn",
     };
     RenderedMessage {
         id: agg.id.clone(),
         kind: "message",
         role: "assistant",
-        model: model.to_string(),
+        model: model.to_owned(),
         content,
         stop_reason,
         stop_sequence: None,

@@ -1,4 +1,4 @@
-//! OpenCode Zen speaks the Responses API, so nothing here translates. The
+//! `OpenCode` Zen speaks the `Responses` API, so nothing here translates. The
 //! request goes up as the caller wrote it and comes back as frames the codex
 //! parser already understands.
 
@@ -68,7 +68,7 @@ impl ZenClient {
 
     /// The free contributor models answer without any credential at all, so
     /// the key is optional and only attached when an account supplies one.
-    pub async fn send(
+    pub async fn post(
         &self,
         key: Option<&str>,
         req: &Bytes,
@@ -312,9 +312,9 @@ mod tests {
 
     async fn spawn_proxy(status: StatusCode) -> (String, Requests) {
         let requests = Requests::default();
-        let seen = requests.clone();
+        let seen = Arc::clone(&requests);
         let app = Router::new().fallback(any(move |request: Request| {
-            let seen = seen.clone();
+            let seen = Arc::clone(&seen);
             async move {
                 let uri = request.uri().to_string();
                 let auth = request
@@ -363,7 +363,7 @@ mod tests {
 
         assert_eq!(client.models().await.unwrap(), ["muse-test"]);
         client
-            .send(None, &Bytes::from_static(br#"{"model":"muse-test"}"#))
+            .post(None, &Bytes::from_static(br#"{"model":"muse-test"}"#))
             .await
             .unwrap();
 
@@ -387,11 +387,11 @@ mod tests {
         .unwrap();
 
         client
-            .send(None, &Bytes::from_static(br#"{"model":"muse-test"}"#))
+            .post(None, &Bytes::from_static(br#"{"model":"muse-test"}"#))
             .await
             .unwrap();
         client
-            .send(None, &Bytes::from_static(br#"{"model":"muse-test"}"#))
+            .post(None, &Bytes::from_static(br#"{"model":"muse-test"}"#))
             .await
             .unwrap();
 
@@ -414,6 +414,13 @@ mod tests {
 
     #[tokio::test]
     async fn an_exhausted_walk_stops_at_the_cap_and_asks_for_a_quick_retry() {
+        async fn seen(proxies: &[(String, Requests)]) -> usize {
+            let mut total = 0;
+            for (_, requests) in proxies {
+                total += requests.lock().await.len();
+            }
+            total
+        }
         let mut proxies = Vec::new();
         for _ in 0..EGRESS_ATTEMPTS + 4 {
             proxies.push(spawn_proxy(StatusCode::TOO_MANY_REQUESTS).await);
@@ -424,16 +431,9 @@ mod tests {
             proxy_urls_file: None,
         })
         .unwrap();
-        async fn seen(proxies: &[(String, Requests)]) -> usize {
-            let mut total = 0;
-            for (_, requests) in proxies {
-                total += requests.lock().await.len();
-            }
-            total
-        }
 
         let err = client
-            .send(None, &Bytes::from_static(b"{}"))
+            .post(None, &Bytes::from_static(b"{}"))
             .await
             .unwrap_err();
         assert!(
@@ -448,13 +448,13 @@ mod tests {
         );
         assert_eq!(seen(&proxies).await, EGRESS_ATTEMPTS);
 
-        let err = client
-            .send(None, &Bytes::from_static(b"{}"))
+        let exhausted = client
+            .post(None, &Bytes::from_static(b"{}"))
             .await
             .unwrap_err();
         assert!(
-            matches!(err, SendError::RateLimited { retry_after: Some(secs), .. } if secs > 1),
-            "{err}"
+            matches!(exhausted, SendError::RateLimited { retry_after: Some(secs), .. } if secs > 1),
+            "{exhausted}"
         );
         assert_eq!(seen(&proxies).await, EGRESS_ATTEMPTS + 4);
     }

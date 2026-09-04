@@ -33,8 +33,8 @@ impl Upstream {
     /// The reply as Responses events, whichever dialect it arrived in.
     pub fn events(self, model: &str, capture: UsageCapture) -> EventStream {
         match self {
-            Upstream::Responses(response) => crate::codex::sse::event_stream(response),
-            Upstream::Bridged {
+            Self::Responses(response) => crate::codex::sse::event_stream(response),
+            Self::Bridged {
                 response,
                 protocol,
                 custom,
@@ -63,47 +63,35 @@ impl Pools {
             crate::codex::client::CodexClient::new(cfg.codex.clone()),
         )
         .await?;
-        if codex.is_empty().await {
-            tracing::warn!("no codex accounts in the database; run `slop-proxy login`");
-        } else {
-            tracing::info!("loaded {} codex account(s)", codex.len().await);
-        }
         let anthropic = AnthropicPool::load(
             db.clone(),
             crate::anthropic::client::AnthropicClient::new(cfg.anthropic.clone()),
         )
         .await?;
-        if anthropic.is_empty().await {
-            tracing::warn!(
-                "no anthropic accounts in the database; run `slop-proxy login --provider anthropic`"
-            );
-        } else {
-            tracing::info!("loaded {} anthropic account(s)", anthropic.len().await);
-        }
         let gemini = GeminiPool::load(
             db.clone(),
             crate::gemini::client::GeminiClient::new(cfg.gemini.clone()),
         )
         .await?;
-        if !gemini.is_empty().await {
-            tracing::info!("loaded {} gemini account(s)", gemini.len().await);
-        }
         let zen = ZenPool::load(
             db.clone(),
             crate::zen::client::ZenClient::new(cfg.zen.clone())?,
         )
         .await?;
-        if zen.len().await > 0 {
-            tracing::info!("loaded {} zen account(s)", zen.len().await);
-        }
         let glm = GlmPool::load(
             db.clone(),
             crate::glm::client::GlmClient::new(cfg.glm.clone()),
         )
         .await?;
-        if glm.len().await > 0 {
-            tracing::info!("loaded {} glm account(s)", glm.len().await);
-        }
+        announce("codex", codex.len().await, Some("slop-proxy login"));
+        announce(
+            "anthropic",
+            anthropic.len().await,
+            Some("slop-proxy login --provider anthropic"),
+        );
+        announce("gemini", gemini.len().await, None);
+        announce("zen", zen.len().await, None);
+        announce("glm", glm.len().await, None);
         Ok(Self {
             codex,
             anthropic,
@@ -186,11 +174,11 @@ impl Pools {
                 // frames, which read as an empty stream and billed as a
                 // client disconnect.
                 if !reply.response.status().is_success() {
-                    let body = reply.response.text().await.unwrap_or_default();
+                    let error_body = reply.response.text().await.unwrap_or_default();
                     return Err(PoolError::BadRequest {
                         provider,
                         model: route.model.to_owned(),
-                        body: <GeminiClient as Backend>::reason(body),
+                        body: <GeminiClient as Backend>::reason(error_body),
                     });
                 }
                 Ok(Dispatched {
@@ -217,5 +205,13 @@ impl Pools {
         out.extend(self.zen.snapshot().await);
         out.extend(self.glm.snapshot().await);
         out
+    }
+}
+
+fn announce(name: &str, count: usize, login: Option<&str>) {
+    match (count, login) {
+        (0, Some(login)) => tracing::warn!("no {name} accounts in the database; run `{login}`"),
+        (0, None) => {}
+        (n, _) => tracing::info!("loaded {n} {name} account(s)"),
     }
 }

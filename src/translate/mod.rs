@@ -10,7 +10,7 @@ pub mod openai_stream;
 use std::sync::{Arc, Mutex};
 
 use data_encoding::BASE64URL_NOPAD;
-use futures_util::StreamExt;
+use futures_util::StreamExt as _;
 use serde::{Deserialize, Serialize};
 use serde_json::value::{RawValue, to_raw_value};
 
@@ -43,11 +43,11 @@ struct SignaturePayload {
 }
 
 /// Anthropic thinking-block signatures are opaque round-tripped strings, so we
-/// smuggle the Responses reasoning item id + encrypted_content through them.
+/// smuggle the Responses reasoning item `id` + `encrypted_content` through them.
 pub fn encode_signature(id: Option<&str>, encrypted_content: &str) -> String {
     let payload = SignaturePayload {
         id: id.map(String::from),
-        ec: Some(encrypted_content.to_string()),
+        ec: Some(encrypted_content.to_owned()),
     };
     let payload = serde_json::to_string(&payload).unwrap_or_default();
     BASE64URL_NOPAD.encode(payload.as_bytes())
@@ -60,7 +60,7 @@ pub fn decode_signature(sig: &str) -> (Option<String>, Option<String>) {
     {
         return (p.id, p.ec);
     }
-    (None, Some(sig.to_string()))
+    (None, Some(sig.to_owned()))
 }
 
 #[derive(Default, Debug, Clone)]
@@ -109,7 +109,7 @@ impl UsageCapture {
 
     pub fn note_event(&self, name: &str) {
         let mut c = self.0.lock().unwrap();
-        c.last_event = Some(name.to_string());
+        c.last_event = Some(name.to_owned());
         c.first_byte_at.get_or_insert_with(std::time::Instant::now);
     }
 
@@ -120,7 +120,7 @@ impl UsageCapture {
     }
 
     pub fn note_stop_reason(&self, reason: &str) {
-        self.0.lock().unwrap().stop_reason = Some(reason.to_string());
+        self.0.lock().unwrap().stop_reason = Some(reason.to_owned());
     }
 
     pub fn note_cutoff(&self, status: &str) {
@@ -132,7 +132,7 @@ impl UsageCapture {
     pub fn note_tool_call(&self, name: &str) {
         let mut c = self.0.lock().unwrap();
         if !c.tools_called.iter().any(|t| t == name) {
-            c.tools_called.push(name.to_string());
+            c.tools_called.push(name.to_owned());
         }
     }
 
@@ -150,7 +150,7 @@ impl UsageCapture {
     pub fn fail(&self, kind: &str) {
         let mut c = self.0.lock().unwrap();
         if c.error_kind.is_none() {
-            c.error_kind = Some(kind.to_string());
+            c.error_kind = Some(kind.to_owned());
         }
     }
 
@@ -175,7 +175,7 @@ pub enum Block {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopKind {
     EndTurn,
     MaxTokens,
@@ -184,7 +184,7 @@ pub enum StopKind {
 }
 
 impl StopKind {
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::EndTurn => "end_turn",
             Self::MaxTokens => "max_tokens",
@@ -237,6 +237,10 @@ enum Open {
 }
 
 /// The one state machine every consumer of a Responses stream shares.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag answers a different question about the stream so far"
+)]
 pub struct Walker {
     open: Option<Open>,
     saw_tool: bool,
@@ -247,7 +251,7 @@ pub struct Walker {
 }
 
 impl Walker {
-    pub fn new(capture: UsageCapture) -> Self {
+    pub const fn new(capture: UsageCapture) -> Self {
         Self {
             open: None,
             saw_tool: false,
@@ -271,9 +275,11 @@ impl Walker {
                     self.open(&mut out, Open::Call);
                     out.push(Step::OpenCall { id: call_id, name });
                 }
-                _ => {}
+                OutputItem::Message { .. }
+                | OutputItem::CustomToolCall { .. }
+                | OutputItem::Other => {}
             },
-            ResponsesEvent::ReasoningSummaryPartAdded {} => {
+            ResponsesEvent::ReasoningSummaryPartAdded => {
                 if self.open == Some(Open::Thinking) && self.text_seen {
                     out.push(Step::Thinking("\n\n".into()));
                 }
@@ -372,7 +378,16 @@ impl Walker {
                 self.done = true;
                 out.push(Step::Failed { message, code });
             }
-            _ => {}
+            ResponsesEvent::InProgress
+            | ResponsesEvent::ContentPartAdded { .. }
+            | ResponsesEvent::ContentPartDone
+            | ResponsesEvent::OutputTextDone { .. }
+            | ResponsesEvent::ReasoningSummaryPartDone
+            | ResponsesEvent::ReasoningSummaryTextDone
+            | ResponsesEvent::ReasoningTextDone
+            | ResponsesEvent::FunctionCallArgumentsDone { .. }
+            | ResponsesEvent::CustomToolCallInputDone { .. }
+            | ResponsesEvent::Other => {}
         }
         out
     }
@@ -499,8 +514,8 @@ mod tests {
             decode_signature(&sig),
             (Some("rs_1".into()), Some("SECRET".into()))
         );
-        let sig = encode_signature(None, "SECRET");
-        assert_eq!(decode_signature(&sig), (None, Some("SECRET".into())));
+        let sig_no_id = encode_signature(None, "SECRET");
+        assert_eq!(decode_signature(&sig_no_id), (None, Some("SECRET".into())));
         assert_eq!(
             decode_signature("not-base64-json"),
             (None, Some("not-base64-json".into()))

@@ -18,11 +18,14 @@ pub struct OpenAiStream {
     walker: Walker,
 }
 
-fn to_json<T: Serialize>(payload: T) -> String {
+fn to_json<T>(payload: T) -> String
+where
+    T: Serialize
+{
     serde_json::to_string(&payload).expect("chunk serializes")
 }
 
-fn finish_reason(kind: StopKind) -> FinishReason {
+const fn finish_reason(kind: StopKind) -> FinishReason {
     match kind {
         StopKind::ToolUse => FinishReason::ToolCalls,
         StopKind::MaxTokens => FinishReason::Length,
@@ -214,7 +217,7 @@ pub fn render_aggregated(agg: &Aggregated, model: &str) -> ChatCompletion {
         id: format!("chatcmpl-{}", agg.id),
         object: "chat.completion".into(),
         created: crate::clock::unix_now(),
-        model: model.to_string(),
+        model: model.to_owned(),
         choices: vec![ChatChoice {
             index: 0,
             message: ChatMessage {

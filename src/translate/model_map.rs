@@ -10,7 +10,7 @@ const EFFORTS: &[&str] = &["minimal", "low", "medium", "high", "xhigh", "max", "
 
 fn split_suffix(requested: &str) -> (&str, Option<String>) {
     match requested.rsplit_once(':') {
-        Some((base, eff)) if EFFORTS.contains(&eff) => (base, Some(eff.to_string())),
+        Some((base, eff)) if EFFORTS.contains(&eff) => (base, Some(eff.to_owned())),
         _ => (requested, None),
     }
 }
@@ -28,7 +28,7 @@ pub fn resolve(cfg: &ModelsConfig, requested: &str) -> ResolvedModel {
         let Some(specificity) = pattern_specificity(pattern, name) else {
             continue;
         };
-        if best.map(|(s, _)| specificity > s).unwrap_or(true) {
+        if best.is_none_or(|(s, _)| specificity > s) {
             best = Some((specificity, alias));
         }
     }
@@ -40,7 +40,7 @@ pub fn resolve(cfg: &ModelsConfig, requested: &str) -> ResolvedModel {
     }
 
     ResolvedModel {
-        model: name.to_string(),
+        model: name.to_owned(),
         effort: suffix_effort.or_else(|| cfg.default_effort.clone()),
     }
 }
@@ -64,9 +64,9 @@ mod tests {
         let r = resolve(&cfg, "gpt-5.6-terra");
         assert_eq!(r.model, "gpt-5.6-terra");
 
-        let r = resolve(&cfg, "gpt-5.6-sol:high");
-        assert_eq!(r.model, "gpt-5.6-sol");
-        assert_eq!(r.effort.as_deref(), Some("high"));
+        let r_suffix = resolve(&cfg, "gpt-5.6-sol:high");
+        assert_eq!(r_suffix.model, "gpt-5.6-sol");
+        assert_eq!(r_suffix.effort.as_deref(), Some("high"));
     }
 
     #[test]

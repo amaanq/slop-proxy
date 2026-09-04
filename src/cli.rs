@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use eyre::{Result, bail, eyre};
 use pound::Parse;
 
+use crate::db::accounts::NewAccount;
 use crate::config::Config;
 use crate::db::Db;
 use crate::db::accounts::AccountStatus;
@@ -164,7 +165,7 @@ pub enum DebugCommand {
 }
 
 pub async fn run(args: Cli, cfg: Config) -> Result<()> {
-    let db = Db::open(&cfg.db_path).await?;
+    let db = Db::open(&cfg.db_path)?;
 
     match args.command {
         Command::Login { label, provider } => match provider {
@@ -267,21 +268,21 @@ async fn accounts_add_key(
     h.update(key.as_bytes());
     let account_id = data_encoding::HEXLOWER.encode(&h.finalize()[..8]);
     let tokens = crate::oauth::TokenSet {
-        access_token: key.to_string(),
+        access_token: key.to_owned(),
         refresh_token: String::new(),
         id_token: None,
         expires_at: None,
     };
     let id = db
-        .upsert_account(
+        .upsert_account(NewAccount {
             provider,
-            &account_id,
-            None,
+            id: &account_id,
+            email: None,
             label,
-            None,
-            &tokens,
-            AuthMode::ApiKey,
-        )
+            plan: None,
+            tokens: &tokens,
+            auth_mode: AuthMode::ApiKey,
+        })
         .await?;
     if let Some(referer) = referer {
         let referer = (!referer.is_empty()).then_some(referer);
@@ -467,6 +468,13 @@ async fn token_revoke(db: &Db, token: &str) -> Result<()> {
 }
 
 async fn models(db: &Db, cfg: &Config) -> Result<()> {
+    #[derive(serde::Serialize)]
+    struct ModelRow<'a> {
+        #[serde(flatten)]
+        info: &'a crate::codex::models::ModelInfo,
+        listed: bool,
+    }
+
     let client = crate::codex::client::CodexClient::new(cfg.codex.clone());
     let pool = crate::pool::codex::CodexPool::load(db.clone(), client).await?;
 
@@ -477,13 +485,6 @@ async fn models(db: &Db, cfg: &Config) -> Result<()> {
             Vec::new()
         }
     };
-
-    #[derive(serde::Serialize)]
-    struct ModelRow<'a> {
-        #[serde(flatten)]
-        info: &'a crate::codex::models::ModelInfo,
-        listed: bool,
-    }
 
     let arr = models
         .iter()
@@ -504,7 +505,9 @@ async fn debug_refresh(db: &Db, account: &str) -> Result<()> {
     let tokens = match acc.provider {
         Provider::OpenAi => crate::oauth::refresh::refresh(&acc.refresh_token).await?,
         Provider::Anthropic => crate::oauth::anthropic::refresh(&acc.refresh_token).await?,
-        _ => bail!("this provider has no refresh flow"),
+        Provider::Gemini | Provider::Zen | Provider::Glm => {
+            bail!("this provider has no refresh flow")
+        }
     };
     db.update_account_tokens(acc.id, &tokens).await?;
     println!(

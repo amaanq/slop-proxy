@@ -2,8 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use eyre::{Result, WrapErr};
-use serde::Deserialize;
+use eyre::{Result, WrapErr as _};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Rates {
@@ -24,7 +23,7 @@ pub struct Tokens {
 }
 
 impl Tokens {
-    fn context(&self) -> i64 {
+    const fn context(&self) -> i64 {
         self.input
             .saturating_add(self.cache_read)
             .saturating_add(self.cache_write)
@@ -46,10 +45,14 @@ impl ModelPrice {
             Some((threshold, above)) if t.context() > threshold => above,
             _ => self.base,
         };
-        t.input as f64 * r.input
-            + t.output as f64 * r.output
-            + t.cache_read as f64 * r.cache_read
-            + t.cache_write as f64 * r.cache_write
+        (t.input as f64).mul_add(
+            r.input,
+            (t.output as f64).mul_add(
+                r.output,
+                (t.cache_read as f64)
+                    .mul_add(r.cache_read, t.cache_write as f64 * r.cache_write),
+            ),
+        )
     }
 }
 
@@ -65,7 +68,7 @@ impl PriceTable {
         self.0.is_empty()
     }
 
-    /// LiteLLM keys a model under both its bare name and vendor-prefixed
+    /// `LiteLLM` keys a model under both its bare name and vendor-prefixed
     /// spellings, so a lookup that misses is retried against the prefixed
     /// forms before giving up.
     pub fn find(&self, model: &str) -> Option<ModelPrice> {
@@ -117,7 +120,7 @@ impl PriceTable {
 /// Rates litellm has not published, consulted only when the fetched table
 /// misses so an upstream entry takes over the moment one appears. Google is
 /// running Gemini 3.8 Flash at an introductory rate that doubles on
-/// 2027-01-01, per https://ai.google.dev/gemini-api/docs/pricing.
+/// 2027-01-01, per <https://ai.google.dev/gemini-api/docs/pricing>.
 pub fn unpublished(model: &str, now: i64) -> Option<ModelPrice> {
     const INTRO_ENDS: i64 = 1_798_761_600;
     let scale = if now < INTRO_ENDS { 1.0 } else { 2.0 };
@@ -136,7 +139,7 @@ pub fn unpublished(model: &str, now: i64) -> Option<ModelPrice> {
     })
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 struct Entry {
     #[serde(default)]
     input_cost_per_token: f64,
@@ -175,7 +178,10 @@ impl Entry {
     fn long_context(&self, base: Rates) -> Option<(i64, Rates)> {
         let mut threshold = None;
         let mut above = base;
-        for (key, value) in &self.rest {
+        let mut keys: Vec<&String> = self.rest.keys().collect();
+        keys.sort();
+        for key in keys {
+            let value = &self.rest[key];
             let Some((prefix, tail)) = key.split_once("_above_") else {
                 continue;
             };
@@ -212,7 +218,7 @@ impl Prices {
     pub fn new(db_path: &Path, url: String) -> Self {
         let cache_path = db_path
             .parent()
-            .unwrap_or(Path::new("."))
+            .unwrap_or_else(|| Path::new("."))
             .join("litellm-prices.json");
         Self {
             table: RwLock::new(Arc::new(PriceTable::default())),
@@ -312,7 +318,7 @@ mod tests {
             output: 1_000_000,
             ..Tokens::default()
         };
-        assert_eq!(t.cost("muse-spark-1.3-contributor-free", tokens), 0.0);
+        assert!(t.cost("muse-spark-1.3-contributor-free", tokens).abs() < f64::EPSILON);
         assert!((t.list_cost("muse-spark-1.3-contributor-free", tokens) - 0.3).abs() < 1e-9);
     }
 
@@ -326,14 +332,14 @@ mod tests {
             ..Tokens::default()
         };
         assert!((t.cost("gemini-3.8-flash", tokens) - 4.575).abs() < 1e-9);
-        assert_eq!(t.cost("gemini-3.8-pro", tokens), 0.0);
+        assert!(t.cost("gemini-3.8-pro", tokens).abs() < f64::EPSILON);
     }
 
     #[test]
     fn the_introductory_rate_expires() {
         let intro = unpublished("gemini-3.8-flash", 1_798_761_599).unwrap();
         let after = unpublished("gemini-3.8-flash", 1_798_761_600).unwrap();
-        assert!((after.base.input - intro.base.input * 2.0).abs() < 1e-12);
+        assert!(intro.base.input.mul_add(-2.0, after.base.input).abs() < 1e-12);
     }
 
     #[test]
@@ -342,21 +348,21 @@ mod tests {
             r#"{"gemini-3.8-flash": {"input_cost_per_token": 0.001, "output_cost_per_token": 0.0}}"#,
         )
         .unwrap();
-        assert_eq!(t.find("gemini-3.8-flash").unwrap().base.input, 0.001);
+        assert!((t.find("gemini-3.8-flash").unwrap().base.input - 0.001).abs() < f64::EPSILON);
     }
 
     #[test]
     fn unpriced_models_are_dropped() {
         let t = table();
         assert!(t.find("chatgpt/gpt-5.3-codex-spark").is_none());
-        assert_eq!(t.cost("gpt-5.3-codex-spark", Tokens::default()), 0.0);
+        assert!(t.cost("gpt-5.3-codex-spark", Tokens::default()).abs() < f64::EPSILON);
     }
 
     #[test]
     fn a_bare_name_beats_a_vendor_prefixed_one() {
         let t = table();
         let p = t.find("claude-opus-5").unwrap();
-        assert_eq!(p.base.input, 0.000005);
+        assert!((p.base.input - 0.000_005).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -365,7 +371,7 @@ mod tests {
             r#"{"chatgpt/gpt-x": {"input_cost_per_token": 0.001, "output_cost_per_token": 0.002}}"#,
         )
         .unwrap();
-        assert_eq!(t.find("gpt-x").unwrap().base.input, 0.001);
+        assert!((t.find("gpt-x").unwrap().base.input - 0.001).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -381,8 +387,12 @@ mod tests {
             },
         );
         assert!(
-            (under - (10_000.0 * 0.000004 + 1_000.0 * 0.00002 + 100_000.0 * 0.0000004)).abs()
-                < 1e-12
+            (under
+                - 10_000.0_f64.mul_add(
+                    0.000_004,
+                    1_000.0_f64.mul_add(0.000_02, 100_000.0 * 0.000_000_4),
+                ))
+            .abs() < 1e-12
         );
 
         let over = t.cost(
@@ -394,7 +404,10 @@ mod tests {
                 ..Tokens::default()
             },
         );
-        let want = 10_000.0 * 0.000008 + 1_000.0 * 0.00003 + 300_000.0 * 0.0000008;
+        let want = 10_000.0_f64.mul_add(
+            0.000_008,
+            1_000.0_f64.mul_add(0.000_03, 300_000.0 * 0.000_000_8),
+        );
         assert!((over - want).abs() < 1e-12, "{over} != {want}");
     }
 
@@ -404,6 +417,6 @@ mod tests {
         let p = t.find("gpt-5.6-sol").unwrap();
         let (threshold, above) = p.long_context.unwrap();
         assert_eq!(threshold, 272_000);
-        assert_eq!(above.cache_write, p.base.cache_write);
+        assert!((above.cache_write - p.base.cache_write).abs() < f64::EPSILON);
     }
 }

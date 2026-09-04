@@ -254,7 +254,7 @@ pub enum ResponsesEvent {
     #[serde(rename = "response.created")]
     Created { response: ResponseObj },
     #[serde(rename = "response.in_progress")]
-    InProgress {},
+    InProgress,
     #[serde(rename = "response.output_item.added")]
     OutputItemAdded {
         #[serde(default)]
@@ -279,7 +279,7 @@ pub enum ResponsesEvent {
         part: Option<OutputContentPart>,
     },
     #[serde(rename = "response.content_part.done")]
-    ContentPartDone {},
+    ContentPartDone,
     #[serde(rename = "response.output_text.delta")]
     OutputTextDelta {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -302,17 +302,17 @@ pub enum ResponsesEvent {
         text: String,
     },
     #[serde(rename = "response.reasoning_summary_part.added")]
-    ReasoningSummaryPartAdded {},
+    ReasoningSummaryPartAdded,
     #[serde(rename = "response.reasoning_summary_part.done")]
-    ReasoningSummaryPartDone {},
+    ReasoningSummaryPartDone,
     #[serde(rename = "response.reasoning_summary_text.delta")]
     ReasoningSummaryTextDelta { delta: String },
     #[serde(rename = "response.reasoning_summary_text.done")]
-    ReasoningSummaryTextDone {},
+    ReasoningSummaryTextDone,
     #[serde(rename = "response.reasoning_text.delta")]
     ReasoningTextDelta { delta: String },
     #[serde(rename = "response.reasoning_text.done")]
-    ReasoningTextDone {},
+    ReasoningTextDone,
     #[serde(rename = "response.function_call_arguments.delta")]
     FunctionCallArgumentsDelta {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -351,22 +351,22 @@ pub enum ResponsesEvent {
 
 impl ResponsesEvent {
     /// The wire name, which is also the SSE event name the stream carries.
-    pub fn kind(&self) -> &'static str {
+    pub const fn kind(&self) -> &'static str {
         match self {
             Self::Created { .. } => "response.created",
-            Self::InProgress {} => "response.in_progress",
+            Self::InProgress => "response.in_progress",
             Self::OutputItemAdded { .. } => "response.output_item.added",
             Self::OutputItemDone { .. } => "response.output_item.done",
             Self::ContentPartAdded { .. } => "response.content_part.added",
-            Self::ContentPartDone {} => "response.content_part.done",
+            Self::ContentPartDone => "response.content_part.done",
             Self::OutputTextDelta { .. } => "response.output_text.delta",
             Self::OutputTextDone { .. } => "response.output_text.done",
-            Self::ReasoningSummaryPartAdded {} => "response.reasoning_summary_part.added",
-            Self::ReasoningSummaryPartDone {} => "response.reasoning_summary_part.done",
+            Self::ReasoningSummaryPartAdded => "response.reasoning_summary_part.added",
+            Self::ReasoningSummaryPartDone => "response.reasoning_summary_part.done",
             Self::ReasoningSummaryTextDelta { .. } => "response.reasoning_summary_text.delta",
-            Self::ReasoningSummaryTextDone {} => "response.reasoning_summary_text.done",
+            Self::ReasoningSummaryTextDone => "response.reasoning_summary_text.done",
             Self::ReasoningTextDelta { .. } => "response.reasoning_text.delta",
-            Self::ReasoningTextDone {} => "response.reasoning_text.done",
+            Self::ReasoningTextDone => "response.reasoning_text.done",
             Self::FunctionCallArgumentsDelta { .. } => "response.function_call_arguments.delta",
             Self::FunctionCallArgumentsDone { .. } => "response.function_call_arguments.done",
             Self::CustomToolCallInputDone { .. } => "response.custom_tool_call_input.done",
@@ -398,7 +398,7 @@ pub struct UpstreamError {
     pub message: Option<String>,
 }
 
-/// A ChatGPT account refusing a model answers with a bare `detail`.
+/// A `ChatGPT` account refusing a model answers with a bare `detail`.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct ErrorEnvelope {
@@ -502,9 +502,15 @@ mod input_shape_tests {
         match &req.input[0] {
             InputItem::Message { content, .. } => match &content[0] {
                 ContentPart::InputText { text } | ContentPart::OutputText { text } => text.clone(),
-                _ => String::new(),
+                ContentPart::InputImage { .. } | ContentPart::Other => String::new(),
             },
-            _ => String::new(),
+            InputItem::FunctionCall { .. }
+            | InputItem::FunctionCallOutput { .. }
+            | InputItem::CustomToolCall { .. }
+            | InputItem::CustomToolCallOutput { .. }
+            | InputItem::Reasoning { .. }
+            | InputItem::AdditionalTools { .. }
+            | InputItem::Other => String::new(),
         }
     }
 

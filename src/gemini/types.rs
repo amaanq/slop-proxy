@@ -1,5 +1,5 @@
 //! The Gemini generateContent wire, request and response, as Google documents
-//! it at https://ai.google.dev/api/generate-content.
+//! it at <https://ai.google.dev/api/generate-content>.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -48,7 +48,10 @@ pub struct Part {
 }
 
 impl Part {
-    pub fn text(text: impl Into<String>) -> Self {
+    pub fn text<S>(text: S) -> Self
+    where
+        S: Into<String>,
+    {
         Self {
             text: Some(text.into()),
             ..Self::default()

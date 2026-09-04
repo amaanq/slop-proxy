@@ -3,10 +3,10 @@ use std::convert::Infallible;
 use axum::body::Bytes;
 use axum::extract::{Query, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::response::{IntoResponse, Response};
+use axum::response::{IntoResponse as _, Response};
 use axum::{Extension, Json};
-use eventsource_stream::Eventsource;
-use futures_util::StreamExt;
+use eventsource_stream::Eventsource as _;
+use futures_util::StreamExt as _;
 
 use super::auth::AuthInfo;
 use super::error::{Dialect, translation_error};
@@ -65,8 +65,7 @@ pub async fn chat_completions(
             log_rejected(&state, &auth, "chat", &req.model);
             return translation_error(DIALECT, "this model is served over /v1/messages");
         }
-        Provider::Zen => {}
-        Provider::OpenAi => {}
+        Provider::Zen | Provider::OpenAi => {}
     }
     let mut upstream_req = match openai_req::to_responses(&req, &state.cfg) {
         Ok(r) => r,
@@ -162,36 +161,6 @@ pub async fn models(
     headers: axum::http::HeaderMap,
     Query(q): Query<ModelsQuery>,
 ) -> Response {
-    // Both harnesses ask the same path for a catalog, and each only
-    // understands its own. `anthropic-version` is required on every Anthropic
-    // API call, so its presence identifies the caller.
-    if headers.contains_key("anthropic-version") {
-        return match state.pools.anthropic.models_raw().await {
-            Ok(body) => ([("content-type", "application/json")], body).into_response(),
-            Err(e) => super::error::error_response(
-                super::error::Dialect::Anthropic,
-                503,
-                "api_error",
-                &format!("reading the model catalog: {e}"),
-            ),
-        };
-    }
-    if q.client_version.is_some() {
-        return match state.catalog_raw().await {
-            Some(body) => ([("content-type", "application/json")], body).into_response(),
-            None => super::error::error_response(
-                DIALECT,
-                503,
-                "api_error",
-                "no usable codex account to read the model catalog from",
-            ),
-        };
-    }
-
-    let created = crate::clock::unix_now();
-
-    let live = state.catalog().await;
-
     #[derive(serde::Serialize)]
     struct ModelEntry {
         id: String,
@@ -208,8 +177,40 @@ pub async fn models(
         data: Vec<ModelEntry>,
     }
 
-    let mut data = match live {
-        Some(models) => models
+    // Both harnesses ask the same path for a catalog, and each only
+    // understands its own. `anthropic-version` is required on every Anthropic
+    // API call, so its presence identifies the caller.
+    if headers.contains_key("anthropic-version") {
+        return match state.pools.anthropic.models_raw().await {
+            Ok(body) => ([("content-type", "application/json")], body).into_response(),
+            Err(e) => super::error::error_response(
+                super::error::Dialect::Anthropic,
+                503,
+                "api_error",
+                &format!("reading the model catalog: {e}"),
+            ),
+        };
+    }
+    if q.client_version.is_some() {
+        return state.catalog_raw().await.map_or_else(
+            || {
+                super::error::error_response(
+                    DIALECT,
+                    503,
+                    "api_error",
+                    "no usable codex account to read the model catalog from",
+                )
+            },
+            |body| ([("content-type", "application/json")], body).into_response(),
+        );
+    }
+
+    let created = crate::clock::unix_now();
+
+    let live = state.catalog().await;
+
+    let mut data = if let Some(models) = live {
+        models
             .iter()
             .filter(|m| m.listed())
             .map(|m| ModelEntry {
@@ -219,23 +220,22 @@ pub async fn models(
                 owned_by: "openai",
                 context_window: m.context_window,
             })
-            .collect::<Vec<ModelEntry>>(),
-        None => {
-            let mut ids = state.cfg.models.known.clone();
-            let default = &state.cfg.models.default;
-            if !default.is_empty() && !ids.contains(default) {
-                ids.push(default.clone());
-            }
-            ids.into_iter()
-                .map(|id| ModelEntry {
-                    id,
-                    object: "model",
-                    created,
-                    owned_by: "slop-proxy",
-                    context_window: None,
-                })
-                .collect::<Vec<ModelEntry>>()
+            .collect::<Vec<ModelEntry>>()
+    } else {
+        let mut ids = state.cfg.models.known.clone();
+        let default = &state.cfg.models.default;
+        if !default.is_empty() && !ids.contains(default) {
+            ids.push(default.clone());
         }
+        ids.into_iter()
+            .map(|id| ModelEntry {
+                id,
+                object: "model",
+                created,
+                owned_by: "slop-proxy",
+                context_window: None,
+            })
+            .collect::<Vec<ModelEntry>>()
     };
 
     data.extend(state.pools.zen.models().await.into_iter().filter_map(|id| {
@@ -352,7 +352,7 @@ pub async fn responses_passthrough(
     if req.instructions.is_none() && provider == Provider::OpenAi {
         req.instructions = Some(state.cfg.codex.instructions());
     }
-    let body = match serde_json::to_vec(&req) {
+    let encoded = match serde_json::to_vec(&req) {
         Ok(v) => Bytes::from(v),
         Err(e) => return translation_error(DIALECT, &format!("serializing request: {e}")),
     };
@@ -361,7 +361,7 @@ pub async fn responses_passthrough(
         .clone()
         .unwrap_or_else(|| auth.user.clone());
 
-    let typed = match serde_json::from_slice::<ResponsesRequest>(&body) {
+    let typed = match serde_json::from_slice::<ResponsesRequest>(&encoded) {
         Ok(typed) => Some(typed),
         Err(error) => {
             tracing::warn!(%error, "responses body did not type for the bridge");
@@ -397,7 +397,7 @@ pub async fn responses_passthrough(
         upstream,
     } = match state
         .pools
-        .responses_raw(provider, route, body, typed.as_ref())
+        .responses_raw(provider, route, encoded, typed.as_ref())
         .await
     {
         Ok(d) => d,
@@ -407,7 +407,7 @@ pub async fn responses_passthrough(
     let capture = UsageCapture::default();
     let resp = match upstream {
         Upstream::Responses(resp) => resp,
-        bridged => {
+        bridged @ Upstream::Bridged { .. } => {
             let model = record.upstream_model.clone();
             return bridged_responses(state, record, bridged, model, client_streams, started).await;
         }
@@ -450,17 +450,17 @@ pub async fn responses_passthrough(
         let snap = capture.snapshot();
         apply_snapshot(&mut record, &snap);
         log_usage(&state, record);
-        match final_response {
-            Some(v) => {
-                ([("content-type", "application/json")], v.get().to_string()).into_response()
-            }
-            None => super::error::error_response(
-                DIALECT,
-                502,
-                "api_error",
-                "upstream stream ended unexpectedly",
-            ),
-        }
+        final_response.map_or_else(
+            || {
+                super::error::error_response(
+                    DIALECT,
+                    502,
+                    "api_error",
+                    "upstream stream ended unexpectedly",
+                )
+            },
+            |v| ([("content-type", "application/json")], v.get().to_owned()).into_response(),
+        )
     }
 }
 
@@ -510,7 +510,23 @@ async fn bridged_responses(
                 capture.note_stop_reason(response.status.as_deref().unwrap_or("completed"));
             }
             ResponsesEvent::OutputItemDone { item, .. } => output.push(item),
-            _ => {}
+            ResponsesEvent::Created { .. }
+            | ResponsesEvent::InProgress
+            | ResponsesEvent::OutputItemAdded { .. }
+            | ResponsesEvent::ContentPartAdded { .. }
+            | ResponsesEvent::ContentPartDone
+            | ResponsesEvent::OutputTextDelta { .. }
+            | ResponsesEvent::OutputTextDone { .. }
+            | ResponsesEvent::ReasoningSummaryPartAdded
+            | ResponsesEvent::ReasoningSummaryPartDone
+            | ResponsesEvent::ReasoningSummaryTextDelta { .. }
+            | ResponsesEvent::ReasoningSummaryTextDone
+            | ResponsesEvent::ReasoningTextDelta { .. }
+            | ResponsesEvent::ReasoningTextDone
+            | ResponsesEvent::FunctionCallArgumentsDelta { .. }
+            | ResponsesEvent::FunctionCallArgumentsDone { .. }
+            | ResponsesEvent::CustomToolCallInputDone { .. }
+            | ResponsesEvent::Other => {}
         }
     }
     let snap = capture.snapshot();
@@ -617,6 +633,25 @@ fn relay_stream(
     capture: UsageCapture,
     limits: Vec<(String, String)>,
 ) -> Response {
+    struct Held<S> {
+        inner: S,
+        capture: UsageCapture,
+        _guard: LogGuard,
+    }
+    impl<S: futures_util::Stream + Unpin> futures_util::Stream for Held<S> {
+        type Item = S::Item;
+        fn poll_next(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            let polled = std::pin::Pin::new(&mut self.inner).poll_next(cx);
+            // Never reached if the caller went away first.
+            if matches!(polled, std::task::Poll::Ready(None)) {
+                self.capture.note_upstream_eof();
+            }
+            polled
+        }
+    }
     let eof_capture = capture.clone();
     let stream = resp.bytes_stream().eventsource().filter_map(move |ev| {
         let capture = capture.clone();
@@ -663,25 +698,6 @@ fn relay_stream(
             }
         }
     });
-    struct Held<S> {
-        inner: S,
-        capture: UsageCapture,
-        _guard: LogGuard,
-    }
-    impl<S: futures_util::Stream + Unpin> futures_util::Stream for Held<S> {
-        type Item = S::Item;
-        fn poll_next(
-            mut self: std::pin::Pin<&mut Self>,
-            cx: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<Option<Self::Item>> {
-            let polled = std::pin::Pin::new(&mut self.inner).poll_next(cx);
-            // Never reached if the caller went away first.
-            if matches!(polled, std::task::Poll::Ready(None)) {
-                self.capture.note_upstream_eof();
-            }
-            polled
-        }
-    }
     let held = Held {
         inner: Box::pin(stream),
         capture: eof_capture,

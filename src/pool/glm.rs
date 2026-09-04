@@ -35,6 +35,6 @@ impl Backend for GlmClient {
         _route: Route<'_>,
         req: &Self::Request,
     ) -> Result<Self::Response, SendError> {
-        GlmClient::send(self, token, req.path, &req.body).await
+        Self::post(self, token, req.path, &req.body).await
     }
 }

@@ -2,16 +2,17 @@ pub mod anthropic;
 pub mod jwt;
 pub mod refresh;
 
-use eyre::{Result, WrapErr, bail, eyre};
+use eyre::{Result, WrapErr as _, bail, eyre};
 use serde::Deserialize;
 
+use crate::db::accounts::NewAccount;
 use crate::db::Db;
 use crate::provider::{AuthMode, Provider};
 use refresh::TokenResponse;
 
 /// One shared client so token refreshes reuse connections instead of paying
 /// TLS setup per call (refreshes run while a slot mutex is held).
-pub(crate) fn http() -> &'static reqwest::Client {
+pub fn http() -> &'static reqwest::Client {
     static HTTP: std::sync::LazyLock<reqwest::Client> =
         std::sync::LazyLock::new(reqwest::Client::new);
     &HTTP
@@ -101,7 +102,7 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
 
     let success = poll_for_code(http(), &uc.device_auth_id, &uc.user_code, interval).await?;
 
-    let resp = http()
+    let token_resp = http()
         .post(TOKEN_URL)
         .form(&[
             ("grant_type", "authorization_code"),
@@ -113,7 +114,7 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
         .send()
         .await
         .wrap_err("token exchange request failed")?;
-    let tokens = exchanged(resp)
+    let tokens = exchanged(token_resp)
         .await?
         .into_token_set(None)
         .ok_or_else(|| eyre!("no refresh_token in token response"))?;
@@ -157,7 +158,15 @@ async fn finish_login(
     tokens: &TokenSet,
 ) -> Result<()> {
     let db_id = db
-        .upsert_account(provider, id, email, label, plan, tokens, AuthMode::OAuth)
+        .upsert_account(NewAccount {
+            provider,
+            id,
+            email,
+            label,
+            plan,
+            tokens,
+            auth_mode: AuthMode::OAuth,
+        })
         .await?;
     let plan = plan.map(|p| format!(", plan {p}")).unwrap_or_default();
     println!(

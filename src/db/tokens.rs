@@ -1,5 +1,5 @@
 use eyre::Result;
-use rand::RngCore;
+use rand::RngCore as _;
 use rusqlite::params;
 
 use super::Db;
@@ -53,7 +53,7 @@ pub struct AuthenticatedToken {
 }
 
 pub fn generate() -> (String, String) {
-    let mut bytes = [0u8; 32];
+    let mut bytes = [0_u8; 32];
     rand::thread_rng().fill_bytes(&mut bytes);
     let raw = format!("sp-{}", data_encoding::BASE64URL_NOPAD.encode(&bytes));
     let prefix = raw.chars().take(12).collect();

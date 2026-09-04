@@ -73,7 +73,7 @@ pub async fn classify(
             407 => SendError::Network("proxy authentication failed".into()),
             429 => SendError::RateLimited { retry_after, body },
             400 => SendError::BadRequest(body),
-            status => SendError::Upstream { status, body },
+            code => SendError::Upstream { status: code, body },
         }
     })
 }

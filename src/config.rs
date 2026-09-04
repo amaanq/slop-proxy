@@ -1,8 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use eyre::{Result, WrapErr};
-use serde::Deserialize;
+use eyre::{Result, WrapErr as _};
 
 use crate::cli::Cli;
 use crate::provider::Provider;
@@ -24,7 +23,7 @@ pub struct Config {
     pub models: ModelsConfig,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
 #[serde(default)]
 pub struct GeminiConfig {
     pub base_url: String,
@@ -46,10 +45,10 @@ impl Default for GeminiConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
 #[serde(default)]
 pub struct PricingConfig {
-    /// LiteLLM lands price additions on a staging branch and promotes them to
+    /// `LiteLLM` lands price additions on a staging branch and promotes them to
     /// main on a release cut, so a day-0 model is priced there first.
     pub url: String,
 }
@@ -62,7 +61,7 @@ impl Default for PricingConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
 #[serde(default)]
 pub struct GlmConfig {
     pub base_url: String,
@@ -76,7 +75,7 @@ impl Default for GlmConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
 #[serde(default)]
 pub struct ZenConfig {
     pub base_url: String,
@@ -112,7 +111,7 @@ impl ZenConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
 #[serde(default)]
 pub struct AnthropicConfig {
     pub base_url: String,
@@ -135,7 +134,7 @@ impl Default for AnthropicConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
 #[serde(default)]
 pub struct CodexConfig {
     pub base_url: String,
@@ -180,7 +179,7 @@ impl CodexConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
 #[serde(default)]
 pub struct ModelsConfig {
     pub default: String,
@@ -192,7 +191,7 @@ pub struct ModelsConfig {
     pub anthropic_patterns: Vec<String>,
     /// Model patterns served by the Gemini backend.
     pub gemini_patterns: Vec<String>,
-    /// Model patterns served by OpenCode Zen.
+    /// Model patterns served by `OpenCode` Zen.
     pub zen_patterns: Vec<String>,
     /// Model patterns served by Z.ai's anthropic-compatible endpoint.
     pub glm_patterns: Vec<String>,
@@ -238,7 +237,7 @@ impl ModelsConfig {
         best.map(|(_, provider)| provider)
     }
 
-    fn sets(&self) -> [(Provider, &Vec<String>); 4] {
+    const fn sets(&self) -> [(Provider, &Vec<String>); 4] {
         [
             (Provider::Anthropic, &self.anthropic_patterns),
             (Provider::Gemini, &self.gemini_patterns),
@@ -259,8 +258,8 @@ impl ModelsConfig {
                 let kept = (1..prefix.len())
                     .rev()
                     .filter(|n| prefix.is_char_boundary(*n))
-                    .find(|n| model.starts_with(&prefix[*n..]))?;
-                Some(format!("{}{model}", &prefix[..kept]))
+                    .find(|n| prefix.get(*n..).is_some_and(|s| model.starts_with(s)))?;
+                Some(format!("{}{model}", prefix.get(..kept).unwrap_or("")))
             })
     }
 }
@@ -270,20 +269,19 @@ impl ModelsConfig {
 pub fn pattern_specificity(pattern: &str, model: &str) -> Option<usize> {
     match pattern.strip_suffix('*') {
         Some(prefix) if model.starts_with(prefix) => Some(prefix.len()),
-        Some(_) => None,
         None if model == pattern => Some(usize::MAX),
-        None => None,
+        Some(_) | None => None,
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
 pub struct ModelAlias {
     pub model: String,
     #[serde(default)]
     pub effort: Option<String>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, serde::Deserialize)]
 #[serde(default)]
 struct FileConfig {
     bind: Option<String>,
@@ -348,11 +346,13 @@ fn xdg_dir(var: &str, fallback: &str) -> PathBuf {
     std::env::var(var)
         .ok()
         .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-            PathBuf::from(home).join(fallback)
-        })
+        .map_or_else(
+            || {
+                let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+                PathBuf::from(home).join(fallback)
+            },
+            PathBuf::from,
+        )
 }
 
 #[cfg(test)]
@@ -392,13 +392,13 @@ mod route_tests {
 
     fn with_zen(zen: &[&str]) -> ModelsConfig {
         ModelsConfig {
-            zen_patterns: zen.iter().map(|s| s.to_string()).collect(),
+            zen_patterns: zen.iter().map(ToString::to_string).collect(),
             ..cfg()
         }
     }
 
     /// The suffix is how a caller asks for an effort level, so it reaches
-    /// route() attached to the model and must not decide the backend.
+    /// `route()` attached to the model and must not decide the backend.
     #[test]
     fn an_effort_suffix_does_not_change_the_backend() {
         let c = with_zen(&["muse-spark-1.3-contributor-free"]);

@@ -58,6 +58,7 @@ pub async fn messages(
     let req = match serde_json::from_slice::<AnthropicRequest>(&body) {
         Ok(r) => r,
         Err(e) => {
+            tracing::warn!(near = %super::error::body_at(&body, &e), "anthropic request did not parse");
             log_rejected(&state, &auth, "messages", &peek.model);
             return translation_error(DIALECT, &format!("invalid request: {e}"));
         }

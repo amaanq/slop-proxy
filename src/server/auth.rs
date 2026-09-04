@@ -12,13 +12,12 @@ pub struct AuthInfo {
     pub token_id: i64,
     pub user: String,
     pub meter_id: i64,
-    pub prefer_trusted: bool,
-    pub providers: Vec<crate::provider::Provider>,
+    pub limits: crate::db::tokens::TokenLimits,
 }
 
 impl AuthInfo {
     pub fn may_use(&self, provider: crate::provider::Provider) -> bool {
-        self.providers.is_empty() || self.providers.contains(&provider)
+        self.limits.may_use(provider)
     }
 }
 
@@ -76,8 +75,7 @@ pub async fn require_token(
                 token_id: token.id,
                 user: token.user.clone(),
                 meter_id: admission.meter_id,
-                prefer_trusted: token.limits.prefer_trusted,
-                providers: token.limits.providers.clone(),
+                limits: token.limits.clone(),
             });
             let mut response = next.run(req).await;
             if let Some(limit) = admission.request_limit {

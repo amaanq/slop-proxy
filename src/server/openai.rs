@@ -104,7 +104,7 @@ pub async fn chat_completions(
     let route = Route {
         session_key: &session_key,
         model: &req.model,
-        prefer_trusted: auth.prefer_trusted,
+        prefer_trusted: auth.limits.prefer_trusted,
     };
     let Dispatched {
         account_id,
@@ -449,7 +449,7 @@ pub async fn responses_passthrough(
     let route = Route {
         session_key: &session_key,
         model: &record.requested_model,
-        prefer_trusted: auth.prefer_trusted,
+        prefer_trusted: auth.limits.prefer_trusted,
     };
     let Dispatched {
         account_id,

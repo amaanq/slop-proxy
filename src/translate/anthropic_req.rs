@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
+use std::mem;
 
+use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 use serde_json::value::{RawValue, to_raw_value};
 
@@ -132,7 +134,7 @@ pub enum ToolResultBlock {
 pub enum SystemPrompt {
    Text(String),
    Blocks(Vec<SystemBlock>),
-   Other(serde::de::IgnoredAny),
+   Other(IgnoredAny),
 }
 
 #[derive(Debug, Deserialize)]
@@ -174,8 +176,8 @@ impl AnthropicRequest {
       self
          .thinking
          .as_ref()
-         .and_then(|t| t.kind.as_deref())
-         .is_some_and(|t| t == "enabled" || t == "adaptive")
+         .and_then(|thinking| thinking.kind.as_deref())
+         .is_some_and(|kind| kind == "enabled" || kind == "adaptive")
    }
 }
 
@@ -228,7 +230,7 @@ pub fn to_responses(req: &AnthropicRequest, cfg: &Config) -> ResponsesRequest {
    let resolved = model_map::resolve(&cfg.models, &req.model);
    let mut out = ResponsesRequest::new(resolved.model.clone(), cfg.codex.instructions());
 
-   if let Some(system) = &req.system {
+   if let Some(system) = req.system.as_ref() {
       let text = system_text(system);
       if !text.is_empty() {
          out.input.push(InputItem::Message {
@@ -242,29 +244,29 @@ pub fn to_responses(req: &AnthropicRequest, cfg: &Config) -> ResponsesRequest {
       convert_message(msg, &mut out.input);
    }
 
-   if let Some(tools) = &req.tools {
-      for t in tools {
-         let Some(name) = &t.name else {
+   if let Some(tools) = req.tools.as_ref() {
+      for tool in tools {
+         let Some(name) = tool.name.as_ref() else {
             continue;
          };
          out.tools.push(ToolDef {
             kind: "function".into(),
             name: name.clone(),
-            description: t.description.clone(),
+            description: tool.description.clone(),
             strict: false,
-            parameters: Some(t.input_schema.clone().unwrap_or_else(empty_schema)),
+            parameters: Some(tool.input_schema.clone().unwrap_or_else(empty_schema)),
          });
       }
    }
 
-   if let Some(tc) = &req.tool_choice {
-      out.tool_choice = Some(match tc.kind.as_deref().unwrap_or("auto") {
+   if let Some(tool_choice) = req.tool_choice.as_ref() {
+      out.tool_choice = Some(match tool_choice.kind.as_deref().unwrap_or("auto") {
          "any" => ToolChoice::Mode("required".into()),
-         "tool" => ToolChoice::function(tc.name.clone().unwrap_or_default()),
+         "tool" => ToolChoice::function(tool_choice.name.clone().unwrap_or_default()),
          "none" => ToolChoice::Mode("none".into()),
          _ => ToolChoice::Mode("auto".into()),
       });
-      if tc.disable_parallel_tool_use == Some(true) {
+      if tool_choice.disable_parallel_tool_use == Some(true) {
          out.parallel_tool_calls = Some(false);
       }
    }
@@ -272,14 +274,14 @@ pub fn to_responses(req: &AnthropicRequest, cfg: &Config) -> ResponsesRequest {
    let effort = req
       .thinking
       .as_ref()
-      .and_then(|t| {
+      .and_then(|thinking| {
          if !req.thinking_enabled() {
             return Some("low".to_owned());
          }
-         t.budget_tokens.map(|b| {
-            if b < 4096 {
+         thinking.budget_tokens.map(|budget| {
+            if budget < 4096 {
                "low".to_owned()
-            } else if b < 0x4000 {
+            } else if budget < 0x4000 {
                "medium".to_owned()
             } else {
                "high".to_owned()
@@ -301,11 +303,11 @@ pub fn to_responses(req: &AnthropicRequest, cfg: &Config) -> ResponsesRequest {
 }
 
 fn system_text(system: &SystemPrompt) -> String {
-   match system {
-      SystemPrompt::Text(s) => s.clone(),
-      SystemPrompt::Blocks(blocks) => blocks
+   match *system {
+      SystemPrompt::Text(ref text) => text.clone(),
+      SystemPrompt::Blocks(ref blocks) => blocks
          .iter()
-         .filter_map(|b| b.text.as_deref())
+         .filter_map(|block| block.text.as_deref())
          .collect::<Vec<_>>()
          .join("\n\n"),
       SystemPrompt::Other(_) => String::new(),
@@ -317,12 +319,12 @@ fn convert_message(msg: &AnthMessage, out: &mut Vec<InputItem>) {
    let role = if assistant { "assistant" } else { "user" };
 
    let text_block;
-   let blocks = match &msg.content {
-      MessageContent::Text(s) => {
-         text_block = [ContentBlock::Text { text: s.clone() }];
+   let blocks = match msg.content {
+      MessageContent::Text(ref text) => {
+         text_block = [ContentBlock::Text { text: text.clone() }];
          &text_block[..]
       },
-      MessageContent::Blocks(b) => b.as_slice(),
+      MessageContent::Blocks(ref blocks) => blocks.as_slice(),
       MessageContent::Empty => &[],
    };
 
@@ -331,14 +333,14 @@ fn convert_message(msg: &AnthMessage, out: &mut Vec<InputItem>) {
       if !buffer.is_empty() {
          dst.push(InputItem::Message {
             role: role.into(),
-            content: std::mem::take(buffer),
+            content: mem::take(buffer),
          });
       }
    };
 
    for block in blocks {
-      match block {
-         ContentBlock::Text { text } => {
+      match *block {
+         ContentBlock::Text { ref text } => {
             let text = text.clone();
             parts.push(if assistant {
                ContentPart::OutputText { text }
@@ -346,28 +348,35 @@ fn convert_message(msg: &AnthMessage, out: &mut Vec<InputItem>) {
                ContentPart::InputText { text }
             });
          },
-         ContentBlock::Image { source } => {
-            let url = match source {
-               Some(ImageSource::Base64 { media_type, data }) => {
+         ContentBlock::Image { ref source } => {
+            let url = match *source {
+               Some(ImageSource::Base64 {
+                  ref media_type,
+                  ref data,
+               }) => {
                   format!("data:{media_type};base64,{data}")
                },
-               Some(ImageSource::Url { url }) => url.clone(),
+               Some(ImageSource::Url { ref url }) => url.clone(),
                Some(ImageSource::Other) | None => continue,
             };
             parts.push(ContentPart::InputImage { image_url: url });
          },
-         ContentBlock::ToolUse { id, name, input } => {
+         ContentBlock::ToolUse {
+            ref id,
+            ref name,
+            ref input,
+         } => {
             flush(&mut parts, out);
             out.push(InputItem::FunctionCall {
                call_id: id.clone(),
                name: name.clone(),
-               arguments: input.as_ref().map_or("{}", |i| i.get()).to_owned(),
+               arguments: input.as_ref().map_or("{}", |input| input.get()).to_owned(),
             });
          },
          ContentBlock::ToolResult {
-            tool_use_id,
-            content,
-            is_error,
+            ref tool_use_id,
+            ref content,
+            ref is_error,
          } => {
             flush(&mut parts, out);
             let mut output = tool_result_text(content.as_ref());
@@ -380,14 +389,14 @@ fn convert_message(msg: &AnthMessage, out: &mut Vec<InputItem>) {
             });
          },
          ContentBlock::Thinking {
-            thinking,
-            signature,
+            ref thinking,
+            ref signature,
          } => {
-            let Some(sig) = signature else {
+            let Some(sig) = signature.as_ref() else {
                continue;
             };
-            let (id, ec) = decode_signature(sig);
-            if ec.is_none() {
+            let (id, encrypted_content) = decode_signature(sig);
+            if encrypted_content.is_none() {
                continue;
             }
             flush(&mut parts, out);
@@ -400,7 +409,7 @@ fn convert_message(msg: &AnthMessage, out: &mut Vec<InputItem>) {
                      text: thinking.clone(),
                   }]
                },
-               encrypted_content: ec,
+               encrypted_content,
             });
          },
          ContentBlock::RedactedThinking => {},
@@ -415,17 +424,17 @@ fn convert_message(msg: &AnthMessage, out: &mut Vec<InputItem>) {
 fn tool_result_text(content: Option<&ToolResultContent>) -> String {
    match content {
       None => String::new(),
-      Some(ToolResultContent::Text(s)) => s.clone(),
-      Some(ToolResultContent::Blocks(blocks)) => blocks
+      Some(&ToolResultContent::Text(ref text)) => text.clone(),
+      Some(&ToolResultContent::Blocks(ref blocks)) => blocks
          .iter()
-         .filter_map(|b| match b {
-            ToolResultBlock::Text { text } => Some(text.clone()),
+         .filter_map(|block| match *block {
+            ToolResultBlock::Text { ref text } => Some(text.clone()),
             ToolResultBlock::Image => Some("[image omitted]".into()),
             ToolResultBlock::Other => None,
          })
          .collect::<Vec<_>>()
          .join("\n"),
-      Some(ToolResultContent::Other(other)) => other.to_string(),
+      Some(&ToolResultContent::Other(ref other)) => other.to_string(),
    }
 }
 
@@ -451,7 +460,7 @@ mod tests {
          serde_json::json!([{"type": "text", "text": null}]),
          serde_json::json!([{"type": "thinking", "thinking": null, "signature": "s"}]),
       ] {
-         parse(&content).unwrap_or_else(|e| panic!("{content}: {e}"));
+         parse(&content).unwrap_or_else(|err| panic!("{content}: {err}"));
       }
    }
 }

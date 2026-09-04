@@ -1,8 +1,9 @@
-use axum::body::{Body, Bytes};
+use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::Request;
 use axum::http::header::{CONTENT_ENCODING, CONTENT_LENGTH};
 use axum::middleware::Next;
 use axum::response::Response;
+use ruzstd::decoding::StreamingDecoder;
 
 /// Codex zstd-encodes request bodies whenever it talks to the built-in
 /// `openai` provider, and a turn's context is mostly repeated text, so the
@@ -14,14 +15,14 @@ pub async fn zstd_requests(req: Request, next: Next) -> Response {
    let encoded = req
       .headers()
       .get(CONTENT_ENCODING)
-      .and_then(|v| v.to_str().ok())
-      .is_some_and(|v| v.eq_ignore_ascii_case("zstd"));
+      .and_then(|value| value.to_str().ok())
+      .is_some_and(|value| value.eq_ignore_ascii_case("zstd"));
    if !encoded {
       return next.run(req).await;
    }
 
    let (mut parts, body) = req.into_parts();
-   let Ok(bytes) = axum::body::to_bytes(body, MAX_BODY).await else {
+   let Ok(bytes) = to_bytes(body, MAX_BODY).await else {
       return super::error::error_response(
          super::error::Dialect::OpenAi,
          413,
@@ -72,7 +73,7 @@ enum DecodeError {
 fn decode(bytes: &Bytes) -> Result<Vec<u8>, DecodeError> {
    use std::io::Read as _;
    let mut out = Vec::with_capacity(bytes.len() * 4);
-   ruzstd::decoding::StreamingDecoder::new(&mut &**bytes)
+   StreamingDecoder::new(&mut &**bytes)
       .map_err(|_| DecodeError::Malformed)?
       .take(MAX_BODY as u64 + 1)
       .read_to_end(&mut out)
@@ -85,7 +86,12 @@ fn decode(bytes: &Bytes) -> Result<Vec<u8>, DecodeError> {
 
 #[cfg(test)]
 mod tests {
+   use std::ptr;
+
    use axum::Router;
+   use axum::body::{Body, Bytes, to_bytes};
+   use axum::extract::Request;
+   use axum::middleware::from_fn;
    use axum::routing::post;
 
    #[tokio::test]
@@ -100,16 +106,16 @@ mod tests {
             "/",
             post(|body: String| async move { format!("got:{body}") }),
          )
-         .layer(axum::middleware::from_fn(super::zstd_requests));
+         .layer(from_fn(super::zstd_requests));
 
-      let req = axum::extract::Request::builder()
+      let req = Request::builder()
          .method("POST")
          .uri("/")
          .header("content-encoding", "zstd")
-         .body(axum::body::Body::from(frame.to_vec()))
+         .body(Body::from(frame.to_vec()))
          .unwrap();
       let resp = tower::ServiceExt::oneshot(app, req).await.unwrap();
-      let out = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+      let out = to_bytes(resp.into_body(), 4096).await.unwrap();
       assert_eq!(out.as_ref(), b"got:{\"model\":\"m\"}");
    }
 
@@ -121,7 +127,7 @@ mod tests {
       let big = vec![b'a'; super::MAX_BODY + 4096];
       let framed = zstd_frame(&big);
       assert!(matches!(
-         super::decode(&axum::body::Bytes::from(framed)),
+         super::decode(&Bytes::from(framed)),
          Err(super::DecodeError::TooLarge)
       ));
    }
@@ -130,8 +136,8 @@ mod tests {
    fn zstd_frame(payload: &[u8]) -> Vec<u8> {
       let mut out = vec![0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x00];
       for chunk in payload.chunks(1 << 17) {
-         let last = std::ptr::eq(chunk.as_ptr_range().end, payload.as_ptr_range().end);
-         let header = ((chunk.len() as u32) << 3) | u32::from(last);
+         let last = ptr::eq(chunk.as_ptr_range().end, payload.as_ptr_range().end);
+         let header = ((chunk.len() as u32) << 3_u32) | u32::from(last);
          out.extend_from_slice(&header.to_le_bytes()[..3]);
          out.extend_from_slice(chunk);
       }

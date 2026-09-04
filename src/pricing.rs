@@ -3,6 +3,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use eyre::{Result, WrapErr as _};
+use tokio::fs;
+
+use crate::clock;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Rates {
@@ -41,16 +44,19 @@ pub struct ModelPrice {
 }
 
 impl ModelPrice {
-   pub fn cost(&self, t: Tokens) -> f64 {
-      let r = match self.long_context {
-         Some((threshold, above)) if t.context() > threshold => above,
+   pub fn cost(&self, tokens: Tokens) -> f64 {
+      let rates = match self.long_context {
+         Some((threshold, above)) if tokens.context() > threshold => above,
          _ => self.base,
       };
-      (t.input as f64).mul_add(
-         r.input,
-         (t.output as f64).mul_add(
-            r.output,
-            (t.cache_read as f64).mul_add(r.cache_read, t.cache_write as f64 * r.cache_write),
+      (tokens.input as f64).mul_add(
+         rates.input,
+         (tokens.output as f64).mul_add(
+            rates.output,
+            (tokens.cache_read as f64).mul_add(
+               rates.cache_read,
+               tokens.cache_write as f64 * rates.cache_write,
+            ),
          ),
       )
    }
@@ -72,39 +78,39 @@ impl PriceTable {
    /// spellings, so a lookup that misses is retried against the prefixed
    /// forms before giving up.
    pub fn find(&self, model: &str) -> Option<ModelPrice> {
-      if let Some(p) = self.0.get(model) {
-         return Some(*p);
+      if let Some(price) = self.0.get(model) {
+         return Some(*price);
       }
       let suffix = format!("/{model}");
       let dotted = format!(".{model}");
       self
          .0
          .iter()
-         .find(|(k, _)| k.ends_with(&suffix) || k.ends_with(&dotted))
-         .map(|(_, p)| *p)
+         .find(|&(key, _)| key.ends_with(&suffix) || key.ends_with(&dotted))
+         .map(|(_, price)| *price)
    }
 
-   pub fn cost(&self, model: &str, t: Tokens) -> f64 {
+   pub fn cost(&self, model: &str, tokens: Tokens) -> f64 {
       self
          .find(model)
-         .or_else(|| unpublished(model, crate::clock::unix_now()))
-         .map_or(0.0, |p| p.cost(t))
+         .or_else(|| unpublished(model, clock::unix_now()))
+         .map_or(0.0, |price| price.cost(tokens))
    }
 
    /// What the same tokens would have cost at the model's own list price.
    /// A free tier is published under the paid name, so the marker is dropped
    /// before looking it up, which is the only way to value what it saved.
-   pub fn list_cost(&self, model: &str, t: Tokens) -> f64 {
+   pub fn list_cost(&self, model: &str, tokens: Tokens) -> f64 {
       let paid = model.strip_suffix("-free").unwrap_or(model);
-      let direct = self.cost(paid, t);
-      if direct > 0.0 {
+      let direct = self.cost(paid, tokens);
+      if direct > 0.0_f64 {
          return direct;
       }
       // The contributor tier is its own product with its own rates, so the
       // discount is only visible by pricing the tier rather than the family.
       match paid.rsplit_once("-contributor") {
-         Some((family, _)) => self.cost(family, t),
-         None => 0.0,
+         Some((family, _)) => self.cost(family, tokens),
+         None => 0.0_f64,
       }
    }
 
@@ -113,7 +119,7 @@ impl PriceTable {
          serde_json::from_str(body).wrap_err("parsing the price table")?;
       Ok(Self(
          raw.into_iter()
-            .filter_map(|(name, e)| e.into_price().map(|p| (name, p)))
+            .filter_map(|(name, entry)| entry.into_price().map(|price| (name, price)))
             .collect(),
       ))
    }
@@ -125,7 +131,7 @@ impl PriceTable {
 /// 2027-01-01, per <https://ai.google.dev/gemini-api/docs/pricing>.
 pub fn unpublished(model: &str, now: i64) -> Option<ModelPrice> {
    const INTRO_ENDS: i64 = 1_798_761_600;
-   let scale = if now < INTRO_ENDS { 1.0 } else { 2.0 };
+   let scale = if now < INTRO_ENDS { 1.0_f64 } else { 2.0_f64 };
    let base = match model {
       "gemini-3.8-flash" => Rates {
          input: 0.75e-6 * scale,
@@ -187,9 +193,9 @@ impl Entry {
          let Some((prefix, tail)) = key.split_once("_above_") else {
             continue;
          };
-         let Some(k) = tail
+         let Some(limit) = tail
             .strip_suffix("k_tokens")
-            .and_then(|n| n.parse::<i64>().ok())
+            .and_then(|num| num.parse::<i64>().ok())
          else {
             continue;
          };
@@ -202,9 +208,9 @@ impl Entry {
             _ => continue,
          };
          *slot = rate;
-         threshold = Some(threshold.map_or(k, |t: i64| t.min(k)));
+         threshold = Some(threshold.map_or(limit, |seen: i64| seen.min(limit)));
       }
-      threshold.map(|k| (k * 1000, above))
+      threshold.map(|limit| (limit * 1000, above))
    }
 }
 
@@ -233,22 +239,22 @@ impl Prices {
       self.table.read().unwrap().clone()
    }
 
-   pub fn cost(&self, model: &str, t: Tokens) -> f64 {
-      self.table().cost(model, t)
+   pub fn cost(&self, model: &str, tokens: Tokens) -> f64 {
+      self.table().cost(model, tokens)
    }
 
    /// Loads the cached copy first so pricing is available before the network
    /// is, then refreshes from upstream.
    pub async fn load(&self) {
       if self.table().is_empty()
-         && let Ok(body) = tokio::fs::read_to_string(&self.cache_path).await
+         && let Ok(body) = fs::read_to_string(&self.cache_path).await
          && let Ok(table) = PriceTable::parse(&body)
       {
          tracing::info!("loaded {} cached model prices", table.len());
          *self.table.write().unwrap() = Arc::new(table);
       }
-      if let Err(e) = self.refresh().await {
-         tracing::warn!("refreshing model prices: {e}");
+      if let Err(err) = self.refresh().await {
+         tracing::warn!("refreshing model prices: {err}");
       }
    }
 
@@ -264,7 +270,7 @@ impl Prices {
          eyre::bail!("price table has no priced models");
       }
       tracing::info!("loaded {} model prices", table.len());
-      let _ = tokio::fs::write(&self.cache_path, &body).await;
+      let _ = fs::write(&self.cache_path, &body).await;
       *self.table.write().unwrap() = Arc::new(table);
       Ok(())
    }
@@ -310,7 +316,7 @@ mod tests {
    /// free marker has to come off before what it saved can be priced.
    #[test]
    fn a_free_tier_prices_against_its_paid_listing() {
-      let t = PriceTable::parse(
+      let table = PriceTable::parse(
             r#"{"meta/muse-spark-1.3-contributor": {"input_cost_per_token": 1e-7, "output_cost_per_token": 2e-7},
                 "meta/muse-spark-1.3": {"input_cost_per_token": 1.25e-6, "output_cost_per_token": 4.25e-6}}"#,
         )
@@ -320,66 +326,68 @@ mod tests {
          output: 1_000_000,
          ..Tokens::default()
       };
-      assert!(t.cost("muse-spark-1.3-contributor-free", tokens).abs() < f64::EPSILON);
-      assert!((t.list_cost("muse-spark-1.3-contributor-free", tokens) - 0.3).abs() < 1e-9);
+      assert!(table.cost("muse-spark-1.3-contributor-free", tokens).abs() < f64::EPSILON);
+      assert!(
+         (table.list_cost("muse-spark-1.3-contributor-free", tokens) - 0.3_f64).abs() < 1e-9_f64
+      );
    }
 
    #[test]
    fn an_unpublished_model_still_bills() {
-      let t = table();
+      let prices = table();
       let tokens = Tokens {
          input: 1_000_000,
          output: 1_000_000,
          cache_read: 1_000_000,
          ..Tokens::default()
       };
-      assert!((t.cost("gemini-3.8-flash", tokens) - 4.575).abs() < 1e-9);
-      assert!(t.cost("gemini-3.8-pro", tokens).abs() < f64::EPSILON);
+      assert!((prices.cost("gemini-3.8-flash", tokens) - 4.575_f64).abs() < 1e-9_f64);
+      assert!(prices.cost("gemini-3.8-pro", tokens).abs() < f64::EPSILON);
    }
 
    #[test]
    fn the_introductory_rate_expires() {
       let intro = unpublished("gemini-3.8-flash", 1_798_761_599).unwrap();
       let after = unpublished("gemini-3.8-flash", 1_798_761_600).unwrap();
-      assert!(intro.base.input.mul_add(-2.0, after.base.input).abs() < 1e-12);
+      assert!(intro.base.input.mul_add(-2.0_f64, after.base.input).abs() < 1e-12_f64);
    }
 
    #[test]
    fn a_published_price_beats_the_builtin() {
-      let t = PriceTable::parse(
+      let table = PriceTable::parse(
          r#"{"gemini-3.8-flash": {"input_cost_per_token": 0.001, "output_cost_per_token": 0.0}}"#,
       )
       .unwrap();
-      assert!((t.find("gemini-3.8-flash").unwrap().base.input - 0.001).abs() < f64::EPSILON);
+      assert!((table.find("gemini-3.8-flash").unwrap().base.input - 0.001).abs() < f64::EPSILON);
    }
 
    #[test]
    fn unpriced_models_are_dropped() {
-      let t = table();
-      assert!(t.find("chatgpt/gpt-5.3-codex-spark").is_none());
-      assert!(t.cost("gpt-5.3-codex-spark", Tokens::default()).abs() < f64::EPSILON);
+      let prices = table();
+      assert!(prices.find("chatgpt/gpt-5.3-codex-spark").is_none());
+      assert!(prices.cost("gpt-5.3-codex-spark", Tokens::default()).abs() < f64::EPSILON);
    }
 
    #[test]
    fn a_bare_name_beats_a_vendor_prefixed_one() {
-      let t = table();
-      let p = t.find("claude-opus-5").unwrap();
-      assert!((p.base.input - 0.000_005).abs() < f64::EPSILON);
+      let prices = table();
+      let price = prices.find("claude-opus-5").unwrap();
+      assert!((price.base.input - 0.000_005).abs() < f64::EPSILON);
    }
 
    #[test]
    fn a_prefixed_key_is_found_by_bare_name() {
-      let t = PriceTable::parse(
+      let table = PriceTable::parse(
          r#"{"chatgpt/gpt-x": {"input_cost_per_token": 0.001, "output_cost_per_token": 0.002}}"#,
       )
       .unwrap();
-      assert!((t.find("gpt-x").unwrap().base.input - 0.001).abs() < f64::EPSILON);
+      assert!((table.find("gpt-x").unwrap().base.input - 0.001).abs() < f64::EPSILON);
    }
 
    #[test]
    fn crossing_the_threshold_reprices_the_whole_request() {
-      let t = table();
-      let under = t.cost(
+      let prices = table();
+      let under = prices.cost(
          "gpt-5.6-sol",
          Tokens {
             input: 10_000,
@@ -395,10 +403,10 @@ mod tests {
                1_000.0_f64.mul_add(0.000_02, 100_000.0 * 0.000_000_4),
             ))
          .abs()
-            < 1e-12
+            < 1e-12_f64
       );
 
-      let over = t.cost(
+      let over = prices.cost(
          "gpt-5.6-sol",
          Tokens {
             input: 10_000,
@@ -411,15 +419,15 @@ mod tests {
          0.000_008,
          1_000.0_f64.mul_add(0.000_03, 300_000.0 * 0.000_000_8),
       );
-      assert!((over - want).abs() < 1e-12, "{over} != {want}");
+      assert!((over - want).abs() < 1e-12_f64, "{over} != {want}");
    }
 
    #[test]
    fn a_missing_above_rate_keeps_the_base_one() {
-      let t = table();
-      let p = t.find("gpt-5.6-sol").unwrap();
-      let (threshold, above) = p.long_context.unwrap();
+      let prices = table();
+      let price = prices.find("gpt-5.6-sol").unwrap();
+      let (threshold, above) = price.long_context.unwrap();
       assert_eq!(threshold, 272_000);
-      assert!((above.cache_write - p.base.cache_write).abs() < f64::EPSILON);
+      assert!((above.cache_write - price.base.cache_write).abs() < f64::EPSILON);
    }
 }

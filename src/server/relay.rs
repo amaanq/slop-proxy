@@ -1,19 +1,23 @@
 use axum::body::{Body, Bytes};
 use axum::http::HeaderMap;
+use axum::http::response::Builder;
 use axum::response::Response;
 use serde::Deserialize;
 use serde_json::value::RawValue;
+use std::io::{Result, Write};
+use std::time::Instant;
 
 use super::auth::AuthInfo;
 use super::error::{Dialect, error_response, pool_error_response};
 use super::pipeline::{dispatch_failed, read_body, relayed};
 use super::{AppState, LogGuard, log_error, log_usage};
 use crate::anthropic::client::RelayHeaders;
-use crate::pool::Route;
 use crate::pool::anthropic::Relay as AnthropicRelay;
 use crate::pool::glm::Relay as GlmRelay;
+use crate::pool::{Route, UsageWindow};
 use crate::provider::Provider;
 use crate::translate::UsageCapture;
+use crate::translate::anthropic_req::AnthropicRequest;
 
 const DIALECT: Dialect = Dialect::Anthropic;
 
@@ -61,7 +65,7 @@ impl Peek {
             .effort
             .or_else(|| peek.thinking?.kind)
             .unwrap_or_default(),
-         user_id: peek.metadata.and_then(|m| m.user_id),
+         user_id: peek.metadata.and_then(|meta| meta.user_id),
          system: peek.system,
       }
    }
@@ -70,28 +74,28 @@ impl Peek {
    /// exactly the granularity upstream prompt caching wants.
    fn session_key(&self, auth: &AuthInfo) -> String {
       struct HashWriter(hmac_sha256::Hash);
-      impl std::io::Write for HashWriter {
-         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+      impl Write for HashWriter {
+         fn write(&mut self, buf: &[u8]) -> Result<usize> {
             self.0.update(buf);
             Ok(buf.len())
          }
-         fn flush(&mut self) -> std::io::Result<()> {
+         fn flush(&mut self) -> Result<()> {
             Ok(())
          }
       }
 
-      if let Some(uid) = &self.user_id {
+      if let Some(uid) = self.user_id.as_ref() {
          return uid.clone();
       }
-      let mut h = HashWriter(hmac_sha256::Hash::new());
-      h.0.update(auth.user.as_bytes());
-      if let Some(system) = &self.system {
-         let _ = serde_json::to_writer(&mut h, system);
+      let mut hasher = HashWriter(hmac_sha256::Hash::new());
+      hasher.0.update(auth.user.as_bytes());
+      if let Some(system) = self.system.as_ref() {
+         let _ = serde_json::to_writer(&mut hasher, system);
       }
-      let d = h.0.finalize();
+      let digest = hasher.0.finalize();
       format!(
          "sys-{:016x}",
-         u64::from_le_bytes(d[..8].try_into().unwrap())
+         u64::from_le_bytes(digest[..8].try_into().unwrap())
       )
    }
 }
@@ -151,7 +155,7 @@ fn relay_headers(headers: &HeaderMap) -> RelayHeaders {
    let get = |name: &str| {
       headers
          .get(name)
-         .and_then(|v| v.to_str().ok())
+         .and_then(|value| value.to_str().ok())
          .map(String::from)
    };
    RelayHeaders {
@@ -167,8 +171,8 @@ fn is_claude_code(headers: &HeaderMap) -> bool {
    let has = |name: &str, want: &str| {
       headers
          .get(name)
-         .and_then(|v| v.to_str().ok())
-         .is_some_and(|v| v.contains(want))
+         .and_then(|value| value.to_str().ok())
+         .is_some_and(|value| value.contains(want))
    };
    has("anthropic-beta", "claude-code-") && has("user-agent", "claude-cli/")
 }
@@ -179,7 +183,7 @@ fn not_claude_code(user: &str, headers: &HeaderMap) -> Response {
    let show = |name: &str| {
       headers
          .get(name)
-         .and_then(|v| v.to_str().ok())
+         .and_then(|value| value.to_str().ok())
          .unwrap_or("<absent>")
    };
    tracing::warn!(
@@ -197,9 +201,9 @@ fn not_claude_code(user: &str, headers: &HeaderMap) -> Response {
 
 /// The body goes upstream untouched, so the parse here only feeds the log.
 fn anthropic_facts(body: &[u8], headers: &HeaderMap) -> super::facts::RequestFacts {
-   serde_json::from_slice::<crate::translate::anthropic_req::AnthropicRequest>(body).map_or_else(
+   serde_json::from_slice::<AnthropicRequest>(body).map_or_else(
       |_| super::facts::RequestFacts::empty(headers),
-      |r| super::facts::RequestFacts::from_anthropic(&r, headers),
+      |req| super::facts::RequestFacts::from_anthropic(&req, headers),
    )
 }
 
@@ -210,7 +214,7 @@ pub async fn messages(
    body: Bytes,
    peek: Peek,
 ) -> Response {
-   let started = std::time::Instant::now();
+   let started = Instant::now();
    let key = peek.session_key(&auth);
    let facts = anthropic_facts(&body, &headers);
    let mut record = super::pipeline::record(
@@ -247,8 +251,8 @@ pub async fn messages(
       )
       .await
    {
-      Ok(r) => r,
-      Err(e) => return dispatch_failed(&state, record, DIALECT, e),
+      Ok(res) => res,
+      Err(err) => return dispatch_failed(&state, record, DIALECT, err),
    };
    record.account_id = account_id;
    record.status = i64::from(resp.status().as_u16());
@@ -256,8 +260,8 @@ pub async fn messages(
    let streaming = resp
       .headers()
       .get("content-type")
-      .and_then(|v| v.to_str().ok())
-      .is_some_and(|ct| ct.contains("text/event-stream"));
+      .and_then(|value| value.to_str().ok())
+      .is_some_and(|content_type| content_type.contains("text/event-stream"));
    let mut builder = forwarded_response(&resp);
    for (name, value) in pool_rate_limit_headers(&state.pools.anthropic.pool_windows().await) {
       builder = builder.header(name, value);
@@ -281,15 +285,15 @@ pub async fn messages(
    } else {
       let ok = resp.status().is_success();
       let bytes = match read_body(&state, &record, DIALECT, resp).await {
-         Ok(b) => b,
-         Err(r) => return r,
+         Ok(bytes) => bytes,
+         Err(resp) => return resp,
       };
       if ok {
-         if let Ok(m) = serde_json::from_slice::<MessageEnvelope>(&bytes) {
-            record.input_tokens = m.usage.input_tokens;
-            record.output_tokens = m.usage.output_tokens;
-            record.cache_read_tokens = m.usage.cache_read_input_tokens;
-            record.cache_write_tokens = m.usage.cache_creation_input_tokens;
+         if let Ok(msg) = serde_json::from_slice::<MessageEnvelope>(&bytes) {
+            record.input_tokens = msg.usage.input_tokens;
+            record.output_tokens = msg.usage.output_tokens;
+            record.cache_read_tokens = msg.usage.cache_read_input_tokens;
+            record.cache_write_tokens = msg.usage.cache_creation_input_tokens;
          }
       } else {
          record.error_kind = Some("upstream_error".into());
@@ -297,7 +301,7 @@ pub async fn messages(
       log_usage(&state, record);
       builder
          .body(Body::from(bytes))
-         .unwrap_or_else(|e| error_response(DIALECT, 502, "api_error", &e.to_string()))
+         .unwrap_or_else(|err| error_response(DIALECT, 502, "api_error", &err.to_string()))
    }
 }
 
@@ -311,7 +315,7 @@ pub async fn glm(
    body: Bytes,
    peek: Peek,
 ) -> Response {
-   let started = std::time::Instant::now();
+   let started = Instant::now();
    let key = peek.session_key(&auth);
    let facts = anthropic_facts(&body, &headers);
    let mut record = super::pipeline::record(
@@ -341,8 +345,8 @@ pub async fn glm(
       )
       .await
    {
-      Ok(r) => r,
-      Err(e) => return dispatch_failed(&state, record, DIALECT, e),
+      Ok(res) => res,
+      Err(err) => return dispatch_failed(&state, record, DIALECT, err),
    };
    record.account_id = account_id;
    record.status = i64::from(resp.status().as_u16());
@@ -350,8 +354,8 @@ pub async fn glm(
    let streaming = resp
       .headers()
       .get("content-type")
-      .and_then(|v| v.to_str().ok())
-      .is_some_and(|ct| ct.contains("text/event-stream"));
+      .and_then(|value| value.to_str().ok())
+      .is_some_and(|content_type| content_type.contains("text/event-stream"));
    let builder = forwarded_response(&resp);
 
    if streaming {
@@ -373,15 +377,15 @@ pub async fn glm(
 
    let ok = resp.status().is_success();
    let bytes = match read_body(&state, &record, DIALECT, resp).await {
-      Ok(b) => b,
-      Err(r) => return r,
+      Ok(bytes) => bytes,
+      Err(resp) => return resp,
    };
    if ok {
-      if let Ok(m) = serde_json::from_slice::<MessageEnvelope>(&bytes) {
-         record.input_tokens = m.usage.input_tokens;
-         record.output_tokens = m.usage.output_tokens;
-         record.cache_read_tokens = m.usage.cache_read_input_tokens;
-         record.cache_write_tokens = m.usage.cache_creation_input_tokens;
+      if let Ok(msg) = serde_json::from_slice::<MessageEnvelope>(&bytes) {
+         record.input_tokens = msg.usage.input_tokens;
+         record.output_tokens = msg.usage.output_tokens;
+         record.cache_read_tokens = msg.usage.cache_read_input_tokens;
+         record.cache_write_tokens = msg.usage.cache_creation_input_tokens;
       }
    } else {
       record.error_kind = Some("upstream_error".into());
@@ -389,7 +393,7 @@ pub async fn glm(
    log_usage(&state, record);
    builder
       .body(Body::from(bytes))
-      .unwrap_or_else(|e| error_response(DIALECT, 502, "api_error", &e.to_string()))
+      .unwrap_or_else(|err| error_response(DIALECT, 502, "api_error", &err.to_string()))
 }
 
 pub async fn count_tokens(
@@ -422,29 +426,29 @@ pub async fn count_tokens(
       )
       .await
    {
-      Ok((_, r)) => r,
-      Err(e) => return pool_error_response(DIALECT, &state.cfg.models, e),
+      Ok((_, resp)) => resp,
+      Err(err) => return pool_error_response(DIALECT, &state.cfg.models, err),
    };
    let builder = forwarded_response(&resp);
    match resp.bytes().await {
       Ok(bytes) => builder
          .body(Body::from(bytes))
-         .unwrap_or_else(|e| error_response(DIALECT, 502, "api_error", &e.to_string())),
-      Err(e) => error_response(DIALECT, 502, "api_error", &e.to_string()),
+         .unwrap_or_else(|err| error_response(DIALECT, 502, "api_error", &err.to_string())),
+      Err(err) => error_response(DIALECT, 502, "api_error", &err.to_string()),
    }
 }
 
-pub(super) fn forwarded_response(resp: &reqwest::Response) -> axum::http::response::Builder {
+pub(super) fn forwarded_response(resp: &reqwest::Response) -> Builder {
    let mut builder = Response::builder().status(resp.status().as_u16());
    for (name, value) in resp.headers() {
-      let n = name.as_str();
-      if is_rate_limit_header(n) {
+      let key = name.as_str();
+      if is_rate_limit_header(key) {
          continue;
       }
-      if n == "content-type"
-         || n == "request-id"
-         || n == "retry-after"
-         || n.starts_with("anthropic-")
+      if key == "content-type"
+         || key == "request-id"
+         || key == "retry-after"
+         || key.starts_with("anthropic-")
       {
          builder = builder.header(name, value);
       }
@@ -460,21 +464,19 @@ fn is_rate_limit_header(name: &str) -> bool {
 
 /// Claude Code warns on the utilization in these, so they carry the pool's
 /// figures rather than one account's.
-pub(super) fn pool_rate_limit_headers(
-   windows: &[crate::pool::UsageWindow],
-) -> Vec<(String, String)> {
+pub(super) fn pool_rate_limit_headers(windows: &[UsageWindow]) -> Vec<(String, String)> {
    let mut out = Vec::new();
    let mut soonest: Option<i64> = None;
-   for w in windows {
-      let prefix = format!("anthropic-ratelimit-unified-{}", w.name);
+   for window in windows {
+      let prefix = format!("anthropic-ratelimit-unified-{}", window.name);
       out.push((format!("{prefix}-status"), "allowed".into()));
       out.push((
          format!("{prefix}-utilization"),
-         format!("{:.2}", w.utilization),
+         format!("{:.2}", window.utilization),
       ));
-      if let Some(resets_at) = w.resets_at {
+      if let Some(resets_at) = window.resets_at {
          out.push((format!("{prefix}-reset"), resets_at.to_string()));
-         soonest = Some(soonest.map_or(resets_at, |s: i64| s.min(resets_at)));
+         soonest = Some(soonest.map_or(resets_at, |prev: i64| prev.min(resets_at)));
       }
    }
    if !out.is_empty() {
@@ -514,11 +516,11 @@ impl SseScan {
       self.capture.note_bytes(chunk.len());
       self.buf.push_str(&String::from_utf8_lossy(chunk));
       let mut consumed = 0;
-      while let Some(nl) = self.buf.get(consumed..).and_then(|s| s.find('\n')) {
+      while let Some(newline) = self.buf.get(consumed..).and_then(|text| text.find('\n')) {
          let line = self
             .buf
-            .get(consumed..consumed + nl)
-            .map_or("", |s| s.trim());
+            .get(consumed..consumed + newline)
+            .map_or("", |text| text.trim());
          if let Some(event) = line.strip_prefix("event:") {
             self.capture.note_event(event.trim());
             self.interesting = matches!(
@@ -527,44 +529,44 @@ impl SseScan {
             );
          } else if self.interesting
             && let Some(data) = line.strip_prefix("data:")
-            && let Ok(ev) = serde_json::from_str::<RelayEvent>(data.trim_start())
+            && let Ok(event) = serde_json::from_str::<RelayEvent>(data.trim_start())
          {
-            apply_event(&self.capture, ev);
+            apply_event(&self.capture, event);
          }
-         consumed += nl + 1;
+         consumed += newline + 1;
       }
       self.buf.drain(..consumed);
    }
 }
 
-fn apply_event(capture: &UsageCapture, ev: RelayEvent) {
-   let mut c = capture.0.lock().unwrap();
-   match ev {
+fn apply_event(capture: &UsageCapture, event: RelayEvent) {
+   let mut guard = capture.0.lock().unwrap();
+   match event {
       RelayEvent::MessageStart { message } => {
-         c.input_tokens = message.usage.input_tokens;
-         c.output_tokens = message.usage.output_tokens;
-         c.cache_read_tokens = message.usage.cache_read_input_tokens;
-         c.cache_write_tokens = message.usage.cache_creation_input_tokens;
+         guard.input_tokens = message.usage.input_tokens;
+         guard.output_tokens = message.usage.output_tokens;
+         guard.cache_read_tokens = message.usage.cache_read_input_tokens;
+         guard.cache_write_tokens = message.usage.cache_creation_input_tokens;
       },
       RelayEvent::MessageDelta { usage, delta } => {
          if let Some(usage) = usage {
-            c.output_tokens = usage.output_tokens;
+            guard.output_tokens = usage.output_tokens;
          }
-         if let Some(reason) = delta.and_then(|d| d.stop_reason) {
-            c.stop_reason = Some(reason);
+         if let Some(reason) = delta.and_then(|stop| stop.stop_reason) {
+            guard.stop_reason = Some(reason);
          }
       },
       RelayEvent::ContentBlockStart { content_block } => {
          if let Some(name) = content_block.name
-            && !c.tools_called.contains(&name)
+            && !guard.tools_called.contains(&name)
          {
-            c.tools_called.push(name);
+            guard.tools_called.push(name);
          }
       },
-      RelayEvent::MessageStop => c.completed = true,
+      RelayEvent::MessageStop => guard.completed = true,
       RelayEvent::Error => {
-         if c.error_kind.is_none() {
-            c.error_kind = Some("upstream_error".into());
+         if guard.error_kind.is_none() {
+            guard.error_kind = Some("upstream_error".into());
          }
       },
       RelayEvent::Other => {},
@@ -573,14 +575,14 @@ fn apply_event(capture: &UsageCapture, ev: RelayEvent) {
 
 #[cfg(test)]
 mod tests {
-   use axum::http::HeaderMap;
+   use axum::http::{HeaderMap, HeaderName};
 
    fn headers(pairs: &[(&'static str, &str)]) -> HeaderMap {
-      let mut h = HeaderMap::new();
-      for (k, v) in pairs {
-         h.insert(axum::http::HeaderName::from_static(k), v.parse().unwrap());
+      let mut map = HeaderMap::new();
+      for &(key, value) in pairs {
+         map.insert(HeaderName::from_static(key), value.parse().unwrap());
       }
-      h
+      map
    }
 
    /// Captured from Claude Code 2.1.252.
@@ -619,7 +621,6 @@ mod tests {
 #[cfg(test)]
 mod pool_header_tests {
    use super::*;
-   use crate::pool::UsageWindow;
 
    #[test]
    fn one_accounts_quota_never_reaches_the_caller() {
@@ -645,7 +646,11 @@ mod pool_header_tests {
             resets_at: Some(900),
          },
       ]);
-      let get = |k: &str| out.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
+      let get = |key: &str| {
+         out.iter()
+            .find(|&&(ref name, _)| name == key)
+            .map(|&(_, ref value)| value.as_str())
+      };
       assert_eq!(
          get("anthropic-ratelimit-unified-5h-utilization"),
          Some("0.50")

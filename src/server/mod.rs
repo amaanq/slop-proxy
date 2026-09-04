@@ -12,16 +12,21 @@ pub mod relay;
 #[cfg(test)]
 mod tests;
 
+use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::middleware;
 use axum::routing::{get, post};
 use eyre::Result;
 use eyre::WrapErr as _;
+use tokio::net::TcpListener;
+use tokio::{signal, time};
 
-use crate::codex::models::ModelInfo;
+use crate::codex::models::{ModelInfo, ModelsResponse};
+use crate::codex::types::ResponsesRequest;
 use crate::config::Config;
 use crate::db::Db;
 use crate::db::usage::UsageRecord;
@@ -40,7 +45,7 @@ pub struct Inner {
    pub pools: Pools,
 }
 
-impl std::ops::Deref for AppState {
+impl Deref for AppState {
    type Target = Inner;
    fn deref(&self) -> &Inner {
       &self.0
@@ -58,8 +63,8 @@ impl AppState {
             self.models.put(body.clone());
             Some(body)
          },
-         Err(e) => {
-            tracing::warn!("fetching models from codex backend: {e}");
+         Err(err) => {
+            tracing::warn!("fetching models from codex backend: {err}");
             None
          },
       }
@@ -67,10 +72,10 @@ impl AppState {
 
    pub async fn catalog(&self) -> Option<Vec<ModelInfo>> {
       let raw = self.catalog_raw().await?;
-      match serde_json::from_str::<crate::codex::models::ModelsResponse>(&raw) {
+      match serde_json::from_str::<ModelsResponse>(&raw) {
          Ok(parsed) => Some(parsed.models),
-         Err(e) => {
-            tracing::warn!("parsing models response: {e}");
+         Err(err) => {
+            tracing::warn!("parsing models response: {err}");
             None
          },
       }
@@ -91,10 +96,11 @@ impl ModelCache {
    }
 
    pub fn get(&self) -> Option<String> {
-      let g = self.inner.lock().unwrap();
-      g.as_ref()
-         .filter(|(t, _)| t.elapsed() < self.ttl)
-         .map(|(_, m)| m.clone())
+      let guard = self.inner.lock().unwrap();
+      guard
+         .as_ref()
+         .filter(|&&(ref tick, _)| tick.elapsed() < self.ttl)
+         .map(|&(_, ref model)| model.clone())
    }
 
    pub fn put(&self, catalog: String) {
@@ -122,7 +128,7 @@ pub async fn serve(db: Db, cfg: Config, bind: &str) -> Result<()> {
    price_history(&state).await;
    let price_state = state.clone();
    tokio::spawn(async move {
-      let mut tick = tokio::time::interval(Duration::from_hours(12));
+      let mut tick = time::interval(Duration::from_hours(12));
       tick.tick().await;
       loop {
          tick.tick().await;
@@ -133,7 +139,7 @@ pub async fn serve(db: Db, cfg: Config, bind: &str) -> Result<()> {
    });
    let reload_state = state.clone();
    tokio::spawn(async move {
-      let mut tick = tokio::time::interval(Duration::from_mins(1));
+      let mut tick = time::interval(Duration::from_mins(1));
       tick.tick().await;
       loop {
          tick.tick().await;
@@ -144,7 +150,7 @@ pub async fn serve(db: Db, cfg: Config, bind: &str) -> Result<()> {
 
    if let Some(mbind) = state.cfg.metrics_bind.clone() {
       let mstate = state.clone();
-      let listener = tokio::net::TcpListener::bind(&mbind)
+      let listener = TcpListener::bind(&mbind)
          .await
          .wrap_err_with(|| format!("binding metrics listener {mbind}"))?;
       tracing::info!("metrics on http://{mbind}/metrics");
@@ -152,20 +158,20 @@ pub async fn serve(db: Db, cfg: Config, bind: &str) -> Result<()> {
          let app = Router::new()
             .route("/metrics", get(metrics::metrics))
             .with_state(mstate);
-         if let Err(e) = axum::serve(listener, app).await {
-            tracing::error!("metrics listener failed: {e}");
+         if let Err(err) = axum::serve(listener, app).await {
+            tracing::error!("metrics listener failed: {err}");
          }
       });
    }
    let app = router(state);
 
-   let listener = tokio::net::TcpListener::bind(bind)
+   let listener = TcpListener::bind(bind)
       .await
       .wrap_err_with(|| format!("binding {bind}"))?;
    tracing::info!("listening on http://{bind}");
    axum::serve(listener, app)
       .with_graceful_shutdown(async {
-         let _ = tokio::signal::ctrl_c().await;
+         let _ = signal::ctrl_c().await;
       })
       .await?;
    Ok(())
@@ -176,29 +182,29 @@ pub async fn serve(db: Db, cfg: Config, bind: &str) -> Result<()> {
 async fn price_history(state: &AppState) {
    let rows = match state.db.unpriced_usage().await {
       Ok(rows) => rows,
-      Err(e) => {
-         tracing::warn!("reading unpriced usage: {e}");
+      Err(err) => {
+         tracing::warn!("reading unpriced usage: {err}");
          return;
       },
    };
    let table = state.prices.table();
    let priced: Vec<_> = rows
       .iter()
-      .map(|r| {
+      .map(|row| {
          (
-            r.id,
-            state.prices.cost(&r.model, r.tokens),
-            table.list_cost(&r.model, r.tokens),
+            row.id,
+            state.prices.cost(&row.model, row.tokens),
+            table.list_cost(&row.model, row.tokens),
          )
       })
-      .filter(|(_, cost, list_cost)| *cost > 0.0 || *list_cost > 0.0)
+      .filter(|&(_, ref cost, ref list_cost)| *cost > 0.0_f64 || *list_cost > 0.0_f64)
       .collect();
    if priced.is_empty() {
       return;
    }
    match state.db.price_usage(&priced).await {
       Ok(()) => tracing::info!("priced {} earlier request(s)", priced.len()),
-      Err(e) => tracing::warn!("pricing earlier requests: {e}"),
+      Err(err) => tracing::warn!("pricing earlier requests: {err}"),
    }
 }
 
@@ -216,7 +222,7 @@ pub fn router(state: AppState) -> Router {
          post(openai::responses_passthrough).get(openai::responses_upgrade_required),
       )
       .layer(middleware::from_fn(decompress::zstd_requests))
-      .layer(axum::extract::DefaultBodyLimit::max(decompress::MAX_BODY))
+      .layer(DefaultBodyLimit::max(decompress::MAX_BODY))
       .layer(middleware::from_fn_with_state(
          state.clone(),
          auth::require_token,
@@ -226,12 +232,12 @@ pub fn router(state: AppState) -> Router {
 
 /// Reasoning tokens are a subset of the output the provider already billed,
 /// so they are deliberately absent here.
-const fn billable(r: &UsageRecord) -> Tokens {
+const fn billable(record: &UsageRecord) -> Tokens {
    Tokens {
-      input: r.input_tokens,
-      output: r.output_tokens,
-      cache_read: r.cache_read_tokens,
-      cache_write: r.cache_write_tokens,
+      input: record.input_tokens,
+      output: record.output_tokens,
+      cache_read: record.cache_read_tokens,
+      cache_write: record.cache_write_tokens,
    }
 }
 
@@ -274,7 +280,7 @@ impl Drop for LogGuard {
       record.tools_called = cap.tools_called.join(",");
       record.ttft_ms = cap
          .first_byte_at
-         .map(|t| t.saturating_duration_since(self.start).as_millis() as i64);
+         .map(|tick| tick.saturating_duration_since(self.start).as_millis() as i64);
       if !finished && record.error_kind.is_none() {
          record.error_kind = Some(if cap.upstream_eof {
             "upstream_eof".into()
@@ -299,8 +305,8 @@ impl Drop for LogGuard {
       price(&self.state.prices, &mut record);
       let db = self.state.db.clone();
       tokio::spawn(async move {
-         if let Err(e) = db.log_usage(&record).await {
-            tracing::error!("writing usage log: {e}");
+         if let Err(err) = db.log_usage(&record).await {
+            tracing::error!("writing usage log: {err}");
          }
       });
    }
@@ -347,14 +353,14 @@ pub fn log_usage(state: &AppState, mut record: UsageRecord) {
 fn write_usage(db: &Db, record: UsageRecord) {
    let db = db.clone();
    tokio::spawn(async move {
-      if let Err(e) = db.log_usage(&record).await {
-         tracing::error!("writing usage log: {e}");
+      if let Err(err) = db.log_usage(&record).await {
+         tracing::error!("writing usage log: {err}");
       }
    });
 }
 
 /// Stable per-conversation cache key so upstream prompt caching can kick in.
-pub fn cache_key(user: &str, req: &crate::codex::types::ResponsesRequest) -> String {
+pub fn cache_key(user: &str, req: &ResponsesRequest) -> String {
    let mut hasher = hmac_sha256::Hash::new();
    hasher.update(user.as_bytes());
    hasher.update(&req.instructions);

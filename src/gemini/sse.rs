@@ -13,8 +13,8 @@ impl Frames {
    pub fn feed(&mut self, bytes: &[u8]) -> Vec<Vec<u8>> {
       self.buf.extend_from_slice(bytes);
       let mut payloads = Vec::new();
-      while let Some(nl) = self.buf.iter().position(|b| *b == b'\n') {
-         let line: Vec<u8> = self.buf.drain(..=nl).collect();
+      while let Some(newline) = self.buf.iter().position(|byte| *byte == b'\n') {
+         let line: Vec<u8> = self.buf.drain(..=newline).collect();
          let line = line.strip_suffix(b"\n").unwrap_or(&line);
          let line = line.strip_suffix(b"\r").unwrap_or(line);
          match line.strip_prefix(b"data:") {
@@ -36,11 +36,11 @@ impl Frames {
       }
       // A struct also deserializes from a sequence, so the list goes first.
       if let Ok(list) = serde_json::from_slice::<Vec<Envelope>>(&text) {
-         return list.into_iter().next().map(|e| e.error);
+         return list.into_iter().next().map(|envelope| envelope.error);
       }
       serde_json::from_slice::<Envelope>(&text)
          .ok()
-         .map(|e| e.error)
+         .map(|envelope| envelope.error)
    }
 }
 
@@ -55,11 +55,11 @@ mod tests {
 
    fn run(bytes: &[u8]) -> (usize, Option<ApiError>) {
       let mut frames = Frames::default();
-      let mut n = 0;
+      let mut count = 0;
       for chunk in bytes.chunks(97) {
-         n += frames.feed(chunk).len();
+         count += frames.feed(chunk).len();
       }
-      (n, frames.cutoff())
+      (count, frames.cutoff())
    }
 
    #[test]

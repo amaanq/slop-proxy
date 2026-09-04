@@ -2,6 +2,7 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use super::{CLIENT_ID, TOKEN_URL, TokenSet, jwt};
+use crate::clock;
 
 #[derive(Debug, Error)]
 pub enum RefreshError {
@@ -47,7 +48,7 @@ impl TokenResponse {
    /// carries over when the response omits it.
    pub fn into_token_set(self, prior_refresh: Option<&str>) -> Option<TokenSet> {
       let expires_at = jwt::exp(&self.access_token)
-         .or_else(|| self.expires_in.map(|s| crate::clock::unix_now() + s));
+         .or_else(|| self.expires_in.map(|secs| clock::unix_now() + secs));
       Some(TokenSet {
          access_token: self.access_token,
          refresh_token: self
@@ -68,17 +69,17 @@ where
       .json(body)
       .send()
       .await
-      .map_err(|e| RefreshError::Transient(e.to_string()))?;
+      .map_err(|err| RefreshError::Transient(err.to_string()))?;
    let status = resp.status().as_u16();
    let text = resp
       .text()
       .await
-      .map_err(|e| RefreshError::Transient(e.to_string()))?;
+      .map_err(|err| RefreshError::Transient(err.to_string()))?;
    Ok((status, text))
 }
 
 pub fn terminal(status: u16, body: &str) -> Option<String> {
-   (status == 403 || TERMINAL_CODES.iter().any(|c| body.contains(c)))
+   (status == 403 || TERMINAL_CODES.iter().any(|code| body.contains(code)))
       .then(|| format!("{status}: {body}"))
 }
 
@@ -94,7 +95,7 @@ pub fn token_set(
       ));
    }
    serde_json::from_str::<TokenResponse>(body)
-      .map_err(|e| RefreshError::Transient(format!("bad token response: {e}")))?
+      .map_err(|err| RefreshError::Transient(format!("bad token response: {err}")))?
       .into_token_set(prior_refresh)
       .ok_or_else(|| RefreshError::Transient("token response missing refresh_token".into()))
 }

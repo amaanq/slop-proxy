@@ -2,7 +2,9 @@
 //! See <https://ai.google.dev/gemini-api/docs/thought-signatures>.
 
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash as _, Hasher as _};
+use std::mem;
 use std::sync::{LazyLock, Mutex};
 
 use crate::gemini::types::{Content, FunctionCall, Part};
@@ -27,7 +29,7 @@ static CACHE: LazyLock<Mutex<Cache>> = LazyLock::new(|| {
 impl Cache {
    fn put(&mut self, key: u64, signature: String) {
       if self.current.len() >= MAX_SIGNATURES {
-         self.previous = std::mem::take(&mut self.current);
+         self.previous = mem::take(&mut self.current);
       }
       self.current.insert(key, signature);
    }
@@ -46,7 +48,7 @@ pub fn get(key: u64) -> Option<String> {
 }
 
 pub fn call_id_key(call_id: &str) -> u64 {
-   let mut hasher = std::collections::hash_map::DefaultHasher::new();
+   let mut hasher = DefaultHasher::new();
    call_id.hash(&mut hasher);
    hasher.finish()
 }
@@ -55,7 +57,7 @@ pub fn call_id_key(call_id: &str) -> u64 {
 fn part_key(call: &FunctionCall) -> u64 {
    let mut hash = hmac_sha256::Hash::new();
    hash.update(call.name.as_bytes());
-   if let Some(args) = &call.args {
+   if let Some(args) = call.args.as_ref() {
       hash.update(serde_json::to_string(args).unwrap_or_default().as_bytes());
    }
    u64::from_le_bytes(hash.finalize()[..8].try_into().unwrap_or_default())
@@ -63,7 +65,9 @@ fn part_key(call: &FunctionCall) -> u64 {
 
 pub fn remember(parts: &[Part]) {
    for part in parts {
-      if let (Some(call), Some(sig)) = (&part.function_call, &part.thought_signature) {
+      if let (Some(call), Some(sig)) =
+         (part.function_call.as_ref(), part.thought_signature.as_ref())
+      {
          put(part_key(call), sig);
       }
    }
@@ -72,11 +76,18 @@ pub fn remember(parts: &[Part]) {
 /// True when one was put back, the only reason to re-encode the body.
 pub fn restore(contents: &mut [Content]) -> bool {
    let mut patched = false;
-   for part in contents.iter_mut().flat_map(|c| c.parts.iter_mut()) {
+   for part in contents
+      .iter_mut()
+      .flat_map(|content| content.parts.iter_mut())
+   {
       if part.thought_signature.is_some() {
          continue;
       }
-      let Some(sig) = part.function_call.as_ref().and_then(|c| get(part_key(c))) else {
+      let Some(sig) = part
+         .function_call
+         .as_ref()
+         .and_then(|call| get(part_key(call)))
+      else {
          continue;
       };
       part.thought_signature = Some(sig);
@@ -125,8 +136,8 @@ mod tests {
          previous: HashMap::new(),
       };
       cache.put(1, "first".into());
-      for k in 0..MAX_SIGNATURES as u64 {
-         cache.put(k + 100, "filler".into());
+      for key in 0..MAX_SIGNATURES as u64 {
+         cache.put(key + 100, "filler".into());
       }
       cache.put(999_999, "after".into());
       assert_eq!(cache.get(1).map(String::as_str), Some("first"));

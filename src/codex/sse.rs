@@ -11,22 +11,22 @@ pub fn event_stream(resp: reqwest::Response) -> EventStream {
    let stream = resp
       .bytes_stream()
       .eventsource()
-      .filter_map(|ev| async move {
-         match ev {
-            Ok(ev) => {
-               if ev.data == "[DONE]" {
+      .filter_map(|event| async move {
+         match event {
+            Ok(event) => {
+               if event.data == "[DONE]" {
                   return None;
                }
-               match serde_json::from_str::<ResponsesEvent>(&ev.data) {
+               match serde_json::from_str::<ResponsesEvent>(&event.data) {
                   Ok(parsed) => Some(parsed),
-                  Err(e) => {
-                     tracing::debug!("unparsed SSE event {:?}: {e}", ev.event);
+                  Err(err) => {
+                     tracing::debug!("unparsed SSE event {:?}: {err}", event.event);
                      Some(ResponsesEvent::Other)
                   },
                }
             },
-            Err(e) => {
-               tracing::warn!("SSE stream error: {e}");
+            Err(err) => {
+               tracing::warn!("SSE stream error: {err}");
                None
             },
          }

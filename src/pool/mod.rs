@@ -12,7 +12,9 @@ use crate::upstream::SendError;
 use std::cmp::Reverse;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 use thiserror::Error;
+use tokio::time;
 
 pub use pools::Pools;
 #[cfg(test)]
@@ -37,8 +39,8 @@ pub enum PoolError {
 }
 
 impl From<SendError> for PoolError {
-   fn from(e: SendError) -> Self {
-      Self::Upstream(e.to_string())
+   fn from(err: SendError) -> Self {
+      Self::Upstream(err.to_string())
    }
 }
 
@@ -70,14 +72,19 @@ pub trait Backend: Send + Sync + 'static {
    const STICKY_WAIT_SECS: i64 = 0;
    /// The backend serves without an account, zen's free tier.
    const ANONYMOUS: bool = false;
+
    type Request: Clone + Send + Sync;
+
    type Response: Send;
+
    fn soft_limit(&self) -> f64 {
       1.0
    }
+
    fn retry_budget(&self) -> Duration {
       Duration::ZERO
    }
+
    async fn send(
       &self,
       token: &str,
@@ -85,19 +92,23 @@ pub trait Backend: Send + Sync + 'static {
       route: Route<'_>,
       req: &Self::Request,
    ) -> Result<Self::Response, SendError>;
+
    async fn send_anonymous(&self, req: &Self::Request) -> Result<Self::Response, SendError> {
       let _ = req;
       Err(SendError::Network("no accounts".into()))
    }
+
    /// A 400 that describes this account rather than the request.
    fn retryable_bad_request(&self, body: &str) -> bool {
       let _ = body;
       false
    }
+
    /// Each dialect buries its one useful sentence at a different depth.
    fn reason(body: String) -> String {
       body
    }
+
    fn usage_from(&self, resp: &Self::Response) -> Option<AccountUsage> {
       let _ = resp;
       None
@@ -149,7 +160,7 @@ impl<B: Backend> Pool<B> {
             slot,
          ));
       }
-      scored.sort_by_key(|(band, mismatch, score, _)| (*band, *mismatch, *score));
+      scored.sort_by_key(|&(band, mismatch, score, _)| (band, mismatch, score));
       scored.into_iter().map(|(_, _, _, slot)| slot).collect()
    }
 
@@ -170,13 +181,13 @@ impl<B: Backend> Pool<B> {
       req: B::Request,
    ) -> Result<(Option<i64>, B::Response), PoolError> {
       let budget = self.backend.retry_budget();
-      let deadline = std::time::Instant::now() + budget;
+      let deadline = Instant::now() + budget;
       loop {
          let err = match self.sweep(route, &req).await {
-            Err(e @ PoolError::AllCoolingDown { .. }) if !budget.is_zero() => e,
+            Err(err @ PoolError::AllCoolingDown { .. }) if !budget.is_zero() => err,
             other => return other,
          };
-         let left = deadline.saturating_duration_since(std::time::Instant::now());
+         let left = deadline.saturating_duration_since(Instant::now());
          if left.is_zero() {
             return Err(err);
          }
@@ -188,7 +199,7 @@ impl<B: Backend> Pool<B> {
              wait_ms = wait.as_millis() as u64,
              "pool is empty, holding the request rather than returning a 429"
          );
-         tokio::time::sleep(wait).await;
+         time::sleep(wait).await;
       }
    }
 
@@ -201,7 +212,7 @@ impl<B: Backend> Pool<B> {
       if ranked.is_empty() {
          if B::ANONYMOUS {
             return match self.backend.send_anonymous(req).await {
-               Ok(r) => Ok((None, r)),
+               Ok(resp) => Ok((None, resp)),
                Err(SendError::BadRequest(body)) => Err(PoolError::BadRequest {
                   provider: B::PROVIDER,
                   model: route.model.into(),
@@ -210,7 +221,7 @@ impl<B: Backend> Pool<B> {
                Err(SendError::RateLimited { retry_after, .. }) => Err(PoolError::AllCoolingDown {
                   retry_after: retry_after.unwrap_or(30),
                }),
-               Err(e) => Err(PoolError::Upstream(e.to_string())),
+               Err(err) => Err(PoolError::Upstream(err.to_string())),
             };
          }
          return Err(PoolError::NoAccounts(B::PROVIDER));
@@ -225,7 +236,7 @@ impl<B: Backend> Pool<B> {
                 left,
                 "waiting for the sticky gemini key rather than losing its cache"
             );
-            tokio::time::sleep(Duration::from_secs(left as u64 + 1)).await;
+            time::sleep(Duration::from_secs(left as u64 + 1)).await;
          }
       }
       let mut last_err = Option::<SendError>::None;
@@ -255,9 +266,9 @@ impl<B: Backend> Pool<B> {
                         Ok(resp) => {
                            return Ok((Some(slot.id), self.served(&slot, resp).await));
                         },
-                        Err(e) => {
+                        Err(err) => {
                            self.slots.cool(&slot, 60, "post-refresh failure").await;
-                           last_err = Some(e);
+                           last_err = Some(err);
                         },
                      }
                   } else {
@@ -286,9 +297,9 @@ impl<B: Backend> Pool<B> {
                   body: B::reason(body),
                });
             },
-            Err(e) => {
+            Err(err) => {
                self.slots.cool_failure(&slot).await;
-               last_err = Some(e);
+               last_err = Some(err);
             },
          }
       }
@@ -301,14 +312,16 @@ impl<B: Backend> Pool<B> {
          Some(SendError::RateLimited { .. }) | None => Err(PoolError::AllCoolingDown {
             retry_after: self.slots.min_cooldown().await.max(30),
          }),
-         Some(e) => Err(PoolError::Upstream(e.to_string())),
+         Some(err) => Err(PoolError::Upstream(err.to_string())),
       }
    }
 }
 
 #[cfg(test)]
 mod retry_tests {
+   use std::env;
    use std::sync::atomic::{AtomicUsize, Ordering};
+   use uuid::Uuid;
 
    use super::*;
 
@@ -336,19 +349,19 @@ mod retry_tests {
          _route: Route<'_>,
          _req: &Self::Request,
       ) -> Result<Self::Response, SendError> {
-         let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
-         if n <= self.frees_after {
+         let count = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+         if count <= self.frees_after {
             return Err(SendError::RateLimited {
                retry_after: None,
                body: "quota".into(),
             });
          }
-         Ok(n)
+         Ok(count)
       }
    }
 
    fn pool(frees_after: usize, budget: Duration) -> Pool<Flaky> {
-      let db_path = std::env::temp_dir().join(format!("slop-retry-{}.db", uuid::Uuid::new_v4()));
+      let db_path = env::temp_dir().join(format!("slop-retry-{}.db", Uuid::new_v4()));
       let db = Db::open(&db_path).unwrap();
       Pool {
          slots: test_slots(db, Provider::Gemini, &[(1, false)]),

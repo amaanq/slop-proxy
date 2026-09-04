@@ -1,21 +1,28 @@
 use std::convert::Infallible;
 
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use std::time::Instant;
+
 use axum::body::Bytes;
 use axum::extract::{Query, State};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse as _, Response};
 use axum::{Extension, Json};
 use eventsource_stream::Eventsource as _;
 use futures_util::StreamExt as _;
+use serde_json::value::RawValue;
 
 use super::auth::AuthInfo;
 use super::error::{Dialect, translation_error};
 use super::pipeline::{self, apply_snapshot, dispatch_failed, translated};
 use super::{AppState, LogGuard, cache_key, log_error, log_rejected, log_usage};
+use crate::clock::unix_now;
 use crate::codex::types::{OutputItem, ResponsesEvent, ResponsesRequest, Usage};
 use crate::db::usage::UsageRecord;
-use crate::pool::Route;
 use crate::pool::pools::{Dispatched, Upstream};
+use crate::pool::{Route, UsageWindow, window_seconds};
 use crate::provider::Provider;
 use crate::translate::chat::ChatRequest;
 use crate::translate::openai_req;
@@ -32,15 +39,15 @@ pub struct ModelsQuery {
 pub async fn chat_completions(
    State(state): State<AppState>,
    Extension(auth): Extension<AuthInfo>,
-   headers: axum::http::HeaderMap,
+   headers: HeaderMap,
    body: Bytes,
 ) -> Response {
-   let started = std::time::Instant::now();
+   let started = Instant::now();
    let req = match serde_json::from_slice::<ChatRequest>(&body) {
-      Ok(r) => r,
-      Err(e) => {
+      Ok(req) => req,
+      Err(err) => {
          log_rejected(&state, &auth, "chat", "unknown");
-         return translation_error(DIALECT, &format!("invalid request: {e}"));
+         return translation_error(DIALECT, &format!("invalid request: {err}"));
       },
    };
    let facts = super::facts::RequestFacts::from_chat(&req, &headers);
@@ -68,10 +75,10 @@ pub async fn chat_completions(
       Provider::Zen | Provider::OpenAi => {},
    }
    let mut upstream_req = match openai_req::to_responses(&req, &state.cfg) {
-      Ok(r) => r,
-      Err(e) => {
+      Ok(upstream) => upstream,
+      Err(err) => {
          log_rejected(&state, &auth, "chat", &req.model);
-         return translation_error(DIALECT, &e.to_string());
+         return translation_error(DIALECT, &err.to_string());
       },
    };
    upstream_req.prompt_cache_key = Some(cache_key(&auth.user, &upstream_req));
@@ -87,7 +94,7 @@ pub async fn chat_completions(
    record.effort = upstream_req
       .reasoning
       .as_ref()
-      .map(|r| r.effort.clone())
+      .map(|reasoning| reasoning.effort.clone())
       .unwrap_or_default();
 
    let session_key = upstream_req.prompt_cache_key.clone().unwrap_or_default();
@@ -100,8 +107,8 @@ pub async fn chat_completions(
       account_id,
       upstream,
    } = match state.pools.responses(provider, route, &upstream_req).await {
-      Ok(d) => d,
-      Err(e) => return dispatch_failed(&state, record, DIALECT, e),
+      Ok(dispatched) => dispatched,
+      Err(err) => return dispatch_failed(&state, record, DIALECT, err),
    };
    record.account_id = account_id;
    record.session_key = session_key;
@@ -113,9 +120,9 @@ pub async fn chat_completions(
       let mut translator =
          OpenAiStream::new(req.model.clone(), req.include_usage(), capture.clone());
       let guard = LogGuard::new(state.clone(), capture, record, started);
-      translated(events, guard, move |ev| {
-         let (chunks, done) = match ev {
-            Some(ev) => (translator.handle(ev), false),
+      translated(events, guard, move |event| {
+         let (chunks, done) = match event {
+            Some(event) => (translator.handle(event), false),
             None => (translator.finalize(), true),
          };
          let mut out: Vec<Event> = chunks
@@ -148,7 +155,7 @@ pub async fn chat_completions(
 /// 426 short-circuits that.
 pub async fn responses_upgrade_required() -> Response {
    (
-      axum::http::StatusCode::UPGRADE_REQUIRED,
+      StatusCode::UPGRADE_REQUIRED,
       "this proxy serves the responses API over HTTP only",
    )
       .into_response()
@@ -158,8 +165,8 @@ pub async fn responses_upgrade_required() -> Response {
 /// of the reply, so it gets the backend payload untouched.
 pub async fn models(
    State(state): State<AppState>,
-   headers: axum::http::HeaderMap,
-   Query(q): Query<ModelsQuery>,
+   headers: HeaderMap,
+   Query(query): Query<ModelsQuery>,
 ) -> Response {
    #[derive(serde::Serialize)]
    struct ModelEntry {
@@ -183,15 +190,15 @@ pub async fn models(
    if headers.contains_key("anthropic-version") {
       return match state.pools.anthropic.models_raw().await {
          Ok(body) => ([("content-type", "application/json")], body).into_response(),
-         Err(e) => super::error::error_response(
+         Err(err) => super::error::error_response(
             super::error::Dialect::Anthropic,
             503,
             "api_error",
-            &format!("reading the model catalog: {e}"),
+            &format!("reading the model catalog: {err}"),
          ),
       };
    }
-   if q.client_version.is_some() {
+   if query.client_version.is_some() {
       return state.catalog_raw().await.map_or_else(
          || {
             super::error::error_response(
@@ -205,20 +212,20 @@ pub async fn models(
       );
    }
 
-   let created = crate::clock::unix_now();
+   let created = unix_now();
 
    let live = state.catalog().await;
 
    let mut data = if let Some(models) = live {
       models
          .iter()
-         .filter(|m| m.listed())
-         .map(|m| ModelEntry {
-            id: m.slug.clone(),
+         .filter(|model| model.listed())
+         .map(|model| ModelEntry {
+            id: model.slug.clone(),
             object: "model",
             created,
             owned_by: "openai",
-            context_window: m.context_window,
+            context_window: model.context_window,
          })
          .collect::<Vec<ModelEntry>>()
    } else {
@@ -265,7 +272,7 @@ pub async fn models(
                .cfg
                .models
                .route(&id)
-               .eq(&crate::provider::Provider::Gemini)
+               .eq(&Provider::Gemini)
                .then_some(ModelEntry {
                   id,
                   object: "model",
@@ -315,13 +322,13 @@ struct ReasoningPatch {
 pub async fn responses_passthrough(
    State(state): State<AppState>,
    Extension(auth): Extension<AuthInfo>,
-   headers: axum::http::HeaderMap,
+   headers: HeaderMap,
    body: Bytes,
 ) -> Response {
-   let started = std::time::Instant::now();
+   let started = Instant::now();
    let mut req = match serde_json::from_slice::<PassthroughRequest>(&body) {
-      Ok(r) => r,
-      Err(e) => return translation_error(DIALECT, &format!("invalid request: {e}")),
+      Ok(req) => req,
+      Err(err) => return translation_error(DIALECT, &format!("invalid request: {err}")),
    };
 
    let requested_model = req
@@ -353,8 +360,8 @@ pub async fn responses_passthrough(
       req.instructions = Some(state.cfg.codex.instructions());
    }
    let encoded = match serde_json::to_vec(&req) {
-      Ok(v) => Bytes::from(v),
-      Err(e) => return translation_error(DIALECT, &format!("serializing request: {e}")),
+      Ok(value) => Bytes::from(value),
+      Err(err) => return translation_error(DIALECT, &format!("serializing request: {err}")),
    };
    let session_key = req
       .prompt_cache_key
@@ -370,7 +377,7 @@ pub async fn responses_passthrough(
    };
    let facts = typed
       .as_ref()
-      .map(|t| super::facts::RequestFacts::from_responses(t, &headers))
+      .map(|typed| super::facts::RequestFacts::from_responses(typed, &headers))
       .unwrap_or_default();
    let mut record = pipeline::record(
       &auth,
@@ -383,7 +390,7 @@ pub async fn responses_passthrough(
    record.effort = req
       .reasoning
       .as_ref()
-      .and_then(|r| r.effort.clone())
+      .and_then(|reasoning| reasoning.effort.clone())
       .unwrap_or_default();
    record.service_tier = req.service_tier.clone().unwrap_or_default();
    record.session_key = session_key.clone();
@@ -400,8 +407,8 @@ pub async fn responses_passthrough(
       .responses_raw(provider, route, encoded, typed.as_ref())
       .await
    {
-      Ok(d) => d,
-      Err(e) => return dispatch_failed(&state, record, DIALECT, e),
+      Ok(dispatched) => dispatched,
+      Err(err) => return dispatch_failed(&state, record, DIALECT, err),
    };
    record.account_id = account_id;
    let capture = UsageCapture::default();
@@ -427,20 +434,20 @@ pub async fn responses_passthrough(
       // Upstream only streams; recover the final response object from the
       // terminal event for non-streaming clients.
       let mut raw_events = resp.bytes_stream().eventsource();
-      let mut final_response = Option::<Box<serde_json::value::RawValue>>::None;
-      while let Some(ev) = raw_events.next().await {
-         let Ok(ev) = ev else { break };
+      let mut final_response = Option::<Box<RawValue>>::None;
+      while let Some(event) = raw_events.next().await {
+         let Ok(event) = event else { break };
          let Ok(TerminalEvent {
             kind,
             response: Some(response),
-         }) = serde_json::from_str::<TerminalEvent>(&ev.data)
+         }) = serde_json::from_str::<TerminalEvent>(&event.data)
          else {
             continue;
          };
          if !TerminalEvent::is_terminal(&kind) {
             continue;
          }
-         if let Ok(env) = serde_json::from_str::<UsageEnvelope>(&ev.data)
+         if let Ok(env) = serde_json::from_str::<UsageEnvelope>(&event.data)
             && let Some(usage) = env.response.usage
          {
             capture.record(&usage);
@@ -459,7 +466,13 @@ pub async fn responses_passthrough(
                "upstream stream ended unexpectedly",
             )
          },
-         |v| ([("content-type", "application/json")], v.get().to_owned()).into_response(),
+         |value| {
+            (
+               [("content-type", "application/json")],
+               value.get().to_owned(),
+            )
+               .into_response()
+         },
       )
    }
 }
@@ -468,10 +481,10 @@ pub async fn responses_passthrough(
 async fn bridged_responses(
    state: AppState,
    mut record: UsageRecord,
-   upstream: crate::pool::pools::Upstream,
+   upstream: Upstream,
    model: String,
    client_streams: bool,
-   started: std::time::Instant,
+   started: Instant,
 ) -> Response {
    let capture = UsageCapture::default();
    let mut events = upstream.events(&model, capture.clone());
@@ -480,12 +493,12 @@ async fn bridged_responses(
       let guard = LogGuard::new(state.clone(), capture.clone(), record, started);
       let stream = events.map(move |event| {
          let _ = &guard;
-         if let ResponsesEvent::Completed { response }
-         | ResponsesEvent::Incomplete { response }
-         | ResponsesEvent::Failed { response } = &event
+         if let ResponsesEvent::Completed { ref response }
+         | ResponsesEvent::Incomplete { ref response }
+         | ResponsesEvent::Failed { ref response } = event
          {
-            if let Some(u) = &response.usage {
-               capture.record(u);
+            if let Some(usage) = response.usage.as_ref() {
+               capture.record(usage);
             }
             capture.note_stop_reason(response.status.as_deref().unwrap_or("completed"));
          }
@@ -504,8 +517,8 @@ async fn bridged_responses(
          ResponsesEvent::Completed { response }
          | ResponsesEvent::Incomplete { response }
          | ResponsesEvent::Failed { response } => {
-            if let Some(u) = response.usage {
-               capture.record(&u);
+            if let Some(usage) = response.usage {
+               capture.record(&usage);
             }
             capture.note_stop_reason(response.status.as_deref().unwrap_or("completed"));
          },
@@ -558,7 +571,7 @@ struct NonStreamResponse {
 struct TerminalEvent {
    #[serde(rename = "type")]
    kind: String,
-   response: Option<Box<serde_json::value::RawValue>>,
+   response: Option<Box<RawValue>>,
 }
 
 impl TerminalEvent {
@@ -604,12 +617,12 @@ struct ToolName {
 }
 
 /// What codex reads for `/status`.
-fn rate_limit_headers(windows: &[crate::pool::UsageWindow]) -> Vec<(String, String)> {
+fn rate_limit_headers(windows: &[UsageWindow]) -> Vec<(String, String)> {
    let mut sorted: Vec<_> = windows.iter().collect();
-   sorted.sort_by_key(|w| crate::pool::window_seconds(&w.name).unwrap_or(i64::MAX));
+   sorted.sort_by_key(|window| window_seconds(&window.name).unwrap_or(i64::MAX));
    let mut out = Vec::new();
-   for (tier, w) in ["primary", "secondary"].iter().zip(sorted) {
-      let Some(minutes) = crate::pool::window_seconds(&w.name).map(|s| s / 60) else {
+   for (tier, window) in ["primary", "secondary"].iter().zip(sorted) {
+      let Some(minutes) = window_seconds(&window.name).map(|secs| secs / 60) else {
          continue;
       };
       out.push((
@@ -618,9 +631,9 @@ fn rate_limit_headers(windows: &[crate::pool::UsageWindow]) -> Vec<(String, Stri
       ));
       out.push((
          format!("x-codex-{tier}-used-percent"),
-         ((w.utilization * 100.0).round() as i64).to_string(),
+         ((window.utilization * 100.0).round() as i64).to_string(),
       ));
-      if let Some(resets_at) = w.resets_at {
+      if let Some(resets_at) = window.resets_at {
          out.push((format!("x-codex-{tier}-reset-at"), resets_at.to_string()));
       }
    }
@@ -640,30 +653,28 @@ fn relay_stream(
    }
    impl<S: futures_util::Stream + Unpin> futures_util::Stream for Held<S> {
       type Item = S::Item;
-      fn poll_next(
-         mut self: std::pin::Pin<&mut Self>,
-         cx: &mut std::task::Context<'_>,
-      ) -> std::task::Poll<Option<Self::Item>> {
-         let polled = std::pin::Pin::new(&mut self.inner).poll_next(cx);
+      fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+         let polled = Pin::new(&mut self.inner).poll_next(cx);
          // Never reached if the caller went away first.
-         if matches!(polled, std::task::Poll::Ready(None)) {
+         if matches!(polled, Poll::Ready(None)) {
             self.capture.note_upstream_eof();
          }
          polled
       }
    }
    let eof_capture = capture.clone();
-   let stream = resp.bytes_stream().eventsource().filter_map(move |ev| {
+   let stream = resp.bytes_stream().eventsource().filter_map(move |event| {
       let capture = capture.clone();
       async move {
-         match ev {
-            Ok(ev) => {
-               if !ev.event.is_empty() {
-                  capture.note_event(&ev.event);
+         match event {
+            Ok(event) => {
+               if !event.event.is_empty() {
+                  capture.note_event(&event.event);
                }
-               capture.note_bytes(ev.data.len());
-               if (ev.event == "response.completed" || ev.data.contains("\"response.completed\""))
-                  && let Ok(env) = serde_json::from_str::<UsageEnvelope>(&ev.data)
+               capture.note_bytes(event.data.len());
+               if (event.event == "response.completed"
+                  || event.data.contains("\"response.completed\""))
+                  && let Ok(env) = serde_json::from_str::<UsageEnvelope>(&event.data)
                {
                   if let Some(usage) = env.response.usage {
                      capture.record(&usage);
@@ -671,26 +682,26 @@ fn relay_stream(
                   let reason = env
                      .response
                      .incomplete_details
-                     .and_then(|d| d.reason)
+                     .and_then(|detail| detail.reason)
                      .or(env.response.status);
                   if let Some(reason) = reason {
                      capture.note_stop_reason(&reason);
                   }
                }
-               if ev.event == "response.output_item.done"
-                  && let Ok(done) = serde_json::from_str::<OutputItemDone>(&ev.data)
+               if event.event == "response.output_item.done"
+                  && let Ok(done) = serde_json::from_str::<OutputItemDone>(&event.data)
                   && let Some(name) = done.item.name
                {
                   capture.note_tool_call(&name);
                }
-               let mut out = Event::default().data(ev.data);
-               if !ev.event.is_empty() && ev.event != "message" {
-                  out = out.event(ev.event);
+               let mut out = Event::default().data(event.data);
+               if !event.event.is_empty() && event.event != "message" {
+                  out = out.event(event.event);
                }
                Some(Ok::<_, Infallible>(out))
             },
-            Err(e) => {
-               tracing::warn!("passthrough SSE error: {e}");
+            Err(err) => {
+               tracing::warn!("passthrough SSE error: {err}");
                capture.fail("upstream_sse_error");
                None
             },
@@ -706,10 +717,7 @@ fn relay_stream(
       .keep_alive(KeepAlive::default())
       .into_response();
    for (name, value) in limits {
-      if let (Ok(name), Ok(value)) = (
-         axum::http::HeaderName::try_from(name),
-         axum::http::HeaderValue::try_from(value),
-      ) {
+      if let (Ok(name), Ok(value)) = (HeaderName::try_from(name), HeaderValue::try_from(value)) {
          response.headers_mut().insert(name, value);
       }
    }
@@ -788,10 +796,10 @@ mod rate_limit_header_tests {
          window("7d", 0.42, Some(1000)),
          window("5h", 0.11, Some(500)),
       ]);
-      let get = |k: &str| {
+      let get = |key: &str| {
          out.iter()
-            .find(|(n, _)| n == k)
-            .map(|(_, v)| v.as_str())
+            .find(|&&(ref name, _)| name == key)
+            .map(|&(_, ref value)| value.as_str())
             .unwrap()
       };
       assert_eq!(get("x-codex-primary-window-minutes"), "300");
@@ -805,8 +813,12 @@ mod rate_limit_header_tests {
       let out = rate_limit_headers(&[window("7d", 0.8, None)]);
       assert!(
          out.iter()
-            .any(|(n, v)| n == "x-codex-primary-used-percent" && v == "80")
+            .any(|&(ref name, ref value)| name == "x-codex-primary-used-percent" && value == "80")
       );
-      assert!(!out.iter().any(|(n, _)| n == "x-codex-primary-reset-at"));
+      assert!(
+         !out
+            .iter()
+            .any(|&(ref name, _)| name == "x-codex-primary-reset-at")
+      );
    }
 }

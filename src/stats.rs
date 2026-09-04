@@ -1,6 +1,7 @@
 use eyre::{Result, bail};
 use serde::Serialize;
 
+use crate::clock;
 use crate::db::Db;
 use crate::db::usage::{UsageAgg, UsageDim};
 
@@ -15,14 +16,14 @@ struct Tokens {
 }
 
 impl From<&UsageAgg> for Tokens {
-   fn from(a: &UsageAgg) -> Self {
+   fn from(agg: &UsageAgg) -> Self {
       Self {
-         requests: a.requests,
-         errors: a.errors,
-         input_tokens: a.input_tokens,
-         output_tokens: a.output_tokens,
-         cache_read_tokens: a.cache_read_tokens,
-         reasoning_tokens: a.reasoning_tokens,
+         requests: agg.requests,
+         errors: agg.errors,
+         input_tokens: agg.input_tokens,
+         output_tokens: agg.output_tokens,
+         cache_read_tokens: agg.cache_read_tokens,
+         reasoning_tokens: agg.reasoning_tokens,
       }
    }
 }
@@ -45,13 +46,13 @@ struct Report {
 }
 
 pub async fn run(db: &Db, since: Option<String>, until: Option<String>) -> Result<()> {
-   let now = crate::clock::unix_now();
-   let since_ts = match &since {
-      Some(s) => parse_time(s, now)?,
+   let now = clock::unix_now();
+   let since_ts = match since.as_ref() {
+      Some(text) => parse_time(text, now)?,
       None => 0,
    };
-   let until_ts = match &until {
-      Some(s) => parse_time(s, now)?,
+   let until_ts = match until.as_ref() {
+      Some(text) => parse_time(text, now)?,
       None => now + 1,
    };
 
@@ -63,13 +64,17 @@ pub async fn run(db: &Db, since: Option<String>, until: Option<String>) -> Resul
    let keyed = |rows: &[UsageAgg]| {
       rows
          .iter()
-         .map(|a| KeyedTokens {
-            name: a.key.clone(),
-            tokens: a.into(),
+         .map(|agg| KeyedTokens {
+            name: agg.key.clone(),
+            tokens: agg.into(),
          })
          .collect()
    };
-   let stamp = |ts| jiff::Timestamp::from_second(ts).ok().map(|t| t.to_string());
+   let stamp = |timestamp| {
+      jiff::Timestamp::from_second(timestamp)
+         .ok()
+         .map(|time| time.to_string())
+   };
    let report = Report {
       since: stamp(since_ts),
       until: stamp(until_ts),
@@ -82,17 +87,17 @@ pub async fn run(db: &Db, since: Option<String>, until: Option<String>) -> Resul
    Ok(())
 }
 
-fn parse_time(s: &str, now: i64) -> Result<i64> {
-   if let Ok(ts) = s.parse::<jiff::Timestamp>() {
-      return Ok(ts.as_second());
+fn parse_time(text: &str, now: i64) -> Result<i64> {
+   if let Ok(timestamp) = text.parse::<jiff::Timestamp>() {
+      return Ok(timestamp.as_second());
    }
    let units = [('m', 60), ('h', 3600), ('d', 86400), ('w', 7 * 86400)];
    let secs = units.iter().find_map(|&(unit, mult)| {
-      let n = s.strip_suffix(unit)?.parse::<i64>().ok()?;
-      Some(n * mult)
+      let count = text.strip_suffix(unit)?.parse::<i64>().ok()?;
+      Some(count * mult)
    });
    if let Some(secs) = secs {
       return Ok(now - secs);
    }
-   bail!("cannot parse time {s:?}; use RFC3339 or 30m/24h/7d/2w");
+   bail!("cannot parse time {text:?}; use RFC3339 or 30m/24h/7d/2w");
 }

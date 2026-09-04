@@ -1,5 +1,8 @@
+use crate::clock;
 use crate::db::Db;
-use crate::db::accounts::AccountStatus;
+use crate::db::accounts::{Account, AccountStatus};
+use crate::oauth::anthropic;
+use crate::oauth::refresh;
 use crate::oauth::refresh::RefreshError;
 use crate::provider::{AuthMode, Provider};
 use std::sync::Arc;
@@ -63,7 +66,7 @@ impl AccountUsage {
       self
          .windows
          .iter()
-         .map(|w| w.utilization)
+         .map(|window| window.utilization)
          .fold(0.0, f64::max)
    }
 
@@ -77,14 +80,14 @@ impl AccountUsage {
    ///
    /// Measured on the longest window only.
    fn slack(&self, now: i64) -> Option<f64> {
-      let w = self
+      let window = self
          .windows
          .iter()
-         .filter(|w| w.resets_at.is_some() && window_seconds(&w.name).is_some())
-         .max_by_key(|w| window_seconds(&w.name))?;
-      let resets_in = (w.resets_at? - now).max(MIN_RESET_SECS) as f64;
-      let span = window_seconds(&w.name)? as f64;
-      Some((1.0 - w.utilization).max(0.0) * span / resets_in)
+         .filter(|item| item.resets_at.is_some() && window_seconds(&item.name).is_some())
+         .max_by_key(|item| window_seconds(&item.name))?;
+      let resets_in = (window.resets_at? - now).max(MIN_RESET_SECS) as f64;
+      let span = window_seconds(&window.name)? as f64;
+      Some((1.0 - window.utilization).max(0.0) * span / resets_in)
    }
 
    /// Coarse on purpose. Sessions stay pinned to one account while it holds
@@ -95,8 +98,8 @@ impl AccountUsage {
          return Band::Spent;
       }
       match self.slack(now) {
-         Some(s) if s >= 2.0 => Band::Ample,
-         Some(s) if s >= 1.0 => Band::Steady,
+         Some(slack) if slack >= 2.0 => Band::Ample,
+         Some(slack) if slack >= 1.0 => Band::Steady,
          Some(_) => Band::Behind,
          None => Band::Steady,
       }
@@ -176,33 +179,35 @@ impl Slots {
          .list_accounts()
          .await?
          .into_iter()
-         .filter(|a| a.provider == self.provider)
+         .filter(|account| account.provider == self.provider)
          .collect();
 
       let mut slots = self.inner.write().await;
       let mut next = Vec::with_capacity(accounts.len());
-      let mut added = 0;
-      for a in accounts {
-         let existing = match slots.iter().find(|s| s.id == a.id) {
-            Some(s) if s.state.lock().await.refresh_token == a.refresh_token => Some(s),
+      let mut added = 0_usize;
+      for account in accounts {
+         let existing = match slots.iter().find(|slot| slot.id == account.id) {
+            Some(slot) if slot.state.lock().await.refresh_token == account.refresh_token => {
+               Some(slot)
+            },
             _ => None,
          };
          match existing {
             // Swapping an unchanged slot would strand an in-flight
             // cooldown write on the orphaned Arc.
-            Some(s) if slot_matches(s, &a) => next.push(Arc::clone(s)),
-            Some(s) => next.push(Arc::new(reslot(&a, s).await)),
+            Some(slot) if slot_matches(slot, &account) => next.push(Arc::clone(slot)),
+            Some(slot) => next.push(Arc::new(reslot(&account, slot).await)),
             None => {
-               added += 1;
-               next.push(Arc::new(slot_from_account(a)));
+               added += 1_usize;
+               next.push(Arc::new(slot_from_account(account)));
             },
          }
       }
       let removed = slots
          .iter()
-         .filter(|s| !next.iter().any(|n| n.id == s.id))
+         .filter(|slot| !next.iter().any(|next_slot| next_slot.id == slot.id))
          .count();
-      if added > 0 || removed > 0 {
+      if added > 0_usize || removed > 0_usize {
          tracing::info!(
             "reloaded {} accounts: {added} added or replaced, {removed} removed",
             self.provider
@@ -222,13 +227,13 @@ impl Slots {
 
    /// Claims the slot for a request if it is not disabled or cooling down.
    pub async fn try_claim(&self, slot: &Slot) -> bool {
-      let now = crate::clock::unix_now();
-      let mut st = slot.state.lock().await;
-      match st.status {
+      let now = clock::unix_now();
+      let mut state = slot.state.lock().await;
+      match state.status {
          Status::Disabled => false,
          Status::Cooldown { until } if until > now => false,
          Status::Active | Status::Cooldown { .. } => {
-            st.status = Status::Active;
+            state.status = Status::Active;
             true
          },
       }
@@ -239,7 +244,7 @@ impl Slots {
    }
 
    pub async fn note_usage(&self, slot: &Slot, mut usage: AccountUsage) {
-      usage.observed_at = crate::clock::unix_now();
+      usage.observed_at = clock::unix_now();
       slot.state.lock().await.usage = Some(usage);
    }
 
@@ -247,23 +252,23 @@ impl Slots {
    /// Accounts with no usage report yet are assumed healthy so a fresh
    /// account is not held back before it has served anything.
    pub async fn band(&self, slot: &Slot, soft_limit: f64) -> Band {
-      let now = crate::clock::unix_now();
+      let now = clock::unix_now();
       slot
          .state
          .lock()
          .await
          .usage
          .as_ref()
-         .map_or(Band::Steady, |u| u.band(soft_limit, now))
+         .map_or(Band::Steady, |usage| usage.band(soft_limit, now))
    }
 
    pub async fn snapshot(&self) -> Vec<AccountSnapshot> {
-      let now = crate::clock::unix_now();
+      let now = clock::unix_now();
       let slots = self.list().await;
       let mut out = Vec::with_capacity(slots.len());
       for slot in &slots {
-         let st = slot.state.lock().await;
-         let (status, cooldown_seconds) = match st.status {
+         let state = slot.state.lock().await;
+         let (status, cooldown_seconds) = match state.status {
             Status::Cooldown { until } if until > now => (1, until - now),
             Status::Active | Status::Cooldown { .. } => (0, 0),
             Status::Disabled => (2, 0),
@@ -275,8 +280,8 @@ impl Slots {
             trusted: slot.trusted,
             status,
             cooldown_seconds,
-            consecutive_fails: st.consecutive_fails,
-            usage: st.usage.clone(),
+            consecutive_fails: state.consecutive_fails,
+            usage: state.usage.clone(),
          });
       }
       out
@@ -286,13 +291,13 @@ impl Slots {
    /// refreshing the same account concurrently would invalidate each other.
    /// The slot's state mutex is held across the refresh call for that reason.
    pub async fn fresh_token(&self, slot: &Slot, force: bool) -> Result<String, ()> {
-      let now = crate::clock::unix_now();
-      let mut st = slot.state.lock().await;
+      let now = clock::unix_now();
+      let mut state = slot.state.lock().await;
       if !slot.auth_mode.refreshable() {
-         return Ok(st.access_token.clone());
+         return Ok(state.access_token.clone());
       }
-      if !force && st.expires_at.is_some_and(|e| e - now > 60) {
-         return Ok(st.access_token.clone());
+      if !force && state.expires_at.is_some_and(|expires| expires - now > 60) {
+         return Ok(state.access_token.clone());
       }
       tracing::info!(
          "refreshing {} access token for {}",
@@ -300,8 +305,8 @@ impl Slots {
          slot.display
       );
       let refreshed = match self.provider {
-         Provider::OpenAi => crate::oauth::refresh::refresh(&st.refresh_token).await,
-         Provider::Anthropic => crate::oauth::anthropic::refresh(&st.refresh_token).await,
+         Provider::OpenAi => refresh::refresh(&state.refresh_token).await,
+         Provider::Anthropic => anthropic::refresh(&state.refresh_token).await,
          Provider::Gemini => Err(RefreshError::Terminal(
             "google oauth grants are not implemented, add the account with an api key".into(),
          )),
@@ -314,13 +319,13 @@ impl Slots {
       };
       match refreshed {
          Ok(tokens) => {
-            if let Err(e) = self.db.update_account_tokens(slot.id, &tokens).await {
-               tracing::error!("persisting refreshed tokens for {}: {e}", slot.display);
+            if let Err(err) = self.db.update_account_tokens(slot.id, &tokens).await {
+               tracing::error!("persisting refreshed tokens for {}: {err}", slot.display);
                return Err(());
             }
-            st.access_token.clone_from(&tokens.access_token);
-            st.refresh_token = tokens.refresh_token;
-            st.expires_at = tokens.expires_at;
+            state.access_token.clone_from(&tokens.access_token);
+            state.refresh_token = tokens.refresh_token;
+            state.expires_at = tokens.expires_at;
             Ok(tokens.access_token)
          },
          Err(RefreshError::Terminal(msg)) => {
@@ -328,8 +333,8 @@ impl Slots {
                "account {} refresh token is dead ({msg}); disabling",
                slot.display
             );
-            st.status = Status::Disabled;
-            drop(st);
+            state.status = Status::Disabled;
+            drop(state);
             let _ = self
                .db
                .set_account_status(slot.id, AccountStatus::Disabled, None, Some(&msg))
@@ -338,7 +343,7 @@ impl Slots {
          },
          Err(RefreshError::Transient(msg)) => {
             tracing::warn!("account {} refresh failed transiently: {msg}", slot.display);
-            drop(st);
+            drop(state);
             self.cool(slot, 30, "refresh failure").await;
             Err(())
          },
@@ -346,11 +351,11 @@ impl Slots {
    }
 
    pub async fn cool(&self, slot: &Slot, secs: i64, why: &str) {
-      let until = crate::clock::unix_now() + secs;
+      let until = clock::unix_now() + secs;
       {
-         let mut st = slot.state.lock().await;
-         st.status = Status::Cooldown { until };
-         st.consecutive_fails += 1;
+         let mut state = slot.state.lock().await;
+         state.status = Status::Cooldown { until };
+         state.consecutive_fails += 1;
       }
       tracing::warn!("account {} cooling down {secs}s ({why})", slot.display);
       let _ = self
@@ -385,7 +390,7 @@ impl Slots {
 
    /// Seconds until this one slot is claimable, 0 when it already is.
    pub async fn cooldown_left(&self, slot: &Slot) -> i64 {
-      let now = crate::clock::unix_now();
+      let now = clock::unix_now();
       match slot.state.lock().await.status {
          Status::Cooldown { until } if until > now => until - now,
          Status::Active | Status::Disabled | Status::Cooldown { .. } => 0,
@@ -393,11 +398,11 @@ impl Slots {
    }
 
    pub async fn min_cooldown(&self) -> i64 {
-      let now = crate::clock::unix_now();
+      let now = clock::unix_now();
       let mut min = i64::MAX;
       for slot in &self.list().await {
-         let st = slot.state.lock().await;
-         if let Status::Cooldown { until } = st.status {
+         let state = slot.state.lock().await;
+         if let Status::Cooldown { until } = state.status {
             min = min.min(until - now);
          }
       }
@@ -409,35 +414,41 @@ impl Slots {
 /// conversation on one account, which is what lets an upstream prompt cache
 /// keep hitting instead of paying for the whole prefix again.
 pub fn rendezvous_score(session: &str, id: i64) -> u64 {
-   let mut h = hmac_sha256::Hash::new();
-   h.update(session.as_bytes());
-   h.update(id.to_le_bytes());
-   u64::from_le_bytes(h.finalize()[..8].try_into().unwrap())
+   let mut hasher = hmac_sha256::Hash::new();
+   hasher.update(session.as_bytes());
+   hasher.update(id.to_le_bytes());
+   u64::from_le_bytes(hasher.finalize()[..8].try_into().unwrap())
 }
 
-fn display_for(a: &crate::db::accounts::Account) -> String {
-   a.label
+fn display_for(account: &Account) -> String {
+   account
+      .label
       .clone()
-      .or_else(|| a.email.clone())
-      .unwrap_or_else(|| format!("account#{}", a.id))
+      .or_else(|| account.email.clone())
+      .unwrap_or_else(|| format!("account#{}", account.id))
 }
 
-fn slot_matches(s: &Slot, a: &crate::db::accounts::Account) -> bool {
-   (s.trusted, &s.plan, &s.display, &s.http_referer)
-      == (a.trusted, &a.plan_type, &display_for(a), &a.http_referer)
+fn slot_matches(slot: &Slot, account: &Account) -> bool {
+   (slot.trusted, &slot.plan, &slot.display, &slot.http_referer)
+      == (
+         account.trusted,
+         &account.plan_type,
+         &display_for(account),
+         &account.http_referer,
+      )
 }
 
 /// A fresh slot carrying the previous one's cooldown, tokens and quota sample.
-async fn reslot(a: &crate::db::accounts::Account, prev: &Slot) -> Slot {
+async fn reslot(account: &Account, prev: &Slot) -> Slot {
    let state = prev.state.lock().await;
    Slot {
-      id: a.id,
-      provider_account_id: a.provider_account_id.clone(),
-      trusted: a.trusted,
-      auth_mode: a.auth_mode,
-      plan: a.plan_type.clone(),
-      http_referer: a.http_referer.clone(),
-      display: display_for(a),
+      id: account.id,
+      provider_account_id: account.provider_account_id.clone(),
+      trusted: account.trusted,
+      auth_mode: account.auth_mode,
+      plan: account.plan_type.clone(),
+      http_referer: account.http_referer.clone(),
+      display: display_for(account),
       state: Mutex::new(SlotState {
          access_token: state.access_token.clone(),
          refresh_token: state.refresh_token.clone(),
@@ -449,30 +460,30 @@ async fn reslot(a: &crate::db::accounts::Account, prev: &Slot) -> Slot {
    }
 }
 
-fn slot_from_account(a: crate::db::accounts::Account) -> Slot {
-   let now = crate::clock::unix_now();
-   let status = match a.status {
+fn slot_from_account(account: Account) -> Slot {
+   let now = clock::unix_now();
+   let status = match account.status {
       AccountStatus::Disabled => Status::Disabled,
-      AccountStatus::Cooldown if a.cooldown_until.unwrap_or(0) > now => Status::Cooldown {
-         until: a.cooldown_until.unwrap_or(0),
+      AccountStatus::Cooldown if account.cooldown_until.unwrap_or(0) > now => Status::Cooldown {
+         until: account.cooldown_until.unwrap_or(0),
       },
       AccountStatus::Active | AccountStatus::Cooldown => Status::Active,
    };
    Slot {
-      id: a.id,
-      provider_account_id: a.provider_account_id,
-      trusted: a.trusted,
-      auth_mode: a.auth_mode,
-      plan: a.plan_type,
-      http_referer: a.http_referer,
-      display: a
+      id: account.id,
+      provider_account_id: account.provider_account_id,
+      trusted: account.trusted,
+      auth_mode: account.auth_mode,
+      plan: account.plan_type,
+      http_referer: account.http_referer,
+      display: account
          .label
-         .or(a.email)
-         .unwrap_or_else(|| format!("account#{}", a.id)),
+         .or(account.email)
+         .unwrap_or_else(|| format!("account#{}", account.id)),
       state: Mutex::new(SlotState {
-         access_token: a.access_token,
-         refresh_token: a.refresh_token,
-         expires_at: a.access_expires_at,
+         access_token: account.access_token,
+         refresh_token: account.refresh_token,
+         expires_at: account.access_expires_at,
          status,
          consecutive_fails: 0,
          usage: None,
@@ -522,9 +533,9 @@ mod band_tests {
       AccountUsage {
          windows: windows
             .iter()
-            .map(|(name, utilization, resets_in)| UsageWindow {
-               name: (*name).to_owned(),
-               utilization: *utilization,
+            .map(|&(name, utilization, resets_in)| UsageWindow {
+               name: name.to_owned(),
+               utilization,
                resets_at: Some(now + resets_in),
             })
             .collect(),
@@ -537,18 +548,18 @@ mod band_tests {
    #[test]
    fn expiring_headroom_outranks_larger_headroom_with_time_to_spare() {
       let now = 1_000_000;
-      let h = 3600;
-      let expiring = usage(&[("7d", 0.69, 8 * h)], now);
-      let roomy = usage(&[("7d", 0.04, 131 * h)], now);
+      let hour = 3600;
+      let expiring = usage(&[("7d", 0.69_f64, 8_i64 * hour)], now);
+      let roomy = usage(&[("7d", 0.04_f64, 131_i64 * hour)], now);
       assert!(expiring.band(0.9, now) < roomy.band(0.9, now));
    }
 
    #[test]
    fn an_account_burning_faster_than_its_window_falls_behind() {
       let now = 1_000_000;
-      let h = 3600;
+      let hour = 3600;
       assert_eq!(
-         usage(&[("7d", 0.80, 37 * h)], now).band(0.9, now),
+         usage(&[("7d", 0.80_f64, 37_i64 * hour)], now).band(0.9_f64, now),
          Band::Behind
       );
    }
@@ -557,24 +568,30 @@ mod band_tests {
    #[test]
    fn the_longest_window_decides() {
       let now = 1_000_000;
-      let h = 3600;
-      let u = usage(&[("7d", 0.10, 100 * h), ("5h", 0.85, 4 * h)], now);
-      assert_eq!(u.band(0.9, now), Band::Steady);
+      let hour = 3600;
+      let usage_data = usage(
+         &[
+            ("7d", 0.10_f64, 100_i64 * hour),
+            ("5h", 0.85_f64, 4_i64 * hour),
+         ],
+         now,
+      );
+      assert_eq!(usage_data.band(0.9_f64, now), Band::Steady);
    }
 
    #[test]
    fn a_window_about_to_reset_does_not_score_infinitely() {
       let now = 1_000_000;
-      let u = usage(&[("7d", 0.99, 1)], now);
-      assert!(u.slack(now).unwrap().is_finite());
+      let usage_data = usage(&[("7d", 0.99_f64, 1_i64)], now);
+      assert!(usage_data.slack(now).unwrap().is_finite());
    }
 
    #[test]
    fn usage_without_a_reset_time_keeps_the_old_behaviour() {
       let now = 1_000_000;
-      let mut u = usage(&[("7d", 0.5, 3600)], now);
-      u.windows[0].resets_at = None;
-      assert_eq!(u.band(0.9, now), Band::Steady);
+      let mut usage_data = usage(&[("7d", 0.5_f64, 3600_i64)], now);
+      usage_data.windows[0].resets_at = None;
+      assert_eq!(usage_data.band(0.9_f64, now), Band::Steady);
    }
 }
 
@@ -587,24 +604,24 @@ mod idle_window_tests {
    #[test]
    fn a_full_short_window_is_still_spent() {
       let now = 1_000_000;
-      let h = 3600;
-      let u = AccountUsage {
+      let hour = 3600;
+      let usage_data = AccountUsage {
          windows: vec![
             UsageWindow {
                name: "5h".into(),
                utilization: 0.95,
-               resets_at: Some(now + 4 * h),
+               resets_at: Some(now + 4 * hour),
             },
             UsageWindow {
                name: "7d".into(),
                utilization: 0.10,
-               resets_at: Some(now + 100 * h),
+               resets_at: Some(now + 100 * hour),
             },
          ],
          model_windows: Vec::new(),
          locked: false,
          observed_at: 0,
       };
-      assert_eq!(u.band(0.9, now), Band::Spent);
+      assert_eq!(usage_data.band(0.9, now), Band::Spent);
    }
 }

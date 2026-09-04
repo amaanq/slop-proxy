@@ -179,12 +179,12 @@ impl Default for ToolOutput {
 
 impl ToolOutput {
    pub fn text(&self) -> String {
-      match self {
-         Self::Text(s) => s.clone(),
-         Self::Parts(parts) => parts
+      match *self {
+         Self::Text(ref text) => text.clone(),
+         Self::Parts(ref parts) => parts
             .iter()
-            .filter_map(|p| match p {
-               ContentPart::InputText { text } | ContentPart::OutputText { text } => {
+            .filter_map(|part| match *part {
+               ContentPart::InputText { ref text } | ContentPart::OutputText { ref text } => {
                   Some(text.as_str())
                },
                ContentPart::InputImage { .. } | ContentPart::Other => None,
@@ -352,7 +352,7 @@ pub enum ResponsesEvent {
 impl ResponsesEvent {
    /// The wire name, which is also the SSE event name the stream carries.
    pub const fn kind(&self) -> &'static str {
-      match self {
+      match *self {
          Self::Created { .. } => "response.created",
          Self::InProgress => "response.in_progress",
          Self::OutputItemAdded { .. } => "response.output_item.added",
@@ -499,9 +499,11 @@ mod input_shape_tests {
    }
 
    fn text_of(req: &ResponsesRequest) -> String {
-      match &req.input[0] {
-         InputItem::Message { content, .. } => match &content[0] {
-            ContentPart::InputText { text } | ContentPart::OutputText { text } => text.clone(),
+      match req.input[0] {
+         InputItem::Message { ref content, .. } => match content[0] {
+            ContentPart::InputText { ref text } | ContentPart::OutputText { ref text } => {
+               text.clone()
+            },
             ContentPart::InputImage { .. } | ContentPart::Other => String::new(),
          },
          InputItem::FunctionCall { .. }

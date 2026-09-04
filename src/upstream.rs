@@ -1,6 +1,8 @@
 use reqwest::header::HeaderMap;
 use thiserror::Error;
 
+use crate::clock;
+
 #[derive(Debug, Error)]
 pub enum SendError {
    #[error("upstream auth failed: {0}")]
@@ -22,13 +24,13 @@ pub enum SendError {
 /// backend-specific reset headers that parses.
 pub fn retry_after_secs(headers: &HeaderMap, reset_headers: &[&str]) -> Option<i64> {
    let get = |name: &str| headers.get(name)?.to_str().ok();
-   if let Some(v) = get("retry-after").and_then(|v| v.parse::<i64>().ok()) {
-      return Some(v);
+   if let Some(retry) = get("retry-after").and_then(|value| value.parse::<i64>().ok()) {
+      return Some(retry);
    }
-   let reset = reset_headers.iter().find_map(|h| get(h))?;
-   let now = crate::clock::unix_now();
-   if let Ok(ts) = reset.parse::<jiff::Timestamp>() {
-      return Some((ts.as_second() - now).max(1));
+   let reset = reset_headers.iter().find_map(|header| get(header))?;
+   let now = clock::unix_now();
+   if let Ok(timestamp) = reset.parse::<jiff::Timestamp>() {
+      return Some((timestamp.as_second() - now).max(1));
    }
    let secs = reset.parse::<f64>().ok()? as i64;
    // Reset headers have been observed both as an absolute epoch and as
@@ -81,9 +83,10 @@ pub async fn classify(
 #[cfg(test)]
 mod tests {
    use super::*;
+   use axum::http::Response;
 
    fn response(status: u16, body: &'static str) -> reqwest::Response {
-      axum::http::Response::builder()
+      Response::builder()
          .status(status)
          .header("retry-after", "7")
          .body(body)
@@ -94,7 +97,7 @@ mod tests {
    #[tokio::test]
    async fn a_passed_status_keeps_its_body_for_the_relay() {
       let rules = Classify {
-         pass: |s| !matches!(s, 401 | 429 | 500..=599),
+         pass: |status| !matches!(status, 401 | 429 | 500..=599),
          ..Classify::STRICT
       };
       assert_eq!(

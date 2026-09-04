@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::HeaderMap;
@@ -14,7 +16,7 @@ use crate::pool::pools::Dispatched;
 use crate::provider::Provider;
 use crate::translate::anthropic_req::{self, AnthropicRequest};
 use crate::translate::anthropic_stream::{AnthropicStream, render_aggregated};
-use crate::translate::{StopKind, UsageCapture, aggregate, count_tokens};
+use crate::translate::{StopKind, UsageCapture, aggregate, count_tokens, model_map};
 
 const DIALECT: Dialect = Dialect::Anthropic;
 
@@ -24,7 +26,7 @@ pub async fn messages(
    headers: HeaderMap,
    body: Bytes,
 ) -> Response {
-   let started = std::time::Instant::now();
+   let started = Instant::now();
    let peek = super::relay::Peek::from_slice(&body);
    // An effort suffix is part of what the caller typed, not part of the model
    // name a pattern matches, so routing the raw string sent muse:high to
@@ -32,7 +34,7 @@ pub async fn messages(
    let provider = state
       .cfg
       .models
-      .route(&crate::translate::model_map::resolve(&state.cfg.models, &peek.model).model);
+      .route(&model_map::resolve(&state.cfg.models, &peek.model).model);
    if !auth.may_use(provider) {
       log_rejected(&state, &auth, "messages", &peek.model);
       return super::error::out_of_scope(DIALECT, provider);
@@ -49,11 +51,11 @@ pub async fn messages(
       Provider::Gemini | Provider::Zen | Provider::OpenAi => {},
    }
    let req = match serde_json::from_slice::<AnthropicRequest>(&body) {
-      Ok(r) => r,
-      Err(e) => {
-         tracing::warn!(near = %super::error::body_at(&body, &e), "anthropic request did not parse");
+      Ok(req) => req,
+      Err(err) => {
+         tracing::warn!(near = %super::error::body_at(&body, &err), "anthropic request did not parse");
          log_rejected(&state, &auth, "messages", &peek.model);
-         return translation_error(DIALECT, &format!("invalid request: {e}"));
+         return translation_error(DIALECT, &format!("invalid request: {err}"));
       },
    };
    let mut upstream_req = anthropic_req::to_responses(&req, &state.cfg);
@@ -71,7 +73,7 @@ pub async fn messages(
    record.effort = upstream_req
       .reasoning
       .as_ref()
-      .map(|r| r.effort.clone())
+      .map(|reasoning| reasoning.effort.clone())
       .unwrap_or_default();
 
    let session_key = upstream_req.prompt_cache_key.clone().unwrap_or_default();
@@ -85,8 +87,8 @@ pub async fn messages(
       account_id,
       upstream,
    } = match state.pools.responses(provider, route, &upstream_req).await {
-      Ok(d) => d,
-      Err(e) => return dispatch_failed(&state, record, DIALECT, e),
+      Ok(dispatched) => dispatched,
+      Err(err) => return dispatch_failed(&state, record, DIALECT, err),
    };
    record.account_id = account_id;
 
@@ -98,9 +100,9 @@ pub async fn messages(
       let mut translator =
          AnthropicStream::new(req.model.clone(), est_input, emit_thinking, capture.clone());
       let guard = LogGuard::new(state.clone(), capture, record, started);
-      translated(events, guard, move |ev| {
-         let frames = match ev {
-            Some(ev) => translator.handle(ev),
+      translated(events, guard, move |event| {
+         let frames = match event {
+            Some(event) => translator.handle(event),
             None => translator.finalize(),
          };
          frames
@@ -148,8 +150,8 @@ pub async fn count_tokens(
       Provider::Gemini | Provider::Zen | Provider::Glm | Provider::OpenAi => {},
    }
    let req = match serde_json::from_slice::<AnthropicRequest>(&body) {
-      Ok(r) => r,
-      Err(e) => return translation_error(DIALECT, &format!("invalid request: {e}")),
+      Ok(req) => req,
+      Err(err) => return translation_error(DIALECT, &format!("invalid request: {err}")),
    };
    Json(TokenCount {
       input_tokens: count_tokens::estimate(&anthropic_req::to_responses(&req, &state.cfg)),

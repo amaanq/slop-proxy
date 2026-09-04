@@ -3,9 +3,12 @@
 //! parser already understands.
 
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+use std::time::Duration;
 
 use axum::body::Bytes;
+use reqwest::header::CONTENT_TYPE;
 
+use crate::clock::unix_now;
 use crate::config::ZenConfig;
 use crate::upstream::{Classify, SendError, classify};
 
@@ -29,8 +32,8 @@ struct Egress {
 impl Egress {
    fn new(proxy_url: Option<&str>, index: usize) -> eyre::Result<Self> {
       let mut builder = reqwest::Client::builder()
-         .connect_timeout(std::time::Duration::from_secs(30))
-         .tcp_keepalive(std::time::Duration::from_secs(30));
+         .connect_timeout(Duration::from_secs(30))
+         .tcp_keepalive(Duration::from_secs(30));
       if let Some(proxy_url) = proxy_url {
          let proxy = reqwest::Proxy::all(proxy_url)
             .map_err(|_| eyre::eyre!("invalid zen proxy URL at position {}", index + 1))?;
@@ -135,7 +138,7 @@ impl ZenClient {
          builder = builder.bearer_auth(key);
       }
       let response = builder
-         .header(reqwest::header::CONTENT_TYPE, "application/json")
+         .header(CONTENT_TYPE, "application/json")
          .body(req.clone())
          .send()
          .await
@@ -201,7 +204,7 @@ impl ZenClient {
    }
 
    fn available_egresses(&self, anonymous: bool) -> Result<Vec<usize>, SendError> {
-      let now = crate::clock::unix_now();
+      let now = unix_now();
       let start = self.next.fetch_add(1, Ordering::Relaxed);
       let indices = (0..self.egresses.len())
          .map(|offset| start.wrapping_add(offset) % self.egresses.len())
@@ -239,17 +242,15 @@ impl ZenClient {
    }
 
    fn cool_unavailable(&self, index: usize, seconds: i64) {
-      self.egresses[index].unavailable_until.store(
-         crate::clock::unix_now().saturating_add(seconds.max(1)),
-         Ordering::Relaxed,
-      );
+      self.egresses[index]
+         .unavailable_until
+         .store(unix_now().saturating_add(seconds.max(1)), Ordering::Relaxed);
    }
 
    fn cool_anonymous(&self, index: usize, seconds: i64) {
-      self.egresses[index].anonymous_cooldown_until.store(
-         crate::clock::unix_now().saturating_add(seconds.max(1)),
-         Ordering::Relaxed,
-      );
+      self.egresses[index]
+         .anonymous_cooldown_until
+         .store(unix_now().saturating_add(seconds.max(1)), Ordering::Relaxed);
    }
 
    fn retry_after(&self, now: i64, anonymous: bool) -> i64 {
@@ -280,7 +281,7 @@ impl ZenClient {
          let retry_after = if untried > 0 {
             1
          } else {
-            self.retry_after(crate::clock::unix_now(), true)
+            self.retry_after(unix_now(), true)
          };
          return SendError::RateLimited {
             retry_after: Some(retry_after),
@@ -305,6 +306,7 @@ mod tests {
    use axum::extract::Request;
    use axum::http::{HeaderValue, Response, StatusCode};
    use axum::routing::any;
+   use tokio::net::TcpListener;
    use tokio::sync::Mutex;
 
    use super::*;
@@ -341,7 +343,7 @@ mod tests {
             response
          }
       }));
-      let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+      let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
       let address = listener.local_addr().unwrap();
       tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
       (format!("http://{address}"), requests)
@@ -417,7 +419,7 @@ mod tests {
    async fn an_exhausted_walk_stops_at_the_cap_and_asks_for_a_quick_retry() {
       async fn seen(proxies: &[(String, Requests)]) -> usize {
          let mut total = 0;
-         for (_, requests) in proxies {
+         for &(_, ref requests) in proxies {
             total += requests.lock().await.len();
          }
          total
@@ -428,7 +430,10 @@ mod tests {
       }
       let client = ZenClient::new(ZenConfig {
          base_url: "http://zen.invalid/v1".into(),
-         proxy_urls: proxies.iter().map(|(url, _)| authenticated(url)).collect(),
+         proxy_urls: proxies
+            .iter()
+            .map(|&(ref url, _)| authenticated(url))
+            .collect(),
          proxy_urls_file: None,
       })
       .unwrap();

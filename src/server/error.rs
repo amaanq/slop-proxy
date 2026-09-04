@@ -6,6 +6,7 @@ use serde::Serialize;
 
 use crate::config::ModelsConfig;
 use crate::pool::PoolError;
+use crate::provider::Provider;
 
 #[derive(Clone, Copy, Debug)]
 pub enum Dialect {
@@ -80,8 +81,8 @@ pub fn pool_error_response(dialect: Dialect, models: &ModelsConfig, err: PoolErr
             err_type,
             "all upstream accounts are rate limited; retry later",
          );
-         if let Ok(v) = HeaderValue::from_str(&retry_after.to_string()) {
-            resp.headers_mut().insert("retry-after", v);
+         if let Ok(value) = HeaderValue::from_str(&retry_after.to_string()) {
+            resp.headers_mut().insert("retry-after", value);
          }
          resp
       },
@@ -96,7 +97,7 @@ pub fn pool_error_response(dialect: Dialect, models: &ModelsConfig, err: PoolErr
          } else {
             let hint = models
                .suggest(&model)
-               .map(|m| format!(", did you mean {m}?"))
+               .map(|model| format!(", did you mean {model}?"))
                .unwrap_or_default();
             format!(
                "no backend is configured for {model}{hint} it fell through to {provider}, which said: {body}"
@@ -125,8 +126,8 @@ pub fn body_at(body: &[u8], error: &serde_json::Error) -> String {
    String::from_utf8_lossy(&body[start..end]).into_owned()
 }
 
-pub const fn pool_error_status(e: &PoolError) -> i64 {
-   match e {
+pub const fn pool_error_status(err: &PoolError) -> i64 {
+   match *err {
       PoolError::NoAccounts(_) => 503,
       PoolError::AllCoolingDown { .. } => 429,
       PoolError::BadRequest { .. } => 400,
@@ -136,7 +137,7 @@ pub const fn pool_error_status(e: &PoolError) -> i64 {
 
 /// A 403 that says which provider the token lacks, so a scoped key does not
 /// read as the model being broken for everyone.
-pub fn out_of_scope(dialect: Dialect, provider: crate::provider::Provider) -> Response {
+pub fn out_of_scope(dialect: Dialect, provider: Provider) -> Response {
    error_response(
       dialect,
       403,

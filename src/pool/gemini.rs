@@ -1,5 +1,8 @@
+use std::time::Duration;
+
 use axum::body::Bytes;
 
+use crate::translate::chat::ChatError;
 use crate::translate::chat::ChatRequest;
 
 use super::{AuthPolicy, Backend, Cooldown, Pool, Route, Slot};
@@ -48,14 +51,14 @@ impl Backend for GeminiClient {
    type Response = GeminiResponse;
 
    fn reason(body: String) -> String {
-      crate::translate::chat::ChatError::reason(body)
+      ChatError::reason(body)
    }
 
    fn soft_limit(&self) -> f64 {
       self.soft_utilization_limit()
    }
 
-   fn retry_budget(&self) -> std::time::Duration {
+   fn retry_budget(&self) -> Duration {
       Self::retry_budget_duration(self)
    }
 
@@ -66,13 +69,15 @@ impl Backend for GeminiClient {
       _route: Route<'_>,
       req: &Self::Request,
    ) -> Result<Self::Response, SendError> {
-      match req {
-         Call::OpenAi(body) => Self::post(self, token, slot.http_referer.as_deref(), body).await,
+      match *req {
+         Call::OpenAi(ref body) => {
+            Self::post(self, token, slot.http_referer.as_deref(), body).await
+         },
          Call::Native {
-            model,
-            action,
-            query,
-            body,
+            ref model,
+            ref action,
+            ref query,
+            ref body,
          } => Self::send_native(
             self,
             token,
@@ -105,7 +110,7 @@ impl Pool<GeminiClient> {
             .await
          {
             Ok(ids) => return ids,
-            Err(e) => tracing::debug!("models for {}: {e}", slot.display),
+            Err(err) => tracing::debug!("models for {}: {err}", slot.display),
          }
       }
       Vec::new()

@@ -45,7 +45,7 @@ enum AnthEvent {
 
 impl AnthEvent {
    fn out(self) -> OutEvent {
-      let name = match &self {
+      let name = match self {
          Self::MessageStart { .. } => "message_start",
          Self::Ping => "ping",
          Self::ContentBlockStart { .. } => "content_block_start",
@@ -153,9 +153,9 @@ impl AnthropicStream {
       }
    }
 
-   pub fn handle(&mut self, ev: ResponsesEvent) -> Vec<OutEvent> {
+   pub fn handle(&mut self, event: ResponsesEvent) -> Vec<OutEvent> {
       let mut out = Vec::new();
-      for step in self.walker.step(ev) {
+      for step in self.walker.step(event) {
          self.render(&mut out, step);
       }
       out
@@ -251,8 +251,8 @@ impl AnthropicStream {
             out.push(AnthEvent::MessageStop.out());
          },
          Step::Failed { message, code } => {
-            let rate_limited =
-               code.is_some_and(|c| c.contains("rate_limit")) || message.contains("rate limit");
+            let rate_limited = code.is_some_and(|code| code.contains("rate_limit"))
+               || message.contains("rate limit");
             let kind = if rate_limited {
                "rate_limit_error"
             } else {
@@ -324,8 +324,11 @@ pub struct RenderedMessage {
 pub fn render_aggregated(agg: &Aggregated, model: &str, emit_thinking: bool) -> RenderedMessage {
    let mut content = Vec::new();
    for block in &agg.blocks {
-      match block {
-         Block::Thinking { text, signature } => {
+      match *block {
+         Block::Thinking {
+            ref text,
+            ref signature,
+         } => {
             if emit_thinking {
                content.push(RenderedBlock::Thinking {
                   thinking: text.clone(),
@@ -333,11 +336,11 @@ pub fn render_aggregated(agg: &Aggregated, model: &str, emit_thinking: bool) -> 
                });
             }
          },
-         Block::Text { text } => content.push(RenderedBlock::Text { text: text.clone() }),
+         Block::Text { ref text } => content.push(RenderedBlock::Text { text: text.clone() }),
          Block::ToolCall {
-            id,
-            name,
-            arguments,
+            ref id,
+            ref name,
+            ref arguments,
          } => {
             let input = RawValue::from_string(arguments.clone())
                .unwrap_or_else(|_| RawValue::from_string("{}".into()).expect("literal"));
@@ -380,7 +383,7 @@ mod tests {
          encrypted_content: Some("ENC".into()),
       };
       let mut frames = Vec::new();
-      for ev in [
+      for event in [
          ResponsesEvent::OutputItemAdded {
             output_index: 0,
             item: reasoning.clone(),
@@ -402,9 +405,9 @@ mod tests {
             response: ResponseObj::default(),
          },
       ] {
-         frames.extend(stream.handle(ev));
+         frames.extend(stream.handle(event));
       }
-      let names = frames.iter().map(|(n, _)| *n).collect::<Vec<_>>();
+      let names = frames.iter().map(|&(name, _)| name).collect::<Vec<_>>();
       assert_eq!(
          names,
          [
@@ -416,6 +419,6 @@ mod tests {
          ]
       );
       assert!(frames[0].1.contains("\"index\":0"));
-      assert!(!frames.iter().any(|(_, d)| d.contains("secret")));
+      assert!(!frames.iter().any(|&(_, ref body)| body.contains("secret")));
    }
 }

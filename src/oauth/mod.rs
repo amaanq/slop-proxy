@@ -2,8 +2,12 @@ pub mod anthropic;
 pub mod jwt;
 pub mod refresh;
 
+use std::sync::LazyLock;
+use std::time::{Duration, Instant};
+
 use eyre::{Result, WrapErr as _, bail, eyre};
 use serde::Deserialize;
+use tokio::time;
 
 use crate::db::Db;
 use crate::db::accounts::NewAccount;
@@ -13,8 +17,7 @@ use refresh::TokenResponse;
 /// One shared client so token refreshes reuse connections instead of paying
 /// TLS setup per call (refreshes run while a slot mutex is held).
 pub fn http() -> &'static reqwest::Client {
-   static HTTP: std::sync::LazyLock<reqwest::Client> =
-      std::sync::LazyLock::new(reqwest::Client::new);
+   static HTTP: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
    &HTTP
 }
 
@@ -88,19 +91,25 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
       let body = resp.text().await.unwrap_or_default();
       bail!("device user code request failed: {status}: {body}");
    }
-   let uc = resp
+   let user_code = resp
       .json::<UserCodeResp>()
       .await
       .wrap_err("parsing user code response")?;
-   let interval = parse_interval(uc.interval.as_ref());
+   let interval = parse_interval(user_code.interval.as_ref());
 
    println!(
       "To authorize, open this URL on any device:\n\n    {DEVICE_VERIFICATION_URL}\n\nand enter this code:\n\n    {}\n",
-      uc.user_code
+      user_code.user_code
    );
    println!("Waiting for authorization (up to 15 minutes)...");
 
-   let success = poll_for_code(http(), &uc.device_auth_id, &uc.user_code, interval).await?;
+   let success = poll_for_code(
+      http(),
+      &user_code.device_auth_id,
+      &user_code.user_code,
+      interval,
+   )
+   .await?;
 
    let token_resp = http()
       .post(TOKEN_URL)
@@ -168,7 +177,9 @@ async fn finish_login(
          auth_mode: AuthMode::OAuth,
       })
       .await?;
-   let plan = plan.map(|p| format!(", plan {p}")).unwrap_or_default();
+   let plan = plan
+      .map(|tier| format!(", plan {tier}"))
+      .unwrap_or_default();
    println!(
       "logged in: {provider} account {db_id} ({}{plan})",
       email.unwrap_or("unknown email")
@@ -182,8 +193,8 @@ async fn poll_for_code(
    user_code: &str,
    interval: u64,
 ) -> Result<DeviceTokenResp> {
-   let started = std::time::Instant::now();
-   let max = std::time::Duration::from_secs(DEVICE_TIMEOUT_SECS);
+   let started = Instant::now();
+   let max = Duration::from_secs(DEVICE_TIMEOUT_SECS);
    loop {
       let resp = client
          .post(DEVICE_TOKEN_URL)
@@ -211,14 +222,14 @@ async fn poll_for_code(
       if started.elapsed() > max {
          bail!("device authorization timed out after 15 minutes");
       }
-      tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
+      time::sleep(Duration::from_secs(interval)).await;
    }
 }
 
-fn parse_interval(v: Option<&Interval>) -> u64 {
-   let secs = match v {
-      Some(Interval::Seconds(n)) => Some(*n),
-      Some(Interval::Text(s)) => s.parse().ok(),
+fn parse_interval(value: Option<&Interval>) -> u64 {
+   let secs = match value {
+      Some(&Interval::Seconds(count)) => Some(count),
+      Some(&Interval::Text(ref text)) => text.parse().ok(),
       None => None,
    };
    secs.unwrap_or(5).clamp(1, 60)

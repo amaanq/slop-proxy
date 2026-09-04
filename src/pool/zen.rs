@@ -2,6 +2,7 @@ use axum::body::Bytes;
 
 use super::{AuthPolicy, Backend, Cooldown, Pool, Route, Slot};
 use crate::provider::Provider;
+use crate::translate::chat::ChatError;
 use crate::upstream::SendError;
 use crate::zen::client::ZenClient;
 
@@ -22,7 +23,7 @@ impl Backend for ZenClient {
    type Response = reqwest::Response;
 
    fn reason(body: String) -> String {
-      crate::translate::chat::ChatError::reason(body)
+      ChatError::reason(body)
    }
 
    async fn send(

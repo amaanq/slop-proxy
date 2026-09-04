@@ -1,10 +1,19 @@
-use std::sync::Arc;
+use std::env;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::Router;
+use axum::body;
+use axum::extract::State;
+use axum::http::StatusCode;
 use axum::response::IntoResponse as _;
 use axum::routing::post;
+use tokio::net::TcpListener;
+use tokio::time;
 
-use super::{AppState, Inner, router};
+use super::{AppState, Inner, metrics, router};
+use crate::clock;
 use crate::codex::client::CodexClient;
 use crate::config::{
    AnthropicConfig, CodexConfig, Config, GeminiConfig, GlmConfig, ModelsConfig, PricingConfig,
@@ -12,9 +21,12 @@ use crate::config::{
 };
 use crate::db::Db;
 use crate::db::accounts::NewAccount;
+use crate::db::tokens::TokenLimits;
+use crate::db::usage::UsageDim;
 use crate::oauth::TokenSet;
 use crate::pool::Pools;
 use crate::pool::codex::CodexPool;
+use crate::pricing::Prices;
 use crate::provider::{AuthMode, Provider};
 
 const MOCK_SSE: &str = concat!(
@@ -53,7 +65,7 @@ async fn spawn_mock_upstream() -> String {
       "/responses",
       post(|| async { ([("content-type", "text/event-stream")], MOCK_SSE).into_response() }),
    );
-   let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+   let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
    let addr = listener.local_addr().unwrap();
    tokio::spawn(async move {
       axum::serve(listener, app).await.unwrap();
@@ -66,13 +78,13 @@ fn fresh_tokens() -> TokenSet {
       access_token: "at".into(),
       refresh_token: "rt".into(),
       id_token: None,
-      expires_at: Some(crate::clock::unix_now() + 3600),
+      expires_at: Some(clock::unix_now() + 3600),
    }
 }
 
 async fn spawn_proxy_with(models: ModelsConfig, anthropic_base: Option<String>) -> (String, Db) {
    let base_url = spawn_mock_upstream().await;
-   let db_path = std::env::temp_dir().join(format!("slop-test-{}.db", uuid::Uuid::new_v4()));
+   let db_path = env::temp_dir().join(format!("slop-test-{}.db", uuid::Uuid::new_v4()));
    let db = Db::open(&db_path).unwrap();
    db.create_token("alice", "sp-test", "sp-test")
       .await
@@ -122,17 +134,14 @@ async fn spawn_proxy_with(models: ModelsConfig, anthropic_base: Option<String>) 
       models,
    };
    let pools = Pools::load(&db, &cfg).await.unwrap();
-   let state = AppState(std::sync::Arc::new(Inner {
+   let state = AppState(Arc::new(Inner {
       db: db.clone(),
       cfg,
-      prices: crate::pricing::Prices::new(
-         &cfg_db_path,
-         crate::config::PricingConfig::default().url,
-      ),
+      prices: Prices::new(&cfg_db_path, PricingConfig::default().url),
       models: super::ModelCache::new(),
       pools,
    }));
-   let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+   let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
    let addr = listener.local_addr().unwrap();
    tokio::spawn(async move {
       axum::serve(listener, router(state)).await.unwrap();
@@ -155,9 +164,9 @@ async fn anthropic_streaming_end_to_end() {
    let (base, db) = spawn_proxy().await;
    let body = serde_json::json!({
        "model": "claude-sonnet-4",
-       "max_tokens": 1000,
+       "max_tokens": 1000_u64,
        "stream": true,
-       "thinking": {"type": "enabled", "budget_tokens": 8000},
+       "thinking": {"type": "enabled", "budget_tokens": 8000_u64},
        "messages": [{"role": "user", "content": "hi"}],
        "tools": [{"name": "get_weather", "description": "d", "input_schema": {"type": "object"}}]
    });
@@ -197,7 +206,7 @@ async fn anthropic_streaming_end_to_end() {
    assert!(text.contains("\"input_tokens\":80"));
    assert!(text.contains("\"cache_read_input_tokens\":20"));
 
-   tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+   time::sleep(Duration::from_millis(100)).await;
    let totals = db.usage_totals(0, i64::MAX).await.unwrap();
    assert_eq!(totals.requests, 1);
    // 100 prompt tokens of which 20 were cached, so 80 are freshly billed.
@@ -226,10 +235,10 @@ async fn openai_non_streaming_end_to_end() {
       .await
       .unwrap();
    assert_eq!(resp.status(), 200);
-   let v = resp.json::<serde_json::Value>().await.unwrap();
+   let value = resp.json::<serde_json::Value>().await.unwrap();
 
-   assert_eq!(v["object"], "chat.completion");
-   let msg = &v["choices"][0]["message"];
+   assert_eq!(value["object"], "chat.completion");
+   let msg = &value["choices"][0]["message"];
    assert_eq!(msg["content"], "Hello world");
    assert_eq!(msg["reasoning_content"], "pondering");
    assert_eq!(msg["tool_calls"][0]["function"]["name"], "get_weather");
@@ -237,15 +246,12 @@ async fn openai_non_streaming_end_to_end() {
       msg["tool_calls"][0]["function"]["arguments"],
       "{\"city\":\"Oslo\"}"
    );
-   assert_eq!(v["choices"][0]["finish_reason"], "tool_calls");
-   assert_eq!(v["usage"]["prompt_tokens"], 100);
-   assert_eq!(v["usage"]["completion_tokens"], 25);
+   assert_eq!(value["choices"][0]["finish_reason"], "tool_calls");
+   assert_eq!(value["usage"]["prompt_tokens"], 100_u64);
+   assert_eq!(value["usage"]["completion_tokens"], 25_u64);
 
-   tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-   let by_user = db
-      .usage_by(crate::db::usage::UsageDim::User, 0, i64::MAX)
-      .await
-      .unwrap();
+   time::sleep(Duration::from_millis(100)).await;
+   let by_user = db.usage_by(UsageDim::User, 0, i64::MAX).await.unwrap();
    assert_eq!(by_user[0].key, "alice");
    assert_eq!(by_user[0].input_tokens, 80);
 }
@@ -282,7 +288,7 @@ async fn thinking_disabled_hides_thinking_blocks() {
    let (base, _db) = spawn_proxy().await;
    let body = serde_json::json!({
        "model": "claude-sonnet-4",
-       "max_tokens": 1000,
+       "max_tokens": 1000_u64,
        "messages": [{"role": "user", "content": "hi"}]
    });
    let resp = reqwest::Client::new()
@@ -292,15 +298,15 @@ async fn thinking_disabled_hides_thinking_blocks() {
       .send()
       .await
       .unwrap();
-   let v = resp.json::<serde_json::Value>().await.unwrap();
-   let types = v["content"]
+   let value = resp.json::<serde_json::Value>().await.unwrap();
+   let types = value["content"]
       .as_array()
       .unwrap()
       .iter()
-      .map(|b| b["type"].as_str().unwrap())
+      .map(|block| block["type"].as_str().unwrap())
       .collect::<Vec<&str>>();
    assert_eq!(types, vec!["text", "tool_use"]);
-   assert_eq!(v["stop_reason"], "tool_use");
+   assert_eq!(value["stop_reason"], "tool_use");
 }
 
 const MOCK_ANTHROPIC_SSE: &str = concat!(
@@ -318,7 +324,7 @@ const MOCK_ANTHROPIC_SSE: &str = concat!(
 async fn anthropic_relay_passthrough() {
    use axum::http::HeaderMap;
 
-   let seen = Arc::new(std::sync::Mutex::new(HeaderMap::new()));
+   let seen = Arc::new(Mutex::new(HeaderMap::new()));
    let seen2 = Arc::clone(&seen);
    let app = Router::new().route(
       "/v1/messages",
@@ -327,7 +333,7 @@ async fn anthropic_relay_passthrough() {
          ([("content-type", "text/event-stream")], MOCK_ANTHROPIC_SSE).into_response()
       }),
    );
-   let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+   let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
    let upstream = format!("http://{}", listener.local_addr().unwrap());
    tokio::spawn(async move {
       axum::serve(listener, app).await.unwrap();
@@ -336,7 +342,7 @@ async fn anthropic_relay_passthrough() {
    let (base, db) = spawn_proxy_with(ModelsConfig::default(), Some(upstream)).await;
    let body = serde_json::json!({
        "model": "claude-opus-5",
-       "max_tokens": 100,
+       "max_tokens": 100_u64,
        "stream": true,
        "metadata": {"user_id": "session-1"},
        "messages": [{"role": "user", "content": "hi"}]
@@ -366,7 +372,7 @@ async fn anthropic_relay_passthrough() {
       "Bearer at"
    );
 
-   tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+   time::sleep(Duration::from_millis(100)).await;
    let totals = db.usage_totals(0, i64::MAX).await.unwrap();
    assert_eq!(totals.requests, 1);
    assert_eq!(totals.input_tokens, 50);
@@ -387,10 +393,10 @@ async fn metrics_render_accounts_and_usage() {
       .send()
       .await
       .unwrap();
-   tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+   time::sleep(Duration::from_millis(100)).await;
 
    let cfg = Config {
-      db_path: std::path::PathBuf::new(),
+      db_path: PathBuf::new(),
       bind: String::new(),
       metrics_bind: None,
       codex: CodexConfig::default(),
@@ -402,20 +408,15 @@ async fn metrics_render_accounts_and_usage() {
       models: ModelsConfig::default(),
    };
    let pools = Pools::load(&db, &cfg).await.unwrap();
-   let state = AppState(std::sync::Arc::new(Inner {
+   let state = AppState(Arc::new(Inner {
       db: db.clone(),
       cfg,
-      prices: crate::pricing::Prices::new(
-         &std::path::PathBuf::new(),
-         crate::config::PricingConfig::default().url,
-      ),
+      prices: Prices::new(&PathBuf::new(), PricingConfig::default().url),
       models: super::ModelCache::new(),
       pools,
    }));
-   let resp = super::metrics::metrics(axum::extract::State(state)).await;
-   let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
-      .await
-      .unwrap();
+   let resp = metrics::metrics(State(state)).await;
+   let bytes = body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
    let text = String::from_utf8(bytes.to_vec()).unwrap();
 
    assert!(
@@ -428,7 +429,7 @@ async fn metrics_render_accounts_and_usage() {
 
 #[tokio::test]
 async fn pool_reload_picks_up_new_logins() {
-   let db_path = std::env::temp_dir().join(format!("slop-reload-{}.db", uuid::Uuid::new_v4()));
+   let db_path = env::temp_dir().join(format!("slop-reload-{}.db", uuid::Uuid::new_v4()));
    let db = Db::open(&db_path).unwrap();
    let pool = CodexPool::load(db.clone(), CodexClient::new(CodexConfig::default()))
       .await
@@ -456,7 +457,7 @@ async fn token_request_limit_enforced() {
    let id = db.create_token("marc", "sp-marc", "sp-marc").await.unwrap();
    db.set_token_limits(
       &id.to_string(),
-      &crate::db::tokens::TokenLimits {
+      &TokenLimits {
          providers: Vec::new(),
          requests: Some(1),
          tokens: None,
@@ -507,20 +508,20 @@ async fn spawn_proxy_with_gemini() -> (String, Db) {
       "/models/{spec}",
       post(|| async {
          (
-            axum::http::StatusCode::BAD_REQUEST,
+            StatusCode::BAD_REQUEST,
             [("content-type", "application/json")],
             GEMINI_REJECTION,
          )
             .into_response()
       }),
    );
-   let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+   let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
    let addr = listener.local_addr().unwrap();
    tokio::spawn(async move {
       axum::serve(listener, app).await.unwrap();
    });
 
-   let db_path = std::env::temp_dir().join(format!("slop-test-{}.db", uuid::Uuid::new_v4()));
+   let db_path = env::temp_dir().join(format!("slop-test-{}.db", uuid::Uuid::new_v4()));
    let db = Db::open(&db_path).unwrap();
    db.create_token("alice", "sp-test", "sp-test")
       .await
@@ -544,7 +545,7 @@ async fn spawn_proxy_with_gemini() -> (String, Db) {
       metrics_bind: None,
       codex: CodexConfig::default(),
       anthropic: AnthropicConfig::default(),
-      gemini: crate::config::GeminiConfig {
+      gemini: GeminiConfig {
          base_url: format!("http://{addr}"),
          ..GeminiConfig::default()
       },
@@ -557,14 +558,11 @@ async fn spawn_proxy_with_gemini() -> (String, Db) {
    let state = AppState(Arc::new(Inner {
       db: db.clone(),
       cfg,
-      prices: crate::pricing::Prices::new(
-         &cfg_db_path,
-         crate::config::PricingConfig::default().url,
-      ),
+      prices: Prices::new(&cfg_db_path, PricingConfig::default().url),
       models: super::ModelCache::new(),
       pools,
    }));
-   let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+   let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
    let proxy_addr = proxy_listener.local_addr().unwrap();
    tokio::spawn(async move {
       axum::serve(proxy_listener, router(state)).await.unwrap();
@@ -593,7 +591,7 @@ async fn a_rejected_gemini_request_keeps_googles_reason() {
       if !rows.is_empty() {
          break rows;
       }
-      tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+      time::sleep(Duration::from_millis(10)).await;
    };
    assert_eq!(kinds[0].kind, "upstream_rejected");
    assert_eq!(kinds[0].provider, "gemini");
@@ -602,8 +600,8 @@ async fn a_rejected_gemini_request_keeps_googles_reason() {
       .0
       .lock()
       .await
-      .query_row("SELECT response_bytes FROM usage_log", [], |r| {
-         r.get::<_, i64>(0)
+      .query_row("SELECT response_bytes FROM usage_log", [], |row| {
+         row.get::<_, i64>(0)
       })
       .unwrap();
    assert_eq!(logged as usize, GEMINI_REJECTION.len());

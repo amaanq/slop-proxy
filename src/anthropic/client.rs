@@ -1,4 +1,7 @@
+use std::time::Duration;
+
 use axum::body::Bytes;
+use reqwest::header::CONTENT_TYPE;
 
 use crate::config::AnthropicConfig;
 use crate::upstream::{Classify, SendError, classify};
@@ -6,7 +9,7 @@ use crate::upstream::{Classify, SendError, classify};
 const OAUTH_BETA: &str = "oauth-2025-04-20";
 
 const RULES: Classify = Classify {
-   pass: |s| !matches!(s, 401 | 429 | 500..=599),
+   pass: |status| !matches!(status, 401 | 429 | 500..=599),
    auth: &[401],
    reset_headers: &[
       "anthropic-ratelimit-unified-reset",
@@ -89,7 +92,7 @@ impl Usage {
       [&self.five_hour, &self.seven_day]
          .into_iter()
          .flatten()
-         .any(|w| w.locked_reason.is_some())
+         .any(|window| window.locked_reason.is_some())
    }
 
    /// Max plans leave `weekly_all` inactive, and a dormant window reports a
@@ -98,21 +101,31 @@ impl Usage {
       let dormant: Vec<&'static str> = self
          .limits
          .iter()
-         .filter(|l| l.scope.is_none() && !l.is_active)
+         .filter(|limit| limit.scope.is_none() && !limit.is_active)
          .map(Limit::window_name)
          .collect();
       [("5h", &self.five_hour), ("7d", &self.seven_day)]
          .into_iter()
-         .filter_map(|(n, w)| w.as_ref().map(|w| (n, w)))
-         .filter(move |(n, _)| !dormant.contains(n))
+         .filter_map(|(name, slot)| slot.as_ref().map(|window| (name, window)))
+         .filter(move |&(ref name, _)| !dormant.contains(name))
    }
 
    /// Per-model sub-limits, measured against their own allowance rather than
    /// the account's, so they are reported apart from `windows`.
    pub fn model_windows(&self) -> impl Iterator<Item = (String, &'static str, f64)> {
-      self.limits.iter().filter_map(|l| {
-         let name = l.scope.as_ref()?.model.as_ref()?.display_name.as_deref()?;
-         Some((name.to_lowercase(), l.window_name(), l.percent / 100.0))
+      self.limits.iter().filter_map(|limit| {
+         let name = limit
+            .scope
+            .as_ref()?
+            .model
+            .as_ref()?
+            .display_name
+            .as_deref()?;
+         Some((
+            name.to_lowercase(),
+            limit.window_name(),
+            limit.percent / 100.0_f64,
+         ))
       })
    }
 }
@@ -133,8 +146,8 @@ pub struct AnthropicClient {
 impl AnthropicClient {
    pub fn new(cfg: AnthropicConfig) -> Self {
       let http = reqwest::Client::builder()
-         .connect_timeout(std::time::Duration::from_secs(30))
-         .tcp_keepalive(std::time::Duration::from_secs(30))
+         .connect_timeout(Duration::from_secs(30))
+         .tcp_keepalive(Duration::from_secs(30))
          .build()
          .expect("building http client");
       Self { http, cfg }
@@ -155,12 +168,12 @@ impl AnthropicClient {
          .header("anthropic-beta", OAUTH_BETA)
          .send()
          .await
-         .map_err(|e| SendError::Network(e.to_string()))?;
+         .map_err(|err| SendError::Network(err.to_string()))?;
       let resp = classify(resp, Classify::STRICT).await?;
       let status = resp.status().as_u16();
-      resp.json().await.map_err(|e| SendError::Upstream {
+      resp.json().await.map_err(|err| SendError::Upstream {
          status,
-         body: format!("parsing usage response: {e}"),
+         body: format!("parsing usage response: {err}"),
       })
    }
 
@@ -182,12 +195,12 @@ impl AnthropicClient {
          .header("anthropic-version", "2023-06-01")
          .send()
          .await
-         .map_err(|e| SendError::Network(e.to_string()))?;
+         .map_err(|err| SendError::Network(err.to_string()))?;
       let status = resp.status();
       let status_u16 = status.as_u16();
-      let body = resp.text().await.map_err(|e| SendError::Upstream {
+      let body = resp.text().await.map_err(|err| SendError::Upstream {
          status: status_u16,
-         body: format!("reading models response: {e}"),
+         body: format!("reading models response: {err}"),
       })?;
       Ok((status, body))
    }
@@ -202,9 +215,9 @@ impl AnthropicClient {
       body: &Bytes,
       hdrs: &RelayHeaders,
    ) -> Result<reqwest::Response, SendError> {
-      let beta = match &hdrs.beta {
-         Some(b) if b.split(',').any(|p| p.trim() == OAUTH_BETA) => b.clone(),
-         Some(b) => format!("{OAUTH_BETA},{b}"),
+      let beta = match hdrs.beta.as_ref() {
+         Some(beta) if beta.split(',').any(|part| part.trim() == OAUTH_BETA) => beta.clone(),
+         Some(beta) => format!("{OAUTH_BETA},{beta}"),
          None => OAUTH_BETA.into(),
       };
       let mut req = self
@@ -216,15 +229,15 @@ impl AnthropicClient {
             hdrs.version.as_deref().unwrap_or("2023-06-01"),
          )
          .header("anthropic-beta", beta)
-         .header(reqwest::header::CONTENT_TYPE, "application/json")
+         .header(CONTENT_TYPE, "application/json")
          .body(body.clone());
-      if let Some(ua) = &hdrs.user_agent {
-         req = req.header("user-agent", ua);
+      if let Some(agent) = hdrs.user_agent.as_ref() {
+         req = req.header("user-agent", agent);
       }
       let resp = req
          .send()
          .await
-         .map_err(|e| SendError::Network(e.to_string()))?;
+         .map_err(|err| SendError::Network(err.to_string()))?;
       classify(resp, RULES).await
    }
 }
@@ -249,14 +262,14 @@ mod tests {
 
    #[test]
    fn a_scoped_model_is_named_from_its_scope() {
-      let u: Usage = serde_json::from_str(USAGE).unwrap();
-      let got: Vec<_> = u.model_windows().collect();
-      assert_eq!(got, vec![("fable".to_owned(), "7d", 0.63)]);
+      let usage: Usage = serde_json::from_str(USAGE).unwrap();
+      let got: Vec<_> = usage.model_windows().collect();
+      assert_eq!(got, vec![("fable".to_owned(), "7d", 0.63_f64)]);
    }
 
    #[test]
    fn a_dormant_window_is_not_reported() {
-      let u: Usage = serde_json::from_str(
+      let usage: Usage = serde_json::from_str(
          r#"{
               "five_hour": {"utilization": 1.0},
               "seven_day": {"utilization": 0.0},
@@ -267,7 +280,7 @@ mod tests {
             }"#,
       )
       .unwrap();
-      let got: Vec<_> = u.windows().map(|(n, _)| n).collect();
+      let got: Vec<_> = usage.windows().map(|(name, _)| name).collect();
       assert_eq!(got, vec!["5h"]);
    }
 
@@ -275,7 +288,7 @@ mod tests {
    /// array must not start reporting sub-limits that are not there.
    #[test]
    fn a_payload_without_limits_reports_none() {
-      let u: Usage = serde_json::from_str(r#"{"seven_day": {"utilization": 10.0}}"#).unwrap();
-      assert_eq!(u.model_windows().count(), 0);
+      let usage: Usage = serde_json::from_str(r#"{"seven_day": {"utilization": 10.0}}"#).unwrap();
+      assert_eq!(usage.model_windows().count(), 0);
    }
 }

@@ -1,3 +1,5 @@
+use std::mem;
+
 use serde::Serialize;
 
 use super::chat::{
@@ -5,6 +7,7 @@ use super::chat::{
    ChatMessage, ChatToolCall, ChatUsage, ChunkChoice, FinishReason, FunctionBody,
 };
 use super::{Aggregated, Block, Step, StopKind, UsageCapture, Walker};
+use crate::clock::unix_now;
 use crate::codex::types::ResponsesEvent;
 
 pub struct OpenAiStream {
@@ -48,7 +51,7 @@ impl OpenAiStream {
       Self {
          model,
          id: format!("chatcmpl-{}", uuid::Uuid::new_v4().simple()),
-         created: crate::clock::unix_now(),
+         created: unix_now(),
          include_usage,
          tool_index: None,
          reasoning_seen: false,
@@ -57,9 +60,9 @@ impl OpenAiStream {
       }
    }
 
-   pub fn handle(&mut self, ev: ResponsesEvent) -> Vec<String> {
+   pub fn handle(&mut self, event: ResponsesEvent) -> Vec<String> {
       let mut out = Vec::new();
-      for step in self.walker.step(ev) {
+      for step in self.walker.step(event) {
          self.render(&mut out, step);
       }
       out
@@ -97,7 +100,7 @@ impl OpenAiStream {
          )),
          Step::OpenThinking => self.separator_due = self.reasoning_seen,
          Step::Thinking(delta) => {
-            let reasoning_content = if std::mem::take(&mut self.separator_due) {
+            let reasoning_content = if mem::take(&mut self.separator_due) {
                format!("\n\n{delta}")
             } else {
                delta
@@ -112,7 +115,7 @@ impl OpenAiStream {
             ));
          },
          Step::OpenCall { id, name } => {
-            let index = self.tool_index.map_or(0, |i| i + 1);
+            let index = self.tool_index.map_or(0, |idx| idx + 1);
             self.tool_index = Some(index);
             out.push(self.chunk(
                ChatDelta {
@@ -187,18 +190,20 @@ pub fn render_aggregated(agg: &Aggregated, model: &str) -> ChatCompletion {
    let mut reasoning = String::new();
    let mut tool_calls = Vec::new();
    for block in &agg.blocks {
-      match block {
-         Block::Text { text: t } => text.push_str(t),
-         Block::Thinking { text: t, .. } => {
+      match *block {
+         Block::Text { text: ref content } => text.push_str(content),
+         Block::Thinking {
+            text: ref thinking, ..
+         } => {
             if !reasoning.is_empty() {
                reasoning.push_str("\n\n");
             }
-            reasoning.push_str(t);
+            reasoning.push_str(thinking);
          },
          Block::ToolCall {
-            id,
-            name,
-            arguments,
+            ref id,
+            ref name,
+            ref arguments,
          } => {
             tool_calls.push(ChatToolCall {
                id: Some(id.clone()),
@@ -216,15 +221,15 @@ pub fn render_aggregated(agg: &Aggregated, model: &str) -> ChatCompletion {
    ChatCompletion {
       id: format!("chatcmpl-{}", agg.id),
       object: "chat.completion".into(),
-      created: crate::clock::unix_now(),
+      created: unix_now(),
       model: model.to_owned(),
       choices: vec![ChatChoice {
          index: 0,
          message: ChatMessage {
             role: "assistant".into(),
             content: Some(ChatContent::Text(text)),
-            reasoning_content: Some(reasoning).filter(|r| !r.is_empty()),
-            tool_calls: Some(tool_calls).filter(|t| !t.is_empty()),
+            reasoning_content: Some(reasoning).filter(|reason| !reason.is_empty()),
+            tool_calls: Some(tool_calls).filter(|calls| !calls.is_empty()),
             ..Default::default()
          },
          finish_reason: Some(finish_reason(agg.stop)),
@@ -245,7 +250,7 @@ mod tests {
    fn tool_call_indices_start_at_zero_and_count_up() {
       let mut stream = OpenAiStream::new("m".into(), false, UsageCapture::default());
       let mut indices = Vec::new();
-      for _ in 0..3 {
+      for _ in 0_usize..3_usize {
          let frames = stream.handle(ResponsesEvent::OutputItemAdded {
             output_index: 0,
             item: OutputItem::FunctionCall {
@@ -257,9 +262,9 @@ mod tests {
             },
          });
          assert_eq!(frames.len(), 1);
-         let v: serde_json::Value = serde_json::from_str(&frames[0]).unwrap();
+         let value: serde_json::Value = serde_json::from_str(&frames[0]).unwrap();
          indices.push(
-            v["choices"][0]["delta"]["tool_calls"][0]["index"]
+            value["choices"][0]["delta"]["tool_calls"][0]["index"]
                .as_u64()
                .unwrap(),
          );
@@ -280,9 +285,9 @@ mod tests {
          },
       });
       assert_eq!(frames.len(), 1);
-      let v: serde_json::Value = serde_json::from_str(&frames[0]).unwrap();
+      let value: serde_json::Value = serde_json::from_str(&frames[0]).unwrap();
       assert_eq!(
-         v,
+         value,
          json!({"error": {"message": "boom", "type": "api_error", "code": null}})
       );
    }

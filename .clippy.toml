@@ -1,0 +1,7 @@
+cognitive-complexity-threshold = 50
+too-many-lines-threshold       = 160
+
+allowed-idents-below-min-chars = [ "id", "db", "Db", "fs", "io", "ok", "'a", "'_" ]
+min-ident-chars-threshold      = 2
+
+allow-renamed-params-for = [ "..", "core::fmt::Display" ]

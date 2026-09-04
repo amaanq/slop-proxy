@@ -203,13 +203,13 @@ pub enum FinishReason {
 
 impl FinishReason {
    pub fn label(&self) -> String {
-      match self {
+      match *self {
          Self::Unspecified => "finish_reason_unspecified".into(),
          Self::Stop => "stop".into(),
          Self::MaxTokens => "max_tokens".into(),
          Self::MalformedFunctionCall => "malformed_function_call".into(),
          Self::UnexpectedToolCall => "unexpected_tool_call".into(),
-         Self::Other(word) => word.to_ascii_lowercase(),
+         Self::Other(ref word) => word.to_ascii_lowercase(),
       }
    }
 }

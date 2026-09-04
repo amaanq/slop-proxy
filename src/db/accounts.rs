@@ -1,5 +1,7 @@
+use std::str::FromStr;
+
 use eyre::Result;
-use rusqlite::{Row, params};
+use rusqlite::{Row, params, types::FromSqlError};
 
 use super::Db;
 use crate::oauth::TokenSet;
@@ -22,7 +24,7 @@ impl AccountStatus {
    }
 }
 
-impl std::str::FromStr for AccountStatus {
+impl FromStr for AccountStatus {
    type Err = String;
    fn from_str(s: &str) -> Result<Self, Self::Err> {
       match s {
@@ -70,7 +72,7 @@ fn from_row(row: &Row) -> rusqlite::Result<Account> {
       status: {
          let raw: String = row.get("status")?;
          raw.parse()
-            .map_err(|e: String| rusqlite::types::FromSqlError::Other(e.into()))?
+            .map_err(|err: String| FromSqlError::Other(err.into()))?
       },
       cooldown_until: row.get("cooldown_until")?,
       disabled_reason: row.get("disabled_reason")?,
@@ -132,7 +134,7 @@ impl Db {
       let id = conn.query_row(
          "SELECT id FROM accounts WHERE provider = ?1 AND provider_account_id = ?2",
          params![provider, provider_account_id],
-         |r| r.get(0),
+         |row| row.get(0),
       )?;
       Ok(id)
    }

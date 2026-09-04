@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
+use serde_json::value::{RawValue, to_raw_value};
 use serde_json::{Map, Value};
 
 use crate::gemini::types::{
@@ -168,26 +169,27 @@ fn media_part(url: &str, fallback_mime: &str) -> Result<Part, String> {
     })
 }
 
-fn tool_response(content: Option<&ChatContent>) -> Value {
-    let value = match content {
-        Some(ChatContent::Text(raw)) => {
-            serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.clone()))
-        }
-        Some(ChatContent::Parts(parts)) => Value::String(
-            parts
-                .iter()
-                .filter_map(|p| match p {
-                    ChatPart::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join(""),
-        ),
-        None => Value::Null,
+fn tool_response(content: Option<&ChatContent>) -> Box<RawValue> {
+    #[derive(Serialize)]
+    struct Wrapped {
+        result: Box<RawValue>,
+    }
+    let text = match content {
+        Some(ChatContent::Text(raw)) => raw.clone(),
+        Some(ChatContent::Parts(parts)) => parts
+            .iter()
+            .filter_map(|p| match p {
+                ChatPart::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect(),
+        None => "null".into(),
     };
-    match value {
-        Value::Object(_) => value,
-        value => Value::Object(Map::from_iter([("result".to_string(), value)])),
+    let wrap = |result| to_raw_value(&Wrapped { result }).expect("response serializes");
+    match RawValue::from_string(text.clone()) {
+        Ok(raw) if raw.get().trim_start().starts_with('{') => raw,
+        Ok(raw) => wrap(raw),
+        Err(_) => wrap(to_raw_value(&text).expect("string serializes")),
     }
 }
 

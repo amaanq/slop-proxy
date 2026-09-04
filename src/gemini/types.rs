@@ -3,6 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use serde_json::value::RawValue;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -83,7 +84,7 @@ pub struct FunctionCall {
 #[serde(rename_all = "camelCase", default)]
 pub struct FunctionResponse {
     pub name: String,
-    pub response: Value,
+    pub response: Box<RawValue>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -108,7 +109,7 @@ pub struct GenerationConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_mime_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub response_json_schema: Option<Value>,
+    pub response_json_schema: Option<Box<RawValue>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking_config: Option<ThinkingConfig>,
 }
@@ -135,7 +136,7 @@ pub struct FunctionDeclaration {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub parameters_json_schema: Option<Value>,
+    pub parameters_json_schema: Option<Box<RawValue>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -231,7 +232,7 @@ pub struct ApiError {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub details: Option<Vec<Value>>,
+    pub details: Option<Vec<Box<RawValue>>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

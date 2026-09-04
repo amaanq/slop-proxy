@@ -4,7 +4,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::value::{RawValue, to_raw_value};
 
 use crate::codex::types::{
     ContentPart, InputItem, OutputContentPart, OutputItem, ResponseObj, ResponsesEvent,
@@ -63,8 +63,8 @@ struct Freeform<'a> {
     input: &'a str,
 }
 
-fn freeform_schema() -> Value {
-    serde_json::to_value(ObjectSchema::one_string(
+fn freeform_schema() -> Box<RawValue> {
+    to_raw_value(&ObjectSchema::one_string(
         FREEFORM_ARG,
         "The complete tool input, verbatim.",
     ))
@@ -528,7 +528,7 @@ pub fn event_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     fn chunk(v: Value) -> ChatChunk {
         serde_json::from_value(v).unwrap()

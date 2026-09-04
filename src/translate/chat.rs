@@ -1,7 +1,7 @@
 //! The chat-completions wire, request and response, both directions.
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::value::RawValue;
 
 use crate::codex::types::{TokenDetails, Usage};
 
@@ -89,7 +89,7 @@ pub struct JsonSchemaFormat {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub schema: Option<Value>,
+    pub schema: Option<Box<RawValue>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub strict: Option<bool>,
 }
@@ -274,7 +274,7 @@ pub struct FunctionDef {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub parameters: Option<Value>,
+    pub parameters: Option<Box<RawValue>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub strict: Option<bool>,
 }

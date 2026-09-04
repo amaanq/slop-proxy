@@ -1,5 +1,5 @@
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::value::RawValue;
 
 use super::{Aggregated, Block, StopKind, UsageCapture, encode_signature};
 use crate::codex::types::{OutputItem, ResponsesEvent, Usage};
@@ -419,7 +419,7 @@ pub enum RenderedBlock {
     ToolUse {
         id: String,
         name: String,
-        input: Value,
+        input: Box<RawValue>,
     },
 }
 
@@ -454,8 +454,8 @@ pub fn render_aggregated(agg: &Aggregated, model: &str, emit_thinking: bool) -> 
                 name,
                 arguments,
             } => {
-                let input = serde_json::from_str(arguments)
-                    .unwrap_or_else(|_| Value::Object(serde_json::Map::new()));
+                let input = RawValue::from_string(arguments.clone())
+                    .unwrap_or_else(|_| RawValue::from_string("{}".into()).expect("literal"));
                 content.push(RenderedBlock::ToolUse {
                     id: id.clone(),
                     name: name.clone(),

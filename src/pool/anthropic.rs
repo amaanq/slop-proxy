@@ -151,11 +151,8 @@ mod tests {
         }
     }
 
-    async fn ranked(
-        pool: &AnthropicPool,
-        session_key: &str,
-    ) -> Vec<std::sync::Arc<super::super::Slot>> {
-        pool.ranked(super::super::Route {
+    async fn ranked(pool: &AnthropicPool, session_key: &str) -> Vec<std::sync::Arc<Slot>> {
+        pool.ranked(Route {
             session_key,
             model: "",
             prefer_trusted: false,

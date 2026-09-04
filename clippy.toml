@@ -1,0 +1,3 @@
+# Handlers are request pipelines that read top to bottom.
+too-many-lines-threshold        = 160
+cognitive-complexity-threshold  = 50

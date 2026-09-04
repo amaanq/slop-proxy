@@ -1,7 +1,12 @@
 [package]
-name = "slop-proxy"
-version = "0.1.0"
-edition = "2024"
+name        = "slop-proxy"
+version     = "0.1.0"
+edition     = "2024"
+description = "Pools subscription accounts behind one Anthropic, OpenAI and Gemini compatible endpoint"
+repository  = "https://github.com/amaanq/slop-proxy"
+keywords    = [ "proxy", "llm", "anthropic", "openai", "gemini" ]
+categories  = [ "command-line-utilities", "web-programming::http-server" ]
+publish     = false
 
 [dependencies]
 axum = "0.8"
@@ -11,11 +16,10 @@ eventsource-stream = "0.2"
 eyre = "0.6.14"
 futures-util = "0.3"
 hmac-sha256 = "1"
-jiff = { version = "0.2", default-features = false, features = ["std"] }
+jiff = { default-features = false, features = [ "std" ], version = "0.2" }
 pound = "0.1.6"
 rand = "0.8"
 reqwest = {
-	version = "0.12",
 	default-features = false,
 	features = [
 		"rustls-tls",
@@ -24,14 +28,14 @@ reqwest = {
 		"cookies",
 		"gzip",
 	],
+	version = "0.12",
 }
 rusqlite = "0.32"
-ruzstd = { version = "0.9.0", default-features = false, features = ["std"] }
-serde = { version = "1", features = ["derive"] }
+ruzstd = { default-features = false, features = [ "std" ], version = "0.9.0" }
+serde = { features = [ "derive" ], version = "1" }
 serde_json = "1"
 thiserror = "2"
 tokio = {
-	version = "1",
 	features = [
 		"macros",
 		"net",
@@ -40,11 +44,12 @@ tokio = {
 		"sync",
 		"time",
 	],
+	version = "1",
 }
 toml = "0.8"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-uuid = { version = "1", features = ["v4"] }
+tracing-subscriber = { features = [ "env-filter" ], version = "0.3" }
+uuid = { features = [ "v4" ], version = "1" }
 
 [profile.dev]
 debug = "line-tables-only"
@@ -53,8 +58,87 @@ debug = "line-tables-only"
 debug = false
 
 [profile.release]
-lto = false
+lto   = false
 strip = true
 
 [dev-dependencies]
-tower = { version = "0.5.3", features = ["util"] }
+tower = { features = [ "util" ], version = "0.5.3" }
+
+[lints.clippy]
+cargo    = { level = "warn", priority = -1 }
+nursery  = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+
+blanket_clippy_restriction_lints = "allow"
+# Closure and iterator parameters; renaming five hundred `e`/`s`/`c` is churn.
+min_ident_chars = "allow"
+# Rarely used items are named at the call site on purpose.
+absolute_paths = "allow"
+# Match ergonomics through references is the idiom here.
+pattern_type_mismatch = "allow"
+# `let line = line.strip_suffix(..)` refinement is deliberate.
+shadow_reuse = "allow"
+default_numeric_fallback = "allow"
+# Every `mod tests` is inline by design.
+inline_modules = "allow"
+# Nursery, fires on every lock guard that is used after the lock.
+significant_drop_tightening = "allow"
+# Pricing and utilisation are floats.
+float_arithmetic = "allow"
+# Token counts, byte sizes and epoch seconds to f64 for metrics.
+cast_precision_loss = "allow"
+# Token counts, byte sizes, epoch seconds and HTTP statuses fit i64.
+cast_possible_wrap = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+# Each backend's inherent `impl Pool<X>` lives beside its Backend impl.
+multiple_inherent_impl = "allow"
+# Serde wire structs carry the provider's field names.
+struct_field_names = "allow"
+# A struct's private state beside its public facts.
+partial_pub_fields = "allow"
+restriction                      = { level = "warn", priority = -1 }
+
+
+arbitrary_source_item_ordering     = "allow"
+arithmetic_side_effects            = "allow"
+as_conversions                     = "allow"
+doc_paragraphs_missing_punctuation = "allow"
+else_if_without_else               = "allow"
+error_impl_error                   = "allow"
+exhaustive_enums                   = "allow"
+exhaustive_structs                 = "allow"
+expect_used                        = "allow"
+implicit_return                    = "allow"
+indexing_slicing                   = "allow"
+integer_division                   = "allow"
+integer_division_remainder_used    = "allow"
+let_underscore_must_use            = "allow"
+let_underscore_untyped             = "allow"
+little_endian_bytes                = "allow"
+map_err_ignore                     = "allow"
+missing_asserts_for_indexing       = "allow"
+missing_docs_in_private_items      = "allow"
+missing_errors_doc                 = "allow"
+missing_inline_in_public_items     = "allow"
+missing_trait_methods              = "allow"
+mod_module_files                   = "allow"
+module_name_repetitions            = "allow"
+multiple_crate_versions            = "allow"
+must_use_candidate                 = "allow"
+needless_borrowed_reference        = "allow"
+print_stderr                       = "allow"
+print_stdout                       = "allow"
+pub_use                            = "allow"
+pub_with_shorthand                 = "allow"
+question_mark_used                 = "allow"
+ref_patterns                       = "allow"
+semicolon_outside_block            = "allow"
+separated_literal_suffix           = "allow"
+single_call_fn                     = "allow"
+single_char_lifetime_names         = "allow"
+std_instead_of_alloc               = "allow"
+std_instead_of_core                = "allow"
+tests_outside_test_module          = "allow"
+unwrap_used                        = "allow"

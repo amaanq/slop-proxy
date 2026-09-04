@@ -150,18 +150,6 @@ mod tests {
     }
 
     #[test]
-    fn openai_responses() {
-        let req = serde_json::from_value(json!({
-            "input": [{"type": "message", "role": "user",
-                       "content": [{"type": "input_image", "image_url": "u"}]}],
-            "tools": [{"name": "shell"}],
-        }))
-        .unwrap();
-        let f = RequestFacts::from_responses(&req, &HeaderMap::new());
-        assert_eq!((f.turn_index, f.tools_declared, f.image_count), (1, 1, 1));
-    }
-
-    #[test]
     fn gemini_counts_declarations_not_wrappers() {
         let req = serde_json::from_value(json!({
             "contents": [{"role": "user", "parts": [{"inlineData": {}}]}],

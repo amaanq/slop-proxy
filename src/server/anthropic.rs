@@ -107,7 +107,7 @@ pub async fn messages(
                 .execute(
                     Route {
                         session_key: &session_key,
-                model: &req.model,
+                        model: &req.model,
                         prefer_trusted: false,
                     },
                     crate::pool::gemini::Call::OpenAi(Box::new(chat)),
@@ -123,7 +123,7 @@ pub async fn messages(
             .execute(
                 Route {
                     session_key: &session_key,
-                model: &req.model,
+                    model: &req.model,
                     prefer_trusted: false,
                 },
                 req_bytes.clone(),
@@ -136,7 +136,7 @@ pub async fn messages(
             .execute(
                 Route {
                     session_key: &session_key,
-                model: &req.model,
+                    model: &req.model,
                     prefer_trusted: auth.prefer_trusted,
                 },
                 req_bytes.clone(),

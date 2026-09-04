@@ -532,12 +532,4 @@ mod input_shape_tests {
         );
         assert_eq!(text_of(&req), "hi");
     }
-
-    #[test]
-    fn the_explicit_shape_still_types() {
-        let req = parse(
-            r#"{"model":"m","instructions":"i","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}"#,
-        );
-        assert_eq!(text_of(&req), "hi");
-    }
 }

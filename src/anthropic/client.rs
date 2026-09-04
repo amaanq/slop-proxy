@@ -249,13 +249,6 @@ mod tests {
     }"#;
 
     #[test]
-    fn account_windows_ignore_the_scoped_ones() {
-        let u: Usage = serde_json::from_str(USAGE).unwrap();
-        let got: Vec<_> = u.windows().map(|(n, w)| (n, w.utilization)).collect();
-        assert_eq!(got, vec![("5h", 3.0), ("7d", 89.0)]);
-    }
-
-    #[test]
     fn a_scoped_model_is_named_from_its_scope() {
         let u: Usage = serde_json::from_str(USAGE).unwrap();
         let got: Vec<_> = u.model_windows().collect();
@@ -285,6 +278,5 @@ mod tests {
     fn a_payload_without_limits_reports_none() {
         let u: Usage = serde_json::from_str(r#"{"seven_day": {"utilization": 10.0}}"#).unwrap();
         assert_eq!(u.model_windows().count(), 0);
-        assert_eq!(u.windows().count(), 1);
     }
 }

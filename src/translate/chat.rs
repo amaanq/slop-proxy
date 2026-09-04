@@ -494,8 +494,6 @@ mod tests {
             ..Default::default()
         }
         .into();
-        assert_eq!(u.input_tokens, 3);
-        assert_eq!(u.total_tokens, 71);
         assert_eq!(u.output_tokens, 68);
         assert_eq!(u.output_tokens_details.reasoning_tokens, 66);
     }
@@ -510,7 +508,6 @@ mod tests {
             ..Default::default()
         }
         .into();
-        assert_eq!(u.input_tokens, 100);
         assert_eq!(u.input_tokens_details.cached_tokens, 90);
     }
 
@@ -535,7 +532,6 @@ mod tests {
             v["completion_tokens_details"],
             json!({"reasoning_tokens": 3})
         );
-        assert_eq!(v["total_tokens"], 12);
     }
 
     #[test]

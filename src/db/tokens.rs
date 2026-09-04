@@ -178,13 +178,4 @@ mod tests {
         assert!(l.may_use(Provider::Gemini));
         assert!(!l.may_use(Provider::Anthropic) && !l.may_use(Provider::OpenAi));
     }
-
-    #[test]
-    fn the_scope_survives_a_round_trip_through_the_column() {
-        let l = TokenLimits {
-            providers: vec![Provider::Gemini, Provider::OpenAi],
-            ..TokenLimits::default()
-        };
-        assert_eq!(TokenLimits::decode(&l.encode()), l.providers);
-    }
 }

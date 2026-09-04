@@ -135,4 +135,3 @@ pub fn out_of_scope(dialect: Dialect, provider: crate::provider::Provider) -> Re
         ),
     )
 }
-

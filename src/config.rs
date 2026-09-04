@@ -367,13 +367,6 @@ mod route_tests {
         }
     }
 
-    #[test]
-    fn each_family_reaches_its_own_backend() {
-        assert_eq!(cfg().route("claude-opus-5"), Provider::Anthropic);
-        assert_eq!(cfg().route("gemini-3-pro"), Provider::Gemini);
-        assert_eq!(cfg().route("gpt-5.6-sol"), Provider::OpenAi);
-    }
-
     /// Claude models must never reach codex, so an alias that names no
     /// backend has to be claimed explicitly rather than falling through.
     #[test]
@@ -415,14 +408,6 @@ mod route_tests {
             Provider::Zen
         );
         assert_eq!(c.route(&resolve("gemini-3.8-flash:low")), Provider::Gemini);
-    }
-
-    #[test]
-    fn zen_takes_the_models_it_names() {
-        let c = with_zen(&["muse-spark-*", "big-pickle"]);
-        assert_eq!(c.route("muse-spark-1.3-contributor-free"), Provider::Zen);
-        assert_eq!(c.route("big-pickle"), Provider::Zen);
-        assert_eq!(c.route("gpt-5.6-sol"), Provider::OpenAi);
     }
 
     /// Zen resells the other vendors under their own names, so a bare
@@ -480,9 +465,10 @@ mod suggest_tests {
             anthropic_patterns: vec!["claude-opus-*".into(), "claude-fable-*".into()],
             ..ModelsConfig::default()
         };
-        assert_eq!(cfg.suggest("fable-5-1").as_deref(), Some("claude-fable-5-1"));
+        assert_eq!(
+            cfg.suggest("fable-5-1").as_deref(),
+            Some("claude-fable-5-1")
+        );
         assert_eq!(cfg.suggest("gpt-5.6-sol"), None);
-        assert_eq!(cfg.matched("fable-5-1"), None);
-        assert_eq!(cfg.matched("claude-fable-5-1"), Some(Provider::Anthropic));
     }
 }

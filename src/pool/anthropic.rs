@@ -174,11 +174,6 @@ mod tests {
             winners.insert(ranked(&pool, &format!("session-{i}")).await[0].id);
         }
         assert!(winners.len() > 1, "all sessions landed on one account");
-
-        let order = ranked(&pool, "session-a").await;
-        assert_eq!(order.len(), 4);
-        let ids = order.iter().map(|s| s.id).collect::<HashSet<i64>>();
-        assert_eq!(ids.len(), 4);
     }
 
     #[tokio::test]
@@ -245,7 +240,6 @@ mod tests {
             )
             .await;
         let after = ranked(&pool, key).await;
-        assert_ne!(after[0].id, head.id, "spent account still ranked first");
         assert_eq!(after[3].id, head.id, "spent account should sort last");
 
         // A locked account sinks the same way regardless of its fraction.

@@ -179,10 +179,17 @@ async fn price_history(state: &AppState) {
             return;
         }
     };
+    let table = state.prices.table();
     let priced: Vec<_> = rows
         .iter()
-        .map(|r| (r.id, state.prices.cost(&r.model, r.tokens)))
-        .filter(|(_, cost)| *cost > 0.0)
+        .map(|r| {
+            (
+                r.id,
+                state.prices.cost(&r.model, r.tokens),
+                table.list_cost(&r.model, r.tokens),
+            )
+        })
+        .filter(|(_, cost, list_cost)| *cost > 0.0 || *list_cost > 0.0)
         .collect();
     if priced.is_empty() {
         return;

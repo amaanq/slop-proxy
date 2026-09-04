@@ -448,7 +448,7 @@ impl Db {
             "SELECT id, upstream_model, input_tokens, output_tokens,
                     cache_read_tokens, cache_write_tokens
              FROM usage_log
-             WHERE cost_usd = 0
+             WHERE (cost_usd = 0 OR list_cost_usd = 0)
                AND input_tokens + output_tokens + cache_read_tokens + cache_write_tokens > 0",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -466,13 +466,14 @@ impl Db {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    pub async fn price_usage(&self, priced: &[(i64, f64)]) -> Result<()> {
+    pub async fn price_usage(&self, priced: &[(i64, f64, f64)]) -> Result<()> {
         let mut conn = self.0.lock().await;
         let tx = conn.transaction()?;
         {
-            let mut stmt = tx.prepare("UPDATE usage_log SET cost_usd = ?2 WHERE id = ?1")?;
-            for (id, cost) in priced {
-                stmt.execute(params![id, cost])?;
+            let mut stmt = tx
+                .prepare("UPDATE usage_log SET cost_usd = ?2, list_cost_usd = ?3 WHERE id = ?1")?;
+            for (id, cost, list_cost) in priced {
+                stmt.execute(params![id, cost, list_cost])?;
             }
         }
         tx.commit()?;

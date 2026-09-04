@@ -264,12 +264,13 @@ impl Drop for LogGuard {
         record.reasoning_tokens = cap.reasoning_tokens;
         record.error_kind = cap.error_kind;
         record.response_bytes = cap.response_bytes;
+        let finished = cap.completed || cap.stop_reason.is_some();
         record.stop_reason = cap.stop_reason.unwrap_or_default();
         record.tools_called = cap.tools_called.join(",");
         record.ttft_ms = cap
             .first_byte_at
             .map(|t| t.saturating_duration_since(self.start).as_millis() as i64);
-        if !cap.completed && record.error_kind.is_none() {
+        if !finished && record.error_kind.is_none() {
             record.error_kind = Some(if cap.upstream_eof {
                 "upstream_eof".into()
             } else if record.status >= 400 {
@@ -278,7 +279,7 @@ impl Drop for LogGuard {
                 "client_disconnect".into()
             });
         }
-        if !cap.completed {
+        if !finished {
             tracing::warn!(
                 user = %record.user,
                 model = %record.upstream_model,

@@ -185,7 +185,7 @@ pub struct Candidate {
     pub finish_reason: Option<FinishReason>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum FinishReason {
     #[serde(rename = "FINISH_REASON_UNSPECIFIED")]
@@ -194,19 +194,19 @@ pub enum FinishReason {
     MaxTokens,
     MalformedFunctionCall,
     UnexpectedToolCall,
-    #[serde(other)]
-    Other,
+    #[serde(untagged)]
+    Other(String),
 }
 
 impl FinishReason {
-    pub fn as_str(self) -> &'static str {
+    pub fn label(&self) -> String {
         match self {
-            Self::Unspecified => "finish_reason_unspecified",
-            Self::Stop => "stop",
-            Self::MaxTokens => "max_tokens",
-            Self::MalformedFunctionCall => "malformed_function_call",
-            Self::UnexpectedToolCall => "unexpected_tool_call",
-            Self::Other => "other",
+            Self::Unspecified => "finish_reason_unspecified".into(),
+            Self::Stop => "stop".into(),
+            Self::MaxTokens => "max_tokens".into(),
+            Self::MalformedFunctionCall => "malformed_function_call".into(),
+            Self::UnexpectedToolCall => "unexpected_tool_call".into(),
+            Self::Other(word) => word.to_ascii_lowercase(),
         }
     }
 }
@@ -249,4 +249,19 @@ pub struct ModelEntry {
     pub id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+}
+
+#[cfg(test)]
+mod finish_reason_tests {
+    use super::FinishReason;
+
+    #[test]
+    fn an_unlisted_reason_keeps_googles_word() {
+        let reason: FinishReason = serde_json::from_str(r#""RECITATION""#).unwrap();
+        assert_eq!(reason.label(), "recitation");
+        assert_eq!(
+            serde_json::from_str::<FinishReason>(r#""MAX_TOKENS""#).unwrap(),
+            FinishReason::MaxTokens
+        );
+    }
 }

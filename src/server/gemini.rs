@@ -9,11 +9,14 @@ use super::{AppState, LogGuard, log_error};
 use crate::db::usage::UsageRecord;
 use crate::gemini::client::GeminiProtocol;
 use crate::gemini::native::NativeStream;
+use crate::gemini::sse::Frames;
 use crate::gemini::types::{GenerateContentRequest, GenerateContentResponse, UsageMetadata};
 use crate::pool::Route;
 use crate::provider::Provider;
 use crate::translate::UsageCapture;
-use crate::translate::chat::{ChatEnvelope, ChatRequest, StreamOptions};
+use crate::translate::chat::{
+    ChatChunk, ChatEnvelope, ChatError, ChatErrorBody, ChatRequest, ErrorCode, StreamOptions,
+};
 
 const DIALECT: Dialect = Dialect::OpenAi;
 
@@ -94,7 +97,7 @@ pub async fn chat_completions(
         let capture = UsageCapture::default();
         let guard = LogGuard::new(state.clone(), capture.clone(), record, started);
         let mut native = NativeStream::new(&model);
-        let mut scan = ChatUsageScan::new(capture);
+        let mut scan = ChatUsageScan::new(capture.clone());
         let stream = resp
             .bytes_stream()
             .map(move |item| {
@@ -111,7 +114,11 @@ pub async fn chat_completions(
                     Err(error) => vec![Err(error)],
                 }
             })
-            .flat_map(stream::iter);
+            .flat_map(stream::iter)
+            .chain(stream::once(async move {
+                capture.note_upstream_eof();
+                Ok::<Bytes, reqwest::Error>(Bytes::new())
+            }));
         return builder
             .body(Body::from_stream(stream))
             .unwrap_or_else(|e| error_response(DIALECT, 502, "api_error", &e.to_string()));
@@ -119,14 +126,39 @@ pub async fn chat_completions(
     if streaming && protocol == GeminiProtocol::OpenAi {
         let capture = UsageCapture::default();
         let guard = LogGuard::new(state.clone(), capture.clone(), record, started);
-        let mut scan = ChatUsageScan::new(capture);
-        let stream = resp.bytes_stream().map(move |item| {
-            let _ = &guard;
-            if let Ok(bytes) = &item {
-                scan.feed(bytes);
-            }
-            item
-        });
+        let scan = std::sync::Arc::new(std::sync::Mutex::new(ChatUsageScan::new(capture.clone())));
+        let stream = resp
+            .bytes_stream()
+            .map({
+                let scan = scan.clone();
+                move |item| {
+                    let _ = &guard;
+                    if let Ok(bytes) = &item {
+                        scan.lock().unwrap().feed(bytes);
+                    }
+                    item
+                }
+            })
+            .chain(stream::once(async move {
+                capture.note_upstream_eof();
+                let frame = match scan.lock().unwrap().frames.cutoff() {
+                    Some(error) => {
+                        let body = ChatError {
+                            error: ChatErrorBody {
+                                message: error.message.clone().unwrap_or_default(),
+                                kind: Some("server_error".into()),
+                                code: error.status.clone().map(ErrorCode::Text),
+                            },
+                        };
+                        format!(
+                            "data: {}\n\ndata: [DONE]\n\n",
+                            serde_json::to_string(&body).unwrap_or_default()
+                        )
+                    }
+                    None => String::new(),
+                };
+                Ok::<Bytes, reqwest::Error>(Bytes::from(frame))
+            }));
         return builder
             .body(Body::from_stream(stream))
             .unwrap_or_else(|e| error_response(DIALECT, 502, "api_error", &e.to_string()));
@@ -211,35 +243,64 @@ fn session_key(user: &str, body: &ChatRequest) -> String {
 /// frame carries it, so every frame is tried and the last one wins.
 struct ChatUsageScan {
     capture: UsageCapture,
-    buf: Vec<u8>,
+    frames: Frames,
+    cut: bool,
 }
 
 impl ChatUsageScan {
     fn new(capture: UsageCapture) -> Self {
         Self {
             capture,
-            buf: Vec::new(),
+            frames: Frames::default(),
+            cut: false,
         }
     }
 
     fn feed(&mut self, bytes: &[u8]) {
-        self.buf.extend_from_slice(bytes);
-        while let Some(nl) = self.buf.iter().position(|b| *b == b'\n') {
-            let line: Vec<u8> = self.buf.drain(..=nl).collect();
-            let line = line.strip_suffix(b"\n").unwrap_or(&line);
-            let line = line.strip_suffix(b"\r").unwrap_or(line);
-            let Some(data) = line.strip_prefix(b"data:") else {
-                continue;
-            };
-            let data = data.strip_prefix(b" ").unwrap_or(data);
+        for data in self.frames.feed(bytes) {
             if data == b"[DONE]" {
                 continue;
             }
-            if let Ok(env) = serde_json::from_slice::<ChatEnvelope>(data)
+            if let Ok(env) = serde_json::from_slice::<ChatEnvelope>(&data)
                 && let Some(u) = env.usage
             {
                 self.capture.record(&u.into());
             }
+            if let Ok(chunk) = serde_json::from_slice::<ChatChunk>(&data)
+                && let Some(reason) = chunk.choices.iter().find_map(|c| c.finish_reason)
+                && let Ok(serde_json::Value::String(reason)) = serde_json::to_value(reason)
+            {
+                self.capture.note_stop_reason(&reason);
+            }
+            if !self.cut
+                && let Ok(error) = serde_json::from_slice::<ChatError>(&data)
+                && !error.error.message.is_empty()
+            {
+                self.cut = true;
+                let code = match &error.error.code {
+                    Some(ErrorCode::Text(s)) => s.clone(),
+                    _ => "error".to_string(),
+                };
+                tracing::warn!(
+                    status = %code,
+                    "gemini gave up mid-stream after its 200: {}",
+                    error.error.message
+                );
+                self.capture.note_cutoff(&code);
+            }
+        }
+        if !self.cut
+            && let Some(error) = self.frames.cutoff()
+        {
+            self.cut = true;
+            let status = error.status.clone().unwrap_or_else(|| "cutoff".into());
+            tracing::warn!(
+                code = error.code.unwrap_or(0),
+                status = %status,
+                "gemini gave up mid-stream after its 200: {}",
+                error.message.as_deref().unwrap_or("")
+            );
+            self.capture.note_cutoff(&status);
         }
     }
 }
@@ -361,14 +422,20 @@ pub async fn native(
     if streaming {
         let capture = UsageCapture::default();
         let guard = LogGuard::new(state.clone(), capture.clone(), record, started);
-        let mut scan = NativeUsageScan::new(capture);
-        let stream = resp.bytes_stream().map(move |item| {
-            let _ = &guard;
-            if let Ok(bytes) = &item {
-                scan.feed(bytes);
-            }
-            item
-        });
+        let mut scan = NativeUsageScan::new(capture.clone());
+        let stream = resp
+            .bytes_stream()
+            .map(move |item| {
+                let _ = &guard;
+                if let Ok(bytes) = &item {
+                    scan.feed(bytes);
+                }
+                item
+            })
+            .chain(stream::once(async move {
+                capture.note_upstream_eof();
+                Ok::<Bytes, reqwest::Error>(Bytes::new())
+            }));
         return builder
             .body(Body::from_stream(stream))
             .unwrap_or_else(|e| error_response(DIALECT, 502, "api_error", &e.to_string()));
@@ -398,8 +465,8 @@ pub async fn native(
         .unwrap_or_else(|e| error_response(DIALECT, 502, "api_error", &e.to_string()))
 }
 
-fn finish_reason(chunk: &GenerateContentResponse) -> Option<&'static str> {
-    chunk.candidates.first()?.finish_reason.map(|r| r.as_str())
+fn finish_reason(chunk: &GenerateContentResponse) -> Option<String> {
+    Some(chunk.candidates.first()?.finish_reason.as_ref()?.label())
 }
 
 fn apply_native_usage(record: &mut UsageRecord, usage: &UsageMetadata) {
@@ -427,40 +494,54 @@ fn native_session_key(user: &str, body: &GenerateContentRequest) -> String {
 /// carries totals, so every frame is tried and the last one wins.
 struct NativeUsageScan {
     capture: UsageCapture,
-    buf: Vec<u8>,
+    frames: Frames,
+    cut: bool,
+    seen_finish: bool,
 }
 
 impl NativeUsageScan {
     fn new(capture: UsageCapture) -> Self {
         Self {
             capture,
-            buf: Vec::new(),
+            frames: Frames::default(),
+            cut: false,
+            seen_finish: false,
         }
     }
 
     fn feed(&mut self, bytes: &[u8]) {
-        self.buf.extend_from_slice(bytes);
-        while let Some(nl) = self.buf.iter().position(|b| *b == b'\n') {
-            let line: Vec<u8> = self.buf.drain(..=nl).collect();
-            let line = line.strip_suffix(b"\n").unwrap_or(&line);
-            let line = line.strip_suffix(b"\r").unwrap_or(line);
-            let Some(data) = line.strip_prefix(b"data:") else {
-                continue;
-            };
-            let data = data.strip_prefix(b" ").unwrap_or(data);
-            let Ok(v) = serde_json::from_slice::<GenerateContentResponse>(data) else {
+        for data in self.frames.feed(bytes) {
+            let Ok(v) = serde_json::from_slice::<GenerateContentResponse>(&data) else {
                 continue;
             };
             for content in v.candidates.iter().filter_map(|c| c.content.as_ref()) {
                 crate::gemini::signatures::remember(&content.parts);
             }
             if let Some(reason) = finish_reason(&v) {
-                self.capture.note_stop_reason(reason);
+                self.seen_finish = true;
+                self.capture.note_stop_reason(&reason);
             }
             if let Some(u) = &v.usage_metadata {
-                self.capture
-                    .record(&crate::gemini::native::chat_usage(u).into());
+                let usage: crate::codex::types::Usage = crate::gemini::native::chat_usage(u).into();
+                if self.seen_finish {
+                    self.capture.record(&usage);
+                } else {
+                    self.capture.record_partial(&usage);
+                }
             }
+        }
+        if !self.cut
+            && let Some(error) = self.frames.cutoff()
+        {
+            self.cut = true;
+            let status = error.status.clone().unwrap_or_else(|| "cutoff".into());
+            tracing::warn!(
+                code = error.code.unwrap_or(0),
+                status = %status,
+                "gemini gave up mid-stream after its 200: {}",
+                error.message.as_deref().unwrap_or("")
+            );
+            self.capture.note_cutoff(&status);
         }
     }
 }

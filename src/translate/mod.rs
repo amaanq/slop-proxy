@@ -94,13 +94,17 @@ impl UsageCapture {
     /// them alongside. Subtracting leaves it meaning freshly billed prompt on
     /// both. `reasoning_tokens` stays a subset of `output_tokens`.
     pub fn record(&self, usage: &Usage) {
+        self.record_partial(usage);
+        self.0.lock().unwrap().completed = true;
+    }
+
+    pub fn record_partial(&self, usage: &Usage) {
         let mut c = self.0.lock().unwrap();
         let cached = usage.input_tokens_details.cached_tokens;
         c.input_tokens = (usage.input_tokens - cached).max(0);
         c.output_tokens = usage.output_tokens;
         c.cache_read_tokens = cached;
         c.reasoning_tokens = usage.output_tokens_details.reasoning_tokens;
-        c.completed = true;
     }
 
     pub fn note_event(&self, name: &str) {
@@ -117,6 +121,12 @@ impl UsageCapture {
 
     pub fn note_stop_reason(&self, reason: &str) {
         self.0.lock().unwrap().stop_reason = Some(reason.to_string());
+    }
+
+    pub fn note_cutoff(&self, status: &str) {
+        let mut c = self.0.lock().unwrap();
+        c.error_kind = Some("upstream_cutoff".into());
+        c.stop_reason = Some(status.to_ascii_lowercase());
     }
 
     pub fn note_tool_call(&self, name: &str) {
@@ -171,6 +181,17 @@ pub enum StopKind {
     MaxTokens,
     ToolUse,
     Error,
+}
+
+impl StopKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::EndTurn => "end_turn",
+            Self::MaxTokens => "max_tokens",
+            Self::ToolUse => "tool_use",
+            Self::Error => "error",
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -255,6 +276,7 @@ pub async fn aggregate(mut stream: EventStream, capture: &UsageCapture) -> Aggre
                     StopKind::EndTurn
                 };
                 agg.completed = true;
+                capture.note_stop_reason(agg.stop.as_str());
             }
             ResponsesEvent::Incomplete { response } => {
                 if let Some(u) = &response.usage {
@@ -263,6 +285,7 @@ pub async fn aggregate(mut stream: EventStream, capture: &UsageCapture) -> Aggre
                 }
                 agg.stop = StopKind::MaxTokens;
                 agg.completed = true;
+                capture.note_stop_reason(agg.stop.as_str());
             }
             ResponsesEvent::Failed { response } => {
                 let msg = response
@@ -273,6 +296,7 @@ pub async fn aggregate(mut stream: EventStream, capture: &UsageCapture) -> Aggre
                 agg.stop = StopKind::Error;
                 agg.completed = true;
                 capture.fail("upstream_failed");
+                capture.note_stop_reason(agg.stop.as_str());
             }
             _ => {}
         }

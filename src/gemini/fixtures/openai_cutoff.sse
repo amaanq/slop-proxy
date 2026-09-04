@@ -1,0 +1,14 @@
+data: {"choices":[{"delta":{"content":"1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12","role":"assistant"},"index":0}],"created":1788497989,"id":"RFCaatvdCtyZ_uMP4_bL0Ag","model":"gemini-3.8-flash","object":"chat.completion.chunk"}
+
+data: {"choices":[{"delta":{"content":"\n13\n14\n15\n16\n17\n18\n19\n20\n21\n22","role":"assistant"},"index":0}],"created":1788497989,"id":"RFCaatvdCtyZ_uMP4_bL0Ag","model":"gemini-3.8-flash","object":"chat.completion.chunk"}
+
+data: {"choices":[{"delta":{"content":"\n23\n24\n25\n26\n27\n28\n29\n30\n31","role":"assistant"},"index":0}],"created":1788497989,"id":"RFCaatvdCtyZ_uMP4_bL0Ag","model":"gemini-3.8-flash","object":"chat.completion.chunk"}
+
+[{
+  "error": {
+    "code": 503,
+    "message": "This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.",
+    "status": "UNAVAILABLE"
+  }
+}
+]

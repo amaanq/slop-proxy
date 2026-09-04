@@ -8,12 +8,13 @@ use serde_json::value::{RawValue, to_raw_value};
 
 use crate::codex::types::{
     ContentPart, InputItem, OutputContentPart, OutputItem, ResponseObj, ResponsesEvent,
-    ResponsesRequest, ToolChoice, Usage,
+    ResponsesRequest, ToolChoice, UpstreamError, Usage,
 };
 use crate::translate::anthropic_req::{ObjectSchema, empty_schema};
 use crate::translate::chat::{
-    ChatChunk, ChatContent, ChatMessage, ChatPart, ChatRequest, ChatToolCall, ChatToolChoice,
-    ChatToolDef, ExtraContent, FunctionBody, FunctionDef, ImageRef, StreamOptions,
+    ChatChunk, ChatContent, ChatError, ChatErrorBody, ChatMessage, ChatPart, ChatRequest,
+    ChatToolCall, ChatToolChoice, ChatToolDef, ErrorCode, ExtraContent, FunctionBody, FunctionDef,
+    ImageRef, StreamOptions,
 };
 
 fn remember_signature(call_id: &str, signature: &str) {
@@ -253,6 +254,31 @@ impl ChatToResponses {
         }
         let response_id = (!chunk.id.is_empty()).then(|| chunk.id.clone());
         let mut out = Vec::new();
+        if self.completed {
+            return out;
+        }
+        if let Some(err) = &chunk.error {
+            self.completed = true;
+            self.finished = true;
+            self.calls.clear();
+            self.text.clear();
+            self.emitted += 1;
+            out.push(ResponsesEvent::Failed {
+                response: ResponseObj {
+                    id: response_id,
+                    status: Some("failed".into()),
+                    usage: None,
+                    error: Some(UpstreamError {
+                        code: err.code.as_ref().map(|c| match c {
+                            ErrorCode::Text(code) => code.clone(),
+                            ErrorCode::Number(code) => code.to_string(),
+                        }),
+                        message: Some(err.message.clone()),
+                    }),
+                },
+            });
+            return out;
+        }
         if !self.opened {
             self.opened = true;
             out.push(ResponsesEvent::Created {
@@ -485,23 +511,34 @@ pub fn event_stream(
 
     let mut native = (protocol == GeminiProtocol::Native)
         .then(|| crate::gemini::native::NativeStream::new(model));
+    let mut frames = crate::gemini::sse::Frames::default();
+    let mut cut = false;
     let head = capture.clone();
     let chat_bytes = resp.bytes_stream().flat_map(move |item| {
-        let frames = match (&mut native, item) {
+        let chunks = match (&mut native, item) {
             (Some(native), Ok(bytes)) => {
                 head.note_upstream_head(&bytes);
                 native.feed(&bytes)
             }
             (None, Ok(bytes)) => {
                 head.note_upstream_head(&bytes);
-                vec![bytes.to_vec()]
+                let mut chunks: Vec<Vec<u8>> = frames
+                    .feed(&bytes)
+                    .into_iter()
+                    .map(|p| format!("data: {}\n\n", String::from_utf8_lossy(&p)).into_bytes())
+                    .collect();
+                if !cut && let Some(error) = frames.cutoff() {
+                    cut = true;
+                    chunks.push(cutoff_frame(&error));
+                }
+                chunks
             }
             (_, Err(e)) => {
                 tracing::warn!("gemini stream error: {e}");
                 Vec::new()
             }
         };
-        futures_util::stream::iter(frames.into_iter().map(Ok::<_, std::io::Error>))
+        futures_util::stream::iter(chunks.into_iter().map(Ok::<_, std::io::Error>))
     });
 
     let mut bridge = ChatToResponses::with_custom(custom);
@@ -523,6 +560,21 @@ pub fn event_stream(
         futures_util::stream::iter(events)
     });
     Box::pin(stream)
+}
+
+fn cutoff_frame(error: &crate::gemini::types::ApiError) -> Vec<u8> {
+    let body = ChatError {
+        error: ChatErrorBody {
+            message: error.message.clone().unwrap_or_default(),
+            kind: Some("server_error".into()),
+            code: error.status.clone().map(ErrorCode::Text),
+        },
+    };
+    format!(
+        "data: {}\n\ndata: [DONE]\n\n",
+        serde_json::to_string(&body).unwrap_or_default()
+    )
+    .into_bytes()
 }
 
 #[cfg(test)]
@@ -657,6 +709,28 @@ mod tests {
                 json!({"choices": [{"delta": {}}], "usage": {"prompt_tokens": 1}})
             ),
             Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn an_error_chunk_fails_the_response_and_closes_it() {
+        let mut b = ChatToResponses::default();
+        let events = b.feed(&chunk(json!({"error": {
+            "message": "high demand", "type": "server_error", "code": "UNAVAILABLE"
+        }})));
+        assert_eq!(kinds(&events), ["response.failed"]);
+        let ResponsesEvent::Failed { response } = &events[0] else {
+            panic!("expected a failed event");
+        };
+        let error = response.error.as_ref().unwrap();
+        assert_eq!(error.message.as_deref(), Some("high demand"));
+        assert_eq!(error.code.as_deref(), Some("UNAVAILABLE"));
+        assert!(
+            feed(
+                &mut b,
+                json!({"choices": [{"delta": {}, "finish_reason": "stop"}]})
+            )
+            .is_empty()
         );
     }
 

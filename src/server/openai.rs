@@ -21,6 +21,7 @@ use super::error::{Dialect, translation_error};
 use super::pipeline::{self, apply_snapshot, dispatch_failed, translated};
 use super::{AppState, LogGuard, cache_key, log_error, log_rejected, log_usage};
 use crate::clock::unix_now;
+use crate::codex::models::with_zen_entries;
 use crate::codex::types::{OutputItem, ResponsesEvent, ResponsesRequest, Usage};
 use crate::db::usage::UsageRecord;
 use crate::pool::pools::{Dispatched, Upstream};
@@ -201,6 +202,14 @@ pub async fn models(
       };
    }
    if query.client_version.is_some() {
+      let zen: Vec<String> = state
+         .pools
+         .zen
+         .models()
+         .await
+         .into_iter()
+         .filter(|id| state.cfg.models.route(id) == Provider::Zen)
+         .collect();
       return state.catalog_raw().await.map_or_else(
          || {
             super::error::error_response(
@@ -210,7 +219,10 @@ pub async fn models(
                "no usable codex account to read the model catalog from",
             )
          },
-         |body| ([("content-type", "application/json")], body).into_response(),
+         |body| {
+            let body = with_zen_entries(&body, &state.cfg.models.default, &zen).unwrap_or(body);
+            ([("content-type", "application/json")], body).into_response()
+         },
       );
    }
 

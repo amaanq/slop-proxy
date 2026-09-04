@@ -1,27 +1,16 @@
 use serde::Serialize;
 use serde_json::value::RawValue;
 
-use super::{Aggregated, Block, StopKind, UsageCapture, encode_signature};
-use crate::codex::types::{OutputItem, ResponsesEvent, Usage};
+use super::{Aggregated, Block, Step, StopKind, UsageCapture, Walker};
+use crate::codex::types::{ResponsesEvent, Usage};
 
 pub struct AnthropicStream {
     model: String,
     est_input_tokens: i64,
     emit_thinking: bool,
     next_index: usize,
-    open: Option<OpenBlock>,
-    saw_tool: bool,
-    thinking_text_seen: bool,
-    tool_args_seen: bool,
-    pub done: bool,
-    capture: UsageCapture,
-}
-
-#[derive(PartialEq)]
-enum OpenBlock {
-    Thinking,
-    Text,
-    Tool,
+    hiding: bool,
+    walker: Walker,
 }
 
 pub type OutEvent = (&'static str, String);
@@ -159,22 +148,38 @@ impl AnthropicStream {
             est_input_tokens,
             emit_thinking,
             next_index: 0,
-            open: None,
-            saw_tool: false,
-            thinking_text_seen: false,
-            tool_args_seen: false,
-            done: false,
-            capture,
+            hiding: false,
+            walker: Walker::new(capture),
         }
     }
 
     pub fn handle(&mut self, ev: ResponsesEvent) -> Vec<OutEvent> {
         let mut out = Vec::new();
-        match ev {
-            ResponsesEvent::Created { response } => {
-                let id = response
-                    .id
-                    .unwrap_or_else(|| format!("msg_{}", uuid::Uuid::new_v4().simple()));
+        for step in self.walker.step(ev) {
+            self.render(&mut out, step);
+        }
+        out
+    }
+
+    pub fn finalize(&mut self) -> Vec<OutEvent> {
+        self.walker
+            .eof()
+            .into_iter()
+            .map(|step| match step {
+                Step::Failed { message, .. } => error("overloaded_error", message),
+                _ => unreachable!("eof only fails"),
+            })
+            .collect()
+    }
+
+    fn render(&mut self, out: &mut Vec<OutEvent>, step: Step) {
+        if self.hiding && !matches!(step, Step::Failed { .. }) {
+            self.hiding = !matches!(step, Step::CloseBlock);
+            return;
+        }
+        match step {
+            Step::Start { id } => {
+                let id = id.unwrap_or_else(|| format!("msg_{}", uuid::Uuid::new_v4().simple()));
                 out.push(
                     AnthEvent::MessageStart {
                         message: MessageStart {
@@ -197,187 +202,60 @@ impl AnthropicStream {
                 );
                 out.push(AnthEvent::Ping.out());
             }
-            ResponsesEvent::OutputItemAdded { item, .. } => match item {
-                OutputItem::Reasoning { .. } if self.emit_thinking => {
-                    self.close_open(&mut out);
-                    self.open_block(&mut out, OpenBlock::Thinking);
-                }
-                OutputItem::FunctionCall { call_id, name, .. } => {
-                    self.close_open(&mut out);
-                    let index = self.next_index;
-                    self.next_index += 1;
-                    self.open = Some(OpenBlock::Tool);
-                    self.saw_tool = true;
-                    self.tool_args_seen = false;
-                    out.push(
-                        AnthEvent::ContentBlockStart {
-                            index,
-                            content_block: ContentBlockStart::ToolUse {
-                                id: call_id,
-                                name,
-                                input: EmptyObject {},
-                            },
-                        }
-                        .out(),
-                    );
-                }
-                _ => {}
-            },
-            ResponsesEvent::ReasoningSummaryPartAdded {} => {
-                if self.emit_thinking
-                    && self.open == Some(OpenBlock::Thinking)
-                    && self.thinking_text_seen
-                {
-                    out.push(self.delta(BlockDelta::Thinking {
-                        thinking: "\n\n".into(),
-                    }));
-                }
-            }
-            ResponsesEvent::ReasoningSummaryTextDelta { delta }
-            | ResponsesEvent::ReasoningTextDelta { delta } => {
-                if self.emit_thinking {
-                    if self.open != Some(OpenBlock::Thinking) {
-                        self.close_open(&mut out);
-                        self.open_block(&mut out, OpenBlock::Thinking);
-                    }
-                    self.thinking_text_seen = true;
-                    out.push(self.delta(BlockDelta::Thinking { thinking: delta }));
-                }
-            }
-            ResponsesEvent::OutputTextDelta { delta, .. } => {
-                if self.open != Some(OpenBlock::Text) {
-                    self.close_open(&mut out);
-                    self.open_block(&mut out, OpenBlock::Text);
-                }
-                out.push(self.delta(BlockDelta::Text { text: delta }));
-            }
-            ResponsesEvent::FunctionCallArgumentsDelta { delta, .. } => {
-                if self.open == Some(OpenBlock::Tool) {
-                    self.tool_args_seen = true;
-                    out.push(self.delta(BlockDelta::InputJson {
-                        partial_json: delta,
-                    }));
-                }
-            }
-            ResponsesEvent::OutputItemDone { item, .. } => match item {
-                OutputItem::Reasoning {
+            Step::OpenThinking if !self.emit_thinking => self.hiding = true,
+            Step::OpenThinking => self.open(out, ContentBlockStart::Thinking { thinking: "" }),
+            Step::OpenText => self.open(out, ContentBlockStart::Text { text: "" }),
+            Step::OpenCall { id, name } => self.open(
+                out,
+                ContentBlockStart::ToolUse {
                     id,
-                    encrypted_content,
-                    ..
-                } => {
-                    if self.open == Some(OpenBlock::Thinking) {
-                        if let Some(ec) = encrypted_content {
-                            out.push(self.delta(BlockDelta::Signature {
-                                signature: encode_signature(id.as_deref(), &ec),
-                            }));
-                        }
-                        self.close_open(&mut out);
-                    }
+                    name,
+                    input: EmptyObject {},
+                },
+            ),
+            Step::Thinking(thinking) => out.push(self.delta(BlockDelta::Thinking { thinking })),
+            Step::Signature(signature) => {
+                out.push(self.delta(BlockDelta::Signature { signature }));
+            }
+            Step::Text(text) => out.push(self.delta(BlockDelta::Text { text })),
+            Step::Args(partial_json) => {
+                out.push(self.delta(BlockDelta::InputJson { partial_json }));
+            }
+            Step::CloseBlock => out.push(
+                AnthEvent::ContentBlockStop {
+                    index: self.next_index - 1,
                 }
-                OutputItem::FunctionCall { arguments, .. } => {
-                    if self.open == Some(OpenBlock::Tool) {
-                        if !self.tool_args_seen
-                            && let Some(args) = arguments.filter(|a| !a.is_empty())
-                        {
-                            out.push(self.delta(BlockDelta::InputJson { partial_json: args }));
-                        }
-                        self.close_open(&mut out);
+                .out(),
+            ),
+            Step::Stop { kind, usage } => {
+                out.push(
+                    AnthEvent::MessageDelta {
+                        delta: StopDelta {
+                            stop_reason: kind.as_str(),
+                            stop_sequence: None,
+                        },
+                        usage: anthropic_usage(&usage),
                     }
-                }
-                OutputItem::Message { .. } => self.close_open(&mut out),
-                OutputItem::Other | OutputItem::CustomToolCall { .. } => {}
-            },
-            ResponsesEvent::Completed { response } => {
-                self.finish(
-                    &mut out,
-                    response.usage,
-                    if self.saw_tool {
-                        "tool_use"
-                    } else {
-                        "end_turn"
-                    },
+                    .out(),
                 );
+                out.push(AnthEvent::MessageStop.out());
             }
-            ResponsesEvent::Incomplete { response } => {
-                self.finish(&mut out, response.usage, "max_tokens");
-            }
-            ResponsesEvent::Failed { response } => {
-                let msg = response
-                    .error
-                    .as_ref()
-                    .and_then(|e| e.message.clone())
-                    .unwrap_or_else(|| "upstream response failed".into());
-                let code = response.error.and_then(|e| e.code).unwrap_or_default();
-                let err_type = if code.contains("rate_limit") || msg.contains("rate limit") {
+            Step::Failed { message, code } => {
+                let rate_limited = code.is_some_and(|c| c.contains("rate_limit"))
+                    || message.contains("rate limit");
+                let kind = if rate_limited {
                     "rate_limit_error"
                 } else {
                     "api_error"
                 };
-                out.push(
-                    AnthEvent::Error {
-                        error: ErrorBody {
-                            kind: err_type,
-                            message: msg,
-                        },
-                    }
-                    .out(),
-                );
-                self.capture.fail("upstream_failed");
-                self.done = true;
+                out.push(error(kind, message));
             }
-            _ => {}
         }
-        out
     }
 
-    pub fn finalize(&mut self) -> Vec<OutEvent> {
-        if self.done {
-            return Vec::new();
-        }
-        self.done = true;
-        self.capture.fail("midstream");
-        vec![
-            AnthEvent::Error {
-                error: ErrorBody {
-                    kind: "overloaded_error",
-                    message: "upstream stream ended unexpectedly".into(),
-                },
-            }
-            .out(),
-        ]
-    }
-
-    fn finish(&mut self, out: &mut Vec<OutEvent>, usage: Option<Usage>, stop_reason: &'static str) {
-        self.close_open(out);
-        let usage = usage.unwrap_or_default();
-        self.capture.record(&usage);
-        self.capture.note_stop_reason(stop_reason);
-        out.push(
-            AnthEvent::MessageDelta {
-                delta: StopDelta {
-                    stop_reason,
-                    stop_sequence: None,
-                },
-                usage: anthropic_usage(&usage),
-            }
-            .out(),
-        );
-        out.push(AnthEvent::MessageStop.out());
-        self.done = true;
-    }
-
-    fn open_block(&mut self, out: &mut Vec<OutEvent>, kind: OpenBlock) {
+    fn open(&mut self, out: &mut Vec<OutEvent>, content_block: ContentBlockStart) {
         let index = self.next_index;
         self.next_index += 1;
-        let content_block = match kind {
-            OpenBlock::Thinking => {
-                self.thinking_text_seen = false;
-                ContentBlockStart::Thinking { thinking: "" }
-            }
-            OpenBlock::Text => ContentBlockStart::Text { text: "" },
-            OpenBlock::Tool => unreachable!("tool blocks open in OutputItemAdded"),
-        };
-        self.open = Some(kind);
         out.push(
             AnthEvent::ContentBlockStart {
                 index,
@@ -387,17 +265,6 @@ impl AnthropicStream {
         );
     }
 
-    fn close_open(&mut self, out: &mut Vec<OutEvent>) {
-        if self.open.take().is_some() {
-            out.push(
-                AnthEvent::ContentBlockStop {
-                    index: self.next_index - 1,
-                }
-                .out(),
-            );
-        }
-    }
-
     fn delta(&self, delta: BlockDelta) -> OutEvent {
         AnthEvent::ContentBlockDelta {
             index: self.next_index - 1,
@@ -405,6 +272,13 @@ impl AnthropicStream {
         }
         .out()
     }
+}
+
+fn error(kind: &'static str, message: String) -> OutEvent {
+    AnthEvent::Error {
+        error: ErrorBody { kind, message },
+    }
+    .out()
 }
 
 #[derive(Serialize)]
@@ -479,5 +353,59 @@ pub fn render_aggregated(agg: &Aggregated, model: &str, emit_thinking: bool) -> 
         stop_reason,
         stop_sequence: None,
         usage: anthropic_usage(&agg.usage),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codex::types::{OutputItem, ResponseObj};
+
+    #[test]
+    fn hidden_thinking_leaves_no_gap_in_block_indices() {
+        let mut stream = AnthropicStream::new("m".into(), 1, false, UsageCapture::default());
+        let reasoning = OutputItem::Reasoning {
+            id: Some("rs".into()),
+            summary: None,
+            encrypted_content: Some("ENC".into()),
+        };
+        let mut frames = Vec::new();
+        for ev in [
+            ResponsesEvent::OutputItemAdded {
+                output_index: 0,
+                item: reasoning.clone(),
+            },
+            ResponsesEvent::ReasoningSummaryTextDelta {
+                delta: "secret".into(),
+            },
+            ResponsesEvent::OutputItemDone {
+                output_index: 0,
+                item: reasoning,
+            },
+            ResponsesEvent::OutputTextDelta {
+                item_id: None,
+                output_index: 1,
+                content_index: 0,
+                delta: "hi".into(),
+            },
+            ResponsesEvent::Completed {
+                response: ResponseObj::default(),
+            },
+        ] {
+            frames.extend(stream.handle(ev));
+        }
+        let names = frames.iter().map(|(n, _)| *n).collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                "content_block_start",
+                "content_block_delta",
+                "content_block_stop",
+                "message_delta",
+                "message_stop"
+            ]
+        );
+        assert!(frames[0].1.contains("\"index\":0"));
+        assert!(!frames.iter().any(|(_, d)| d.contains("secret")));
     }
 }

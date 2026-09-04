@@ -65,7 +65,7 @@ pub enum ContentBlock {
     ToolUse {
         id: String,
         name: String,
-        #[serde(default, deserialize_with = "buffered_raw")]
+        #[serde(default, deserialize_with = "crate::translate::buffered_raw")]
         input: Option<Box<RawValue>>,
     },
     ToolResult {
@@ -105,17 +105,6 @@ pub enum ImageSource {
 
 fn default_media_type() -> String {
     "image/png".into()
-}
-
-/// A tagged enum buffers the map first, and `RawValue` cannot be read back
-/// out of that buffer.
-fn buffered_raw<'de, D>(deserializer: D) -> Result<Option<Box<RawValue>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Option::<serde_json::Value>::deserialize(deserializer)?
-        .map(|value| to_raw_value(&value).map_err(serde::de::Error::custom))
-        .transpose()
 }
 
 #[derive(Debug, Deserialize)]
@@ -468,23 +457,6 @@ mod tests {
         ] {
             parse(content.clone()).unwrap_or_else(|e| panic!("{content}: {e}"));
         }
-    }
-}
-
-
-#[cfg(test)]
-mod captured {
-    #[test]
-    fn captured_bodies_parse() {
-        let mut failures = Vec::new();
-        for entry in std::fs::read_dir("/tmp/cap").unwrap() {
-            let path = entry.unwrap().path();
-            let bytes = std::fs::read(&path).unwrap();
-            if let Err(e) = serde_json::from_slice::<super::AnthropicRequest>(&bytes) {
-                failures.push(format!("{}: {e}", path.display()));
-            }
-        }
-        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
     }
 }
 

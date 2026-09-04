@@ -12,9 +12,21 @@ use std::sync::{Arc, Mutex};
 use data_encoding::BASE64URL_NOPAD;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
+use serde_json::value::{RawValue, to_raw_value};
 
 use crate::codex::sse::EventStream;
 use crate::codex::types::{OutputContentPart, OutputItem, ResponsesEvent, SummaryPart, Usage};
+
+/// A tagged or untagged enum, and anything behind a `flatten`, buffers the
+/// map first, and `RawValue` cannot be read back out of that buffer.
+pub fn buffered_raw<'de, D>(deserializer: D) -> Result<Option<Box<RawValue>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<serde_json::Value>::deserialize(deserializer)?
+        .map(|value| to_raw_value(&value).map_err(serde::de::Error::custom))
+        .transpose()
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum TranslateError {

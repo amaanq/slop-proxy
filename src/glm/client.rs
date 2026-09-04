@@ -4,7 +4,7 @@
 use axum::body::Bytes;
 
 use crate::config::GlmConfig;
-use crate::upstream::{SendError, retry_after_secs};
+use crate::upstream::{Classify, SendError, classify};
 
 pub struct GlmClient {
     http: reqwest::Client,
@@ -38,21 +38,11 @@ impl GlmClient {
             .send()
             .await
             .map_err(|e| SendError::Network(e.to_string()))?;
-
-        let status = resp.status();
-        if status.is_success() {
-            return Ok(resp);
+        match classify(resp, Classify::STRICT).await {
+            Err(SendError::RateLimited { body, .. }) if body.contains("Insufficient balance") => {
+                Err(SendError::Auth(body))
+            }
+            other => other,
         }
-
-        let retry_after = retry_after_secs(resp.headers(), &[]);
-        let body = resp.text().await.unwrap_or_default();
-        let body = body.chars().take(2000).collect::<String>();
-        Err(match status.as_u16() {
-            401 | 403 => SendError::Auth(body),
-            429 if body.contains("Insufficient balance") => SendError::Auth(body),
-            429 => SendError::RateLimited { retry_after, body },
-            400 => SendError::BadRequest(body),
-            s => SendError::Upstream { status: s, body },
-        })
     }
 }

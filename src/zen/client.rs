@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use axum::body::Bytes;
 
 use crate::config::ZenConfig;
-use crate::upstream::{SendError, retry_after_secs};
+use crate::upstream::{Classify, SendError, classify};
 
 /// 250 proxies at one round trip each is minutes of hanging before the
 /// caller sees anything. Cooldowns persist, so the next request skips what
@@ -140,7 +140,7 @@ impl ZenClient {
             .send()
             .await
             .map_err(|error| SendError::Network(error.to_string()))?;
-        classify(response).await
+        classify(response, Classify::STRICT).await
     }
 
     pub async fn models(&self) -> Result<Vec<String>, String> {
@@ -173,7 +173,7 @@ impl ZenClient {
                     continue;
                 }
             };
-            match classify(response).await {
+            match classify(response, Classify::STRICT).await {
                 Ok(response) => {
                     let listing: Listing =
                         response.json().await.map_err(|error| error.to_string())?;
@@ -293,23 +293,6 @@ impl ZenClient {
             error
         })
     }
-}
-
-async fn classify(response: reqwest::Response) -> Result<reqwest::Response, SendError> {
-    let status = response.status();
-    if status.is_success() {
-        return Ok(response);
-    }
-    let retry_after = retry_after_secs(response.headers(), &[]);
-    let body = response.text().await.unwrap_or_default();
-    let body = body.chars().take(2000).collect::<String>();
-    Err(match status.as_u16() {
-        401 | 403 => SendError::Auth(body),
-        407 => SendError::Network("proxy authentication failed".into()),
-        429 => SendError::RateLimited { retry_after, body },
-        400 => SendError::BadRequest(body),
-        status => SendError::Upstream { status, body },
-    })
 }
 
 #[cfg(test)]

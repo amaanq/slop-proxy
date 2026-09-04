@@ -4,9 +4,15 @@ use crate::translate::chat::ChatRequest;
 
 use crate::config::GeminiConfig;
 use crate::gemini::native;
-use crate::upstream::{SendError, retry_after_secs};
+use crate::upstream::{Classify, SendError, classify};
 
-const RESET_HEADERS: &[&str] = &["x-ratelimit-reset-requests", "x-ratelimit-reset-tokens"];
+const RULES: Classify = Classify {
+    pass: |s| !matches!(s, 401 | 403 | 429 | 500..=599),
+    // A key restricted to an origin or with the API disabled answers
+    // 403, and no retry on another account makes that key work.
+    auth: &[401, 403],
+    reset_headers: &["x-ratelimit-reset-requests", "x-ratelimit-reset-tokens"],
+};
 
 pub struct GeminiClient {
     http: reqwest::Client,
@@ -99,24 +105,8 @@ impl GeminiClient {
             .send()
             .await
             .map_err(|e| SendError::Network(e.to_string()))?;
-
-        let status = resp.status().as_u16();
-        if !matches!(status, 401 | 403 | 429 | 500..=599) {
-            return Ok(GeminiResponse {
-                response: resp,
-                protocol,
-            });
-        }
-        let retry_after = retry_after_secs(resp.headers(), RESET_HEADERS);
-        let body = resp.text().await.unwrap_or_default();
-        let body = body.chars().take(2000).collect::<String>();
-        Err(match status {
-            // A key restricted to an origin or with the API disabled answers
-            // 403, and no retry on another account makes that key work.
-            401 | 403 => SendError::Auth(body),
-            429 => SendError::RateLimited { retry_after, body },
-            s => SendError::Upstream { status: s, body },
-        })
+        let response = classify(resp, RULES).await?;
+        Ok(GeminiResponse { response, protocol })
     }
 
     /// A caller that already speaks the native dialect is relayed as-is, so
@@ -160,18 +150,7 @@ impl GeminiClient {
             .send()
             .await
             .map_err(|e| SendError::Network(e.to_string()))?;
-        let status = resp.status().as_u16();
-        if !matches!(status, 401 | 403 | 429 | 500..=599) {
-            return Ok(resp);
-        }
-        let retry_after = retry_after_secs(resp.headers(), RESET_HEADERS);
-        let body = resp.text().await.unwrap_or_default();
-        let body = body.chars().take(2000).collect::<String>();
-        Err(match status {
-            401 | 403 => SendError::Auth(body),
-            429 => SendError::RateLimited { retry_after, body },
-            s => SendError::Upstream { status: s, body },
-        })
+        classify(resp, RULES).await
     }
 
     /// The catalog carries no per-key state, so a restricted key can read it
@@ -201,14 +180,8 @@ impl GeminiClient {
             .send()
             .await
             .map_err(|e| SendError::Network(e.to_string()))?;
+        let resp = classify(resp, Classify::STRICT).await?;
         let status = resp.status().as_u16();
-        if !resp.status().is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(match status {
-                401 | 403 => SendError::Auth(body),
-                _ => SendError::Upstream { status, body },
-            });
-        }
         let body: crate::gemini::types::ModelList =
             resp.json().await.map_err(|e| SendError::Upstream {
                 status,

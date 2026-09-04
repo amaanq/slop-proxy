@@ -1,14 +1,18 @@
 use axum::body::Bytes;
 
 use crate::config::AnthropicConfig;
-use crate::upstream::{SendError, retry_after_secs};
+use crate::upstream::{Classify, SendError, classify};
 
 const OAUTH_BETA: &str = "oauth-2025-04-20";
 
-const RESET_HEADERS: &[&str] = &[
-    "anthropic-ratelimit-unified-reset",
-    "anthropic-ratelimit-requests-reset",
-];
+const RULES: Classify = Classify {
+    pass: |s| !matches!(s, 401 | 429 | 500..=599),
+    auth: &[401],
+    reset_headers: &[
+        "anthropic-ratelimit-unified-reset",
+        "anthropic-ratelimit-requests-reset",
+    ],
+};
 
 /// Rolling-window usage as the subscription reports it, without spending an
 /// inference request. `locked_reason` is set when the window is exhausted
@@ -151,18 +155,10 @@ impl AnthropicClient {
             .send()
             .await
             .map_err(|e| SendError::Network(e.to_string()))?;
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            let body = body.chars().take(2000).collect::<String>();
-            return Err(match status.as_u16() {
-                401 | 403 => SendError::Auth(body),
-                s => SendError::Upstream { status: s, body },
-            });
-        }
-        let status_u16 = status.as_u16();
+        let resp = classify(resp, Classify::STRICT).await?;
+        let status = resp.status().as_u16();
         resp.json().await.map_err(|e| SendError::Upstream {
-            status: status_u16,
+            status,
             body: format!("parsing usage response: {e}"),
         })
     }
@@ -228,19 +224,7 @@ impl AnthropicClient {
             .send()
             .await
             .map_err(|e| SendError::Network(e.to_string()))?;
-
-        let status = resp.status().as_u16();
-        if !matches!(status, 401 | 429 | 500..=599) {
-            return Ok(resp);
-        }
-        let retry_after = retry_after_secs(resp.headers(), RESET_HEADERS);
-        let body = resp.text().await.unwrap_or_default();
-        let body = body.chars().take(2000).collect::<String>();
-        Err(match status {
-            401 => SendError::Auth(body),
-            429 => SendError::RateLimited { retry_after, body },
-            s => SendError::Upstream { status: s, body },
-        })
+        classify(resp, RULES).await
     }
 }
 

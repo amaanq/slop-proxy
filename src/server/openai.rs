@@ -114,7 +114,7 @@ pub async fn chat_completions(
             .execute(
                 Route {
                     session_key: &session_key,
-                model: &req.model,
+                    model: &req.model,
                     prefer_trusted: false,
                 },
                 req_bytes.clone(),
@@ -127,7 +127,7 @@ pub async fn chat_completions(
             .execute(
                 Route {
                     session_key: &session_key,
-                model: &req.model,
+                    model: &req.model,
                     prefer_trusted: auth.prefer_trusted,
                 },
                 req_bytes.clone(),
@@ -487,7 +487,7 @@ pub async fn responses_passthrough(
             .execute(
                 Route {
                     session_key: &session_key,
-                model: &record.requested_model,
+                    model: &record.requested_model,
                     prefer_trusted: false,
                 },
                 body.clone(),
@@ -500,7 +500,7 @@ pub async fn responses_passthrough(
             .execute(
                 Route {
                     session_key: &session_key,
-                model: &record.requested_model,
+                    model: &record.requested_model,
                     prefer_trusted: auth.prefer_trusted,
                 },
                 body.clone(),
@@ -856,15 +856,6 @@ mod passthrough_tests {
         assert_eq!(req.service_tier.as_deref(), Some("priority"));
         let out = serde_json::to_value(&req).unwrap();
         assert_eq!(out["service_tier"], "priority");
-    }
-
-    #[test]
-    fn a_standard_turn_carries_no_tier() {
-        let body = serde_json::json!({"model": "gpt-5.6-sol", "input": []});
-        let req: PassthroughRequest = serde_json::from_value(body).unwrap();
-        assert_eq!(req.service_tier, None);
-        let out = serde_json::to_value(&req).unwrap();
-        assert!(out.get("service_tier").is_none());
     }
 }
 

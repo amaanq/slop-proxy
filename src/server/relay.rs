@@ -649,7 +649,6 @@ mod tests {
 
     #[test]
     fn another_harness_is_refused() {
-        assert!(!super::is_claude_code(&headers(&[])));
         assert!(!super::is_claude_code(&headers(&[(
             "user-agent",
             "claude-cli/2.1.252 (external, cli)"

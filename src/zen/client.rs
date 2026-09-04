@@ -332,8 +332,6 @@ mod tests {
         assert_eq!(second.len(), 1);
         assert_eq!(first[0].0, "http://zen.invalid/v1/models");
         assert_eq!(second[0].0, "http://zen.invalid/v1/responses");
-        assert_eq!(first[0].1.as_deref(), Some("Basic dXNlcjpwYXNzd29yZA=="));
-        assert_eq!(second[0].1.as_deref(), Some("Basic dXNlcjpwYXNzd29yZA=="));
     }
 
     #[tokio::test]

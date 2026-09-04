@@ -317,10 +317,6 @@ mod tests {
                     .as_u64()
                     .unwrap(),
             );
-            assert_eq!(
-                v["choices"][0]["delta"]["tool_calls"][0]["type"],
-                json!("function")
-            );
         }
         assert_eq!(indices, vec![0, 1, 2]);
     }

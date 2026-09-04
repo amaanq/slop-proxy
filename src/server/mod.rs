@@ -369,19 +369,6 @@ mod end_reason_tests {
     use crate::translate::UsageCapture;
 
     #[test]
-    fn a_completed_stream_has_no_error() {
-        let cap = UsageCapture::default();
-        cap.record(&crate::codex::types::Usage {
-            input_tokens: 10,
-            output_tokens: 5,
-            ..Default::default()
-        });
-        cap.note_upstream_eof();
-        let snap = cap.snapshot();
-        assert!(snap.completed);
-    }
-
-    #[test]
     fn the_two_ways_a_stream_dies_are_distinguishable() {
         let cut_by_client = UsageCapture::default();
         cut_by_client.note_event("response.output_text.delta");

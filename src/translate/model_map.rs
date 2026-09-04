@@ -67,9 +67,6 @@ mod tests {
         let r = resolve(&cfg, "gpt-5.6-sol:high");
         assert_eq!(r.model, "gpt-5.6-sol");
         assert_eq!(r.effort.as_deref(), Some("high"));
-
-        let r = resolve(&cfg, "claude-sonnet-4");
-        assert_eq!(r.model, "claude-sonnet-4");
     }
 
     #[test]

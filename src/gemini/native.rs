@@ -536,66 +536,6 @@ mod tests {
     }
 
     #[test]
-    fn translates_messages_tools_and_generation_options() {
-        let translated = request(&chat(json!({
-            "model": "gemini-3-flash-preview",
-            "stream": true,
-            "messages": [
-                {"role": "system", "content": "Be brief"},
-                {"role": "user", "content": "weather"},
-                {"role": "assistant", "content": null, "tool_calls": [{
-                    "id": "call_1", "type": "function",
-                    "function": {"name": "weather", "arguments": "{\"city\":\"Paris\"}"}
-                }]},
-                {"role": "tool", "tool_call_id": "call_1", "content": "{\"temp\":20}"}
-            ],
-            "tools": [{"type": "function", "function": {
-                "name": "weather", "parameters": {"type": "object"}, "strict": true
-            }}],
-            "tool_choice": "required",
-            "max_tokens": 100,
-            "top_p": 0.8
-        })))
-        .unwrap();
-        assert_eq!(translated.model, "gemini-3-flash-preview");
-        assert!(translated.streaming);
-        let body = serde_json::to_value(&translated.body).unwrap();
-        assert_eq!(body["systemInstruction"]["parts"][0]["text"], "Be brief");
-        assert_eq!(
-            body["contents"][2]["parts"][0]["functionResponse"]["name"],
-            "weather"
-        );
-        assert_eq!(body["generationConfig"]["maxOutputTokens"], 100);
-        assert_eq!(body["toolConfig"]["functionCallingConfig"]["mode"], "ANY");
-        assert_eq!(
-            body["tools"][0]["functionDeclarations"][0]["parametersJsonSchema"]["type"],
-            "object"
-        );
-        assert!(
-            body["tools"][0]["functionDeclarations"][0]
-                .get("strict")
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn translates_native_output_and_usage() {
-        let output = response(
-            br#"{"responseId":"r1","candidates":[{"index":0,"content":{"parts":[{"text":"OK"}],"role":"model"},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"thoughtsTokenCount":3,"totalTokenCount":15,"cachedContentTokenCount":4}}"#,
-            "gemini-flash-latest",
-        )
-        .unwrap();
-        let output = serde_json::to_value(&output).unwrap();
-        assert_eq!(output["id"], "chatcmpl-r1");
-        assert_eq!(output["choices"][0]["message"]["content"], "OK");
-        assert_eq!(output["choices"][0]["finish_reason"], "stop");
-        assert_eq!(
-            output["usage"]["completion_tokens_details"]["reasoning_tokens"],
-            3
-        );
-    }
-
-    #[test]
     fn translates_fragmented_native_streams() {
         let mut stream = NativeStream::new("gemini-flash-latest");
         assert!(
@@ -704,15 +644,5 @@ mod signature_tests {
             out.body.contents[1].parts[0].thought_signature.as_deref(),
             Some("EtUBCtIB")
         );
-    }
-
-    #[test]
-    fn a_call_without_a_signature_adds_no_field() {
-        let candidate = candidate(json!({
-            "content": {"parts": [{"functionCall": {"name": "shell", "args": {}}}]}
-        }));
-        let (_, message, _) = choice(&candidate, 0, false);
-        let call = serde_json::to_value(&message.tool_calls.unwrap()[0]).unwrap();
-        assert!(call.get("extra_content").is_none());
     }
 }

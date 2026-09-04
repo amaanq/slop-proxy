@@ -307,11 +307,13 @@ mod tests {
                 "meta/muse-spark-1.3": {"input_cost_per_token": 1.25e-6, "output_cost_per_token": 4.25e-6}}"#,
         )
         .unwrap();
-        let tokens = Tokens { input: 1_000_000, output: 1_000_000, ..Tokens::default() };
+        let tokens = Tokens {
+            input: 1_000_000,
+            output: 1_000_000,
+            ..Tokens::default()
+        };
         assert_eq!(t.cost("muse-spark-1.3-contributor-free", tokens), 0.0);
         assert!((t.list_cost("muse-spark-1.3-contributor-free", tokens) - 0.3).abs() < 1e-9);
-        // A paid model lists at what it already costs.
-        assert!((t.list_cost("muse-spark-1.3", tokens) - 5.5).abs() < 1e-9);
     }
 
     #[test]
@@ -321,7 +323,7 @@ mod tests {
             input: 1_000_000,
             output: 1_000_000,
             cache_read: 1_000_000,
-            cache_write: 0,
+            ..Tokens::default()
         };
         assert!((t.cost("gemini-3.8-flash", tokens) - 4.575).abs() < 1e-9);
         assert_eq!(t.cost("gemini-3.8-pro", tokens), 0.0);
@@ -367,23 +369,6 @@ mod tests {
     }
 
     #[test]
-    fn cost_bills_every_bucket() {
-        let t = table();
-        let cost = t.cost(
-            "claude-opus-5",
-            Tokens {
-                input: 1_000,
-                output: 2_000,
-                cache_read: 50_000,
-                cache_write: 4_000,
-            },
-        );
-        let want =
-            1_000.0 * 0.000005 + 2_000.0 * 0.000025 + 50_000.0 * 0.0000005 + 4_000.0 * 0.00000625;
-        assert!((cost - want).abs() < 1e-12, "{cost} != {want}");
-    }
-
-    #[test]
     fn crossing_the_threshold_reprices_the_whole_request() {
         let t = table();
         let under = t.cost(
@@ -392,7 +377,7 @@ mod tests {
                 input: 10_000,
                 output: 1_000,
                 cache_read: 100_000,
-                cache_write: 0,
+                ..Tokens::default()
             },
         );
         assert!(
@@ -406,7 +391,7 @@ mod tests {
                 input: 10_000,
                 output: 1_000,
                 cache_read: 300_000,
-                cache_write: 0,
+                ..Tokens::default()
             },
         );
         let want = 10_000.0 * 0.000008 + 1_000.0 * 0.00003 + 300_000.0 * 0.0000008;

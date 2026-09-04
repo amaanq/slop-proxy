@@ -65,7 +65,7 @@ pub enum ContentBlock {
     ToolUse {
         id: String,
         name: String,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "buffered_raw")]
         input: Option<Box<RawValue>>,
     },
     ToolResult {
@@ -107,12 +107,23 @@ fn default_media_type() -> String {
     "image/png".into()
 }
 
+/// A tagged enum buffers the map first, and `RawValue` cannot be read back
+/// out of that buffer.
+fn buffered_raw<'de, D>(deserializer: D) -> Result<Option<Box<RawValue>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<serde_json::Value>::deserialize(deserializer)?
+        .map(|value| to_raw_value(&value).map_err(serde::de::Error::custom))
+        .transpose()
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 pub enum ToolResultContent {
     Text(String),
     Blocks(Vec<ToolResultBlock>),
-    Other(Box<RawValue>),
+    Other(serde_json::Value),
 }
 
 #[derive(Debug, Deserialize)]
@@ -429,7 +440,7 @@ fn tool_result_text(content: Option<&ToolResultContent>) -> String {
             })
             .collect::<Vec<_>>()
             .join("\n"),
-        Some(ToolResultContent::Other(other)) => other.get().to_string(),
+        Some(ToolResultContent::Other(other)) => other.to_string(),
     }
 }
 
@@ -457,5 +468,50 @@ mod tests {
         ] {
             parse(content.clone()).unwrap_or_else(|e| panic!("{content}: {e}"));
         }
+    }
+}
+
+
+#[cfg(test)]
+mod captured {
+    #[test]
+    fn captured_bodies_parse() {
+        let mut failures = Vec::new();
+        for entry in std::fs::read_dir("/tmp/cap").unwrap() {
+            let path = entry.unwrap().path();
+            let bytes = std::fs::read(&path).unwrap();
+            if let Err(e) = serde_json::from_slice::<super::AnthropicRequest>(&bytes) {
+                failures.push(format!("{}: {e}", path.display()));
+            }
+        }
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
+}
+
+#[cfg(test)]
+mod buffered_raw_tests {
+    use super::*;
+
+    #[test]
+    fn a_replayed_tool_call_keeps_its_input() {
+        let block = serde_json::from_str::<ContentBlock>(
+            r#"{"id":"c1","input":{"file_path":"/x"},"name":"Read","type":"tool_use"}"#,
+        )
+        .expect("tool_use with an object input must parse");
+        match block {
+            ContentBlock::ToolUse { input, .. } => {
+                assert_eq!(input.unwrap().get(), r#"{"file_path":"/x"}"#);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_tool_result_that_is_neither_text_nor_blocks_survives() {
+        let block = serde_json::from_str::<ContentBlock>(
+            r#"{"type":"tool_result","tool_use_id":"t","content":{"a":1}}"#,
+        )
+        .expect("an unmodelled tool_result body must not sink the request");
+        assert!(matches!(block, ContentBlock::ToolResult { .. }));
     }
 }

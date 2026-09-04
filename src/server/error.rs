@@ -120,8 +120,8 @@ pub fn body_at(body: &[u8], error: &serde_json::Error) -> String {
     if column == 0 || column > body.len() {
         return String::new();
     }
-    let start = column.saturating_sub(220);
-    let end = (column + 60).min(body.len());
+    let start = column.saturating_sub(60);
+    let end = (column + 600).min(body.len());
     String::from_utf8_lossy(&body[start..end]).into_owned()
 }
 

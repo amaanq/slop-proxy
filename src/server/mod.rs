@@ -290,10 +290,7 @@ impl Drop for LogGuard {
             );
         }
         record.duration_ms = Some(self.start.elapsed().as_millis() as i64);
-        record.cost_usd = self
-            .state
-            .prices
-            .cost(&record.upstream_model, billable(&record));
+        price(&self.state.prices, &mut record);
         let db = self.state.db.clone();
         tokio::spawn(async move {
             if let Err(e) = db.log_usage(&record).await {
@@ -329,13 +326,15 @@ pub fn log_error(state: &AppState, mut record: UsageRecord, status: i64, kind: &
     write_usage(&state.db, record);
 }
 
+/// Both write paths price a row
+fn price(prices: &Prices, record: &mut UsageRecord) {
+    let billable = billable(record);
+    record.cost_usd = prices.cost(&record.upstream_model, billable);
+    record.list_cost_usd = prices.table().list_cost(&record.upstream_model, billable);
+}
+
 pub fn log_usage(state: &AppState, mut record: UsageRecord) {
-    let billable = billable(&record);
-    record.cost_usd = state.prices.cost(&record.upstream_model, billable);
-    record.list_cost_usd = state
-        .prices
-        .table()
-        .list_cost(&record.upstream_model, billable);
+    price(&state.prices, &mut record);
     write_usage(&state.db, record);
 }
 

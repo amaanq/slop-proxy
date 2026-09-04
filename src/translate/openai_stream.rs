@@ -21,12 +21,8 @@ pub struct OpenAiStream {
     capture: UsageCapture,
 }
 
-/// Streamed chunks keep serde_json's sorted key order (structs serialize in
-/// declaration order, but Value maps sort), which the e2e stream assertions
-/// pin down.
 fn to_json<T: Serialize>(payload: T) -> String {
-    let value = serde_json::to_value(payload).expect("chunk serializes");
-    value.to_string()
+    serde_json::to_string(&payload).expect("chunk serializes")
 }
 
 impl OpenAiStream {

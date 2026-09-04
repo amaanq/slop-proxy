@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::value::{RawValue, to_raw_value};
 
 use super::{decode_signature, model_map};
 use crate::codex::types::{
@@ -55,7 +55,7 @@ pub enum ContentBlock {
         id: String,
         name: String,
         #[serde(default)]
-        input: Value,
+        input: Option<Box<RawValue>>,
     },
     ToolResult {
         tool_use_id: String,
@@ -99,7 +99,7 @@ fn default_media_type() -> String {
 pub enum ToolResultContent {
     Text(String),
     Blocks(Vec<ToolResultBlock>),
-    Other(Value),
+    Other(Box<RawValue>),
 }
 
 #[derive(Debug, Deserialize)]
@@ -135,7 +135,7 @@ pub struct AnthToolDef {
     #[serde(default)]
     description: Option<String>,
     #[serde(default)]
-    input_schema: Option<Value>,
+    input_schema: Option<Box<RawValue>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -207,8 +207,8 @@ impl ObjectSchema {
     }
 }
 
-pub fn empty_schema() -> Value {
-    serde_json::to_value(ObjectSchema::empty()).expect("schema serializes")
+pub fn empty_schema() -> Box<RawValue> {
+    to_raw_value(&ObjectSchema::empty()).expect("schema serializes")
 }
 
 pub fn to_responses(req: &AnthropicRequest, cfg: &Config) -> Result<ResponsesRequest, String> {
@@ -346,7 +346,7 @@ fn convert_message(msg: &AnthMessage, out: &mut Vec<InputItem>) -> Result<(), St
                 out.push(InputItem::FunctionCall {
                     call_id: id.clone(),
                     name: name.clone(),
-                    arguments: serde_json::to_string(input).unwrap_or_else(|_| "{}".into()),
+                    arguments: input.as_ref().map_or("{}", |i| i.get()).to_owned(),
                 });
             }
             ContentBlock::ToolResult {
@@ -411,6 +411,6 @@ fn tool_result_text(content: Option<&ToolResultContent>) -> String {
             })
             .collect::<Vec<_>>()
             .join("\n"),
-        Some(ToolResultContent::Other(other)) => other.to_string(),
+        Some(ToolResultContent::Other(other)) => other.get().to_string(),
     }
 }

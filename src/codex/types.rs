@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::value::RawValue;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -65,27 +65,29 @@ fn input_items<'de, D>(deserializer: D) -> Result<Vec<InputItem>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    use serde::de::Error;
-    match Value::deserialize(deserializer)? {
-        Value::String(text) => Ok(vec![InputItem::Message {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Loose {
+        Tagged(InputItem),
+        Message {
+            role: String,
+            #[serde(default, deserialize_with = "content_parts")]
+            content: Vec<ContentPart>,
+        },
+    }
+    Ok(match StringOr::<Vec<Loose>>::deserialize(deserializer)? {
+        StringOr::Text(text) => vec![InputItem::Message {
             role: "user".into(),
             content: vec![ContentPart::InputText { text }],
-        }]),
-        Value::Array(items) => items
+        }],
+        StringOr::Items(items) => items
             .into_iter()
-            .map(|mut item| {
-                if let Some(object) = item.as_object_mut()
-                    && !object.contains_key("type")
-                {
-                    object.insert("type".into(), Value::String("message".into()));
-                }
-                serde_json::from_value(item).map_err(D::Error::custom)
+            .map(|item| match item {
+                Loose::Tagged(item) => item,
+                Loose::Message { role, content } => InputItem::Message { role, content },
             })
             .collect(),
-        other => Err(D::Error::custom(format!(
-            "input must be a string or a list, got {other}"
-        ))),
-    }
+    })
 }
 
 /// A message's content is a bare string as often as it is a list of parts.
@@ -93,11 +95,17 @@ fn content_parts<'de, D>(deserializer: D) -> Result<Vec<ContentPart>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    use serde::de::Error;
-    match Value::deserialize(deserializer)? {
-        Value::String(text) => Ok(vec![ContentPart::InputText { text }]),
-        other => serde_json::from_value(other).map_err(D::Error::custom),
-    }
+    Ok(match StringOr::deserialize(deserializer)? {
+        StringOr::Text(text) => vec![ContentPart::InputText { text }],
+        StringOr::Items(parts) => parts,
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StringOr<T> {
+    Text(String),
+    Items(T),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -237,7 +245,7 @@ pub struct ToolDef {
     pub description: Option<String>,
     pub strict: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub parameters: Option<Value>,
+    pub parameters: Option<Box<RawValue>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

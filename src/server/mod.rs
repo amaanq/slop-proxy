@@ -7,6 +7,7 @@ pub mod facts;
 mod gemini;
 pub mod metrics;
 pub mod openai;
+pub mod pipeline;
 pub mod relay;
 #[cfg(test)]
 mod tests;
@@ -264,11 +265,7 @@ impl Drop for LogGuard {
     fn drop(&mut self) {
         let mut record = self.record.clone();
         let cap = self.capture.snapshot();
-        record.input_tokens = cap.input_tokens;
-        record.output_tokens = cap.output_tokens;
-        record.cache_read_tokens = cap.cache_read_tokens;
-        record.cache_write_tokens = cap.cache_write_tokens;
-        record.reasoning_tokens = cap.reasoning_tokens;
+        pipeline::apply_snapshot(&mut record, &cap);
         record.error_kind = cap.error_kind;
         record.response_bytes = cap.response_bytes;
         let finished = cap.completed || cap.stop_reason.is_some();

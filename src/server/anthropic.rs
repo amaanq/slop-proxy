@@ -1,19 +1,14 @@
-use std::collections::VecDeque;
-use std::convert::Infallible;
-
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::HeaderMap;
-use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::sse::Event;
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
-use futures_util::StreamExt;
 
 use super::auth::AuthInfo;
-use super::error::{Dialect, pool_error_response, pool_error_status, translation_error};
+use super::error::{Dialect, translation_error};
+use super::pipeline::{self, apply_snapshot, dispatch_failed, translated};
 use super::{AppState, LogGuard, cache_key, log_error, log_rejected, log_usage};
-use crate::codex::sse::EventStream;
-use crate::db::usage::UsageRecord;
 use crate::pool::Route;
 use crate::pool::pools::Dispatched;
 use crate::provider::Provider;
@@ -73,24 +68,22 @@ pub async fn messages(
     upstream_req.prompt_cache_key = Some(cache_key(&auth.user, &upstream_req));
     let est_input = count_tokens::estimate(&upstream_req);
 
-    let record = UsageRecord {
-        meter_id: Some(auth.meter_id),
-        token_id: Some(auth.token_id),
-        user: auth.user.clone(),
-        provider: Some(provider),
-        dialect: "messages",
-        requested_model: req.model.clone(),
-        upstream_model: upstream_req.model.clone(),
-        effort: upstream_req
-            .reasoning
-            .as_ref()
-            .map(|r| r.effort.clone())
-            .unwrap_or_default(),
-        status: 200,
-        ..Default::default()
-    };
+    let mut record = pipeline::record(
+        &auth,
+        "messages",
+        provider,
+        req.model.clone(),
+        upstream_req.model.clone(),
+        super::facts::RequestFacts::from_anthropic(&req, &headers),
+    );
+    record.effort = upstream_req
+        .reasoning
+        .as_ref()
+        .map(|r| r.effort.clone())
+        .unwrap_or_default();
 
     let session_key = upstream_req.prompt_cache_key.clone().unwrap_or_default();
+    record.session_key = session_key.clone();
     let route = Route {
         session_key: &session_key,
         model: &req.model,
@@ -101,12 +94,8 @@ pub async fn messages(
         upstream,
     } = match state.pools.responses(provider, route, &upstream_req).await {
         Ok(d) => d,
-        Err(e) => {
-            log_error(&state, record, pool_error_status(&e), "pool");
-            return pool_error_response(DIALECT, &state.cfg.models, e);
-        }
+        Err(e) => return dispatch_failed(&state, record, DIALECT, e),
     };
-    let mut record = record;
     record.account_id = account_id;
 
     let capture = UsageCapture::default();
@@ -114,17 +103,23 @@ pub async fn messages(
     let emit_thinking = req.thinking_enabled();
 
     if req.stream.unwrap_or(false) {
-        let translator =
+        let mut translator =
             AnthropicStream::new(req.model.clone(), est_input, emit_thinking, capture.clone());
         let guard = LogGuard::new(state.clone(), capture, record, started);
-        stream_response(events, translator, guard)
+        translated(events, guard, move |ev| {
+            let frames = match ev {
+                Some(ev) => translator.handle(ev),
+                None => translator.finalize(),
+            };
+            frames
+                .into_iter()
+                .map(|(name, data)| Event::default().event(name).data(data))
+                .collect()
+        })
     } else {
         let agg = aggregate(events, &capture).await;
         let snap = capture.snapshot();
-        record.input_tokens = snap.input_tokens;
-        record.output_tokens = snap.output_tokens;
-        record.cache_read_tokens = snap.cache_read_tokens;
-        record.reasoning_tokens = snap.reasoning_tokens;
+        apply_snapshot(&mut record, &snap);
         if agg.stop == StopKind::Error {
             let msg = agg
                 .error_message
@@ -136,53 +131,6 @@ pub async fn messages(
         log_usage(&state, record);
         Json(render_aggregated(&agg, &req.model, emit_thinking)).into_response()
     }
-}
-
-fn stream_response(
-    upstream: EventStream,
-    translator: AnthropicStream,
-    guard: LogGuard,
-) -> Response {
-    struct St {
-        upstream: EventStream,
-        translator: AnthropicStream,
-        queue: VecDeque<Event>,
-        finished: bool,
-        _guard: LogGuard,
-    }
-    let st = St {
-        upstream,
-        translator,
-        queue: VecDeque::new(),
-        finished: false,
-        _guard: guard,
-    };
-    let stream = futures_util::stream::unfold(st, |mut st| async move {
-        loop {
-            if let Some(ev) = st.queue.pop_front() {
-                return Some((Ok::<_, Infallible>(ev), st));
-            }
-            if st.finished {
-                return None;
-            }
-            match st.upstream.next().await {
-                Some(ev) => {
-                    for (name, data) in st.translator.handle(ev) {
-                        st.queue.push_back(Event::default().event(name).data(data));
-                    }
-                }
-                None => {
-                    st.finished = true;
-                    for (name, data) in st.translator.finalize() {
-                        st.queue.push_back(Event::default().event(name).data(data));
-                    }
-                }
-            }
-        }
-    });
-    Sse::new(stream)
-        .keep_alive(KeepAlive::default())
-        .into_response()
 }
 
 pub async fn count_tokens(

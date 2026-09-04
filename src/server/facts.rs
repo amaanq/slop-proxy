@@ -81,7 +81,7 @@ impl RequestFacts {
                 .iter()
                 .filter_map(|m| match &m.content {
                     MessageContent::Blocks(blocks) => Some(blocks),
-                    MessageContent::Text(_) => None,
+                    MessageContent::Text(_) | MessageContent::Empty => None,
                 })
                 .flatten()
                 .filter(|b| matches!(b, ContentBlock::Image { .. }))

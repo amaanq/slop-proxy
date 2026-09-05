@@ -60,6 +60,7 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
       "allowed_providers",
       "TEXT NOT NULL DEFAULT ''",
    ),
+   ("api_tokens", "pinned_account", "INTEGER"),
 ];
 
 /// Indexes over columns `ADDED_COLUMNS` introduces, so they are built after

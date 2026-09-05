@@ -146,6 +146,7 @@ impl Pool<CodexClient> {
             session_key: "",
             model: "",
             user: "",
+            pinned_account: None,
             prefer_trusted: true,
          })
          .await

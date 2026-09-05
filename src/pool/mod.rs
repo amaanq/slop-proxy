@@ -59,6 +59,7 @@ pub struct Route<'a> {
    pub session_key: &'a str,
    pub model: &'a str,
    pub user: &'a str,
+   pub pinned_account: Option<i64>,
    pub prefer_trusted: bool,
 }
 
@@ -145,17 +146,24 @@ impl<B: Backend> Pool<B> {
       self.slots.snapshot().await
    }
 
-   /// An account with an allowlist is invisible to everyone else, so a
-   /// restricted one is dropped before ranking rather than merely deprioritised.
+   /// An account with an allowlist is invisible to everyone else, and a pinned
+   /// token sees only its own account, so both are dropped before ranking
+   /// rather than merely deprioritised.
    /// Candidates are tried with capacity ahead of preference, so an account
    /// with room left beats a preferred one that is nearly spent, and only
    /// then does the token's trusted preference break the tie. Within a group
    /// a session sticks to one account, since a prompt cache lives on the
    /// account that built it and scattering re-bills the whole prefix.
    pub(crate) async fn ranked(&self, route: Route<'_>) -> Vec<Arc<Slot>> {
+      let slots = self.slots.list().await;
+      // A pin names one account across the whole fleet, so a pool that does
+      // not hold it is being asked about a different provider and ignores it.
+      let pinned = route
+         .pinned_account
+         .filter(|id| slots.iter().any(|slot| slot.id == *id));
       let mut scored = Vec::new();
-      for slot in self.slots.list().await {
-         if !slot.serves(route.user) {
+      for slot in slots {
+         if pinned.is_some_and(|id| slot.id != id) || !slot.serves(route.user) {
             continue;
          }
          let band = self.slots.band(&slot, self.backend.soft_limit()).await;
@@ -384,8 +392,40 @@ mod retry_tests {
          session_key: "s",
          model: "m",
          user: "u",
+         pinned_account: None,
          prefer_trusted: false,
       }
+   }
+
+   #[tokio::test]
+   async fn a_pinned_token_sees_only_its_own_account() {
+      let db_path = env::temp_dir().join(format!("slop-pin-{}.db", Uuid::new_v4()));
+      let db = Db::open(&db_path).unwrap();
+      let pool = Pool {
+         slots: test_slots(db, Provider::Gemini, &[(1, false), (2, false), (3, false)]),
+         backend: Flaky {
+            calls: AtomicUsize::new(0),
+            frees_after: 0,
+            budget: Duration::ZERO,
+         },
+      };
+
+      let ids = |ranked: Vec<Arc<Slot>>| ranked.iter().map(|slot| slot.id).collect::<Vec<_>>();
+      let mine = Route {
+         pinned_account: Some(2),
+         ..route()
+      };
+      assert_eq!(ids(pool.ranked(mine).await), vec![2]);
+
+      let elsewhere = Route {
+         pinned_account: Some(99),
+         ..route()
+      };
+      assert_eq!(
+         ids(pool.ranked(elsewhere).await).len(),
+         3,
+         "a pin naming another provider's account must not empty this pool"
+      );
    }
 
    #[tokio::test]

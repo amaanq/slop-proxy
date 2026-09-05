@@ -242,6 +242,7 @@ pub async fn messages(
             session_key: &key,
             model: &peek.model,
             user: &auth.user,
+            pinned_account: auth.limits.pinned_account,
             prefer_trusted: false,
          },
          AnthropicRelay {
@@ -338,6 +339,7 @@ pub async fn glm(
             session_key: &key,
             model: &peek.model,
             user: &auth.user,
+            pinned_account: auth.limits.pinned_account,
             prefer_trusted: false,
          },
          GlmRelay {
@@ -419,6 +421,7 @@ pub async fn count_tokens(
             session_key: &key,
             model: &peek.model,
             user: &auth.user,
+            pinned_account: auth.limits.pinned_account,
             prefer_trusted: false,
          },
          AnthropicRelay {

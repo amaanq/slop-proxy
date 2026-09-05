@@ -2,13 +2,24 @@ use std::fmt;
 
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, pound::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provider {
    OpenAi,
    Anthropic,
    Gemini,
    Zen,
    Glm,
+}
+
+/// `ValueEnum` would derive `open-ai` from the variant name, which is a
+/// spelling no config pattern, database row or `--providers` list accepts.
+impl pound::FromArg for Provider {
+   const POSSIBLE: Option<&'static [&'static str]> =
+      Some(&["openai", "anthropic", "gemini", "zen", "glm"]);
+
+   fn from_arg(text: &str) -> Result<Self, pound::ValueError> {
+      Self::from_str(text).ok_or_else(|| pound::ValueError::new(text, "unrecognised provider"))
+   }
 }
 
 impl Provider {

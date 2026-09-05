@@ -71,6 +71,15 @@ pub struct ScopedModel {
 }
 
 impl Limit {
+   pub fn resets_at_unix(&self) -> Option<i64> {
+      self
+         .resets_at
+         .as_deref()?
+         .parse::<jiff::Timestamp>()
+         .ok()
+         .map(jiff::Timestamp::as_second)
+   }
+
    fn window_name(&self) -> &'static str {
       match self.group.as_str() {
          "session" => "5h",
@@ -127,16 +136,14 @@ impl Usage {
          limit.scope.is_none()
             && limit.is_active == Some(false)
             && limit
-               .resets_at
-               .as_deref()
-               .and_then(|reset| reset.parse::<jiff::Timestamp>().ok())
-               .is_some_and(|reset| reset.as_second().abs_diff(until) <= 1)
+               .resets_at_unix()
+               .is_some_and(|reset| reset.abs_diff(until) <= 1)
       })
    }
 
    /// Per-model sub-limits, measured against their own allowance rather than
    /// the account's, so they are reported apart from `windows`.
-   pub fn model_windows(&self) -> impl Iterator<Item = (String, &'static str, f64)> {
+   pub fn model_windows(&self) -> impl Iterator<Item = (String, &'static str, &Limit)> {
       self.limits.iter().filter_map(|limit| {
          let name = limit
             .scope
@@ -145,11 +152,7 @@ impl Usage {
             .as_ref()?
             .display_name
             .as_deref()?;
-         Some((
-            name.to_lowercase(),
-            limit.window_name(),
-            limit.percent / 100.0_f64,
-         ))
+         Some((name.to_lowercase(), limit.window_name(), limit))
       })
    }
 }
@@ -287,7 +290,10 @@ mod tests {
    #[test]
    fn a_scoped_model_is_named_from_its_scope() {
       let usage: Usage = serde_json::from_str(USAGE).unwrap();
-      let got: Vec<_> = usage.model_windows().collect();
+      let got: Vec<_> = usage
+         .model_windows()
+         .map(|(model, window, limit)| (model, window, limit.percent / 100.0_f64))
+         .collect();
       assert_eq!(got, vec![("fable".to_owned(), "7d", 0.63_f64)]);
    }
 

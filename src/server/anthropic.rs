@@ -82,6 +82,7 @@ pub async fn messages(
       session_key: &session_key,
       model: &req.model,
       user: &auth.user,
+      pinned_account: auth.limits.pinned_account,
       prefer_trusted: auth.limits.prefer_trusted,
    };
    let Dispatched {

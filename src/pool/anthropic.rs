@@ -190,6 +190,7 @@ mod tests {
             session_key,
             model: "",
             user: "",
+            pinned_account: None,
             prefer_trusted: false,
          })
          .await

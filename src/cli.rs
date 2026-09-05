@@ -141,6 +141,9 @@ pub enum TokenCommand {
       /// Providers this token may reach, comma separated. Empty allows all.
       #[pound(long)]
       providers: Option<String>,
+      /// Serve this token only from the named account, by id, email or label
+      #[pound(long)]
+      pin_account: Option<String>,
    },
    /// List issued tokens
    List,
@@ -162,6 +165,9 @@ pub enum TokenCommand {
       /// Providers this token may reach, comma separated. Empty allows all.
       #[pound(long)]
       providers: Option<String>,
+      /// Serve this token only from the named account, by id, email or label
+      #[pound(long)]
+      pin_account: Option<String>,
    },
    /// Show metered usage for a token's current rolling window
    Usage { token: String },
@@ -222,6 +228,7 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
             slowdown_ms,
             prefer_trusted,
             providers,
+            pin_account,
          } => {
             let limits = token_limits(
                requests,
@@ -230,6 +237,7 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
                slowdown_ms,
                prefer_trusted,
                providers,
+               resolve_pin(&db, pin_account).await?,
             )?;
             token_create(&db, &user, &limits).await
          },
@@ -243,6 +251,7 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
             slowdown_ms,
             prefer_trusted,
             providers,
+            pin_account,
          } => {
             let limits = token_limits(
                requests,
@@ -251,6 +260,7 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
                slowdown_ms,
                prefer_trusted,
                providers,
+               resolve_pin(&db, pin_account).await?,
             )?;
             token_set_limits(&db, &token, &limits).await
          },
@@ -400,6 +410,18 @@ async fn token_create(db: &Db, user: &str, limits: &TokenLimits) -> Result<()> {
    Ok(())
 }
 
+/// A pin is stored by id, so a label that no longer resolves must fail loudly
+/// rather than quietly leaving the token free to use the whole pool.
+async fn resolve_pin(db: &Db, account: Option<String>) -> Result<Option<i64>> {
+   let Some(key) = account else {
+      return Ok(None);
+   };
+   let Some(found) = db.find_account(&key).await? else {
+      bail!("no account matched {key:?}");
+   };
+   Ok(Some(found.id))
+}
+
 fn token_limits(
    requests: Option<i64>,
    tokens: Option<i64>,
@@ -407,6 +429,7 @@ fn token_limits(
    slowdown_ms: i64,
    prefer_trusted: bool,
    providers: Option<String>,
+   pinned_account: Option<i64>,
 ) -> Result<TokenLimits> {
    if requests.is_some_and(|value| value <= 0) {
       bail!("--requests must be greater than zero");
@@ -437,6 +460,7 @@ fn token_limits(
       window_seconds,
       slowdown_ms,
       prefer_trusted,
+      pinned_account,
       providers,
    })
 }

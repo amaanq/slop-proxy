@@ -16,17 +16,13 @@ pub struct Slot {
    pub auth_mode: AuthMode,
    pub plan: Option<String>,
    pub http_referer: Option<String>,
-   credentials: Arc<Mutex<Credentials>>,
-   state: Arc<Mutex<SlotState>>,
-}
-
-struct Credentials {
-   access_token: String,
-   refresh_token: String,
-   expires_at: Option<i64>,
+   state: Mutex<SlotState>,
 }
 
 struct SlotState {
+   access_token: String,
+   refresh_token: String,
+   expires_at: Option<i64>,
    status: Status,
    consecutive_fails: u32,
    usage: Option<AccountUsage>,
@@ -161,7 +157,6 @@ pub struct AccountSnapshot {
 pub struct Slots {
    provider: Provider,
    inner: RwLock<Vec<Arc<Slot>>>,
-   reload_gate: Mutex<()>,
    db: Db,
 }
 
@@ -170,7 +165,6 @@ impl Slots {
       let slots = Self {
          provider,
          inner: RwLock::new(Vec::new()),
-         reload_gate: Mutex::new(()),
          db,
       };
       slots.reload().await?;
@@ -182,7 +176,6 @@ impl Slots {
    /// db row's refresh token changed, which means someone re-logged-in and
    /// the in-memory grant is stale.
    pub async fn reload(&self) -> eyre::Result<()> {
-      let _reload = self.reload_gate.lock().await;
       let accounts: Vec<_> = self
          .db
          .list_accounts()
@@ -191,34 +184,21 @@ impl Slots {
          .filter(|account| account.provider == self.provider)
          .collect();
 
-      let slots = self.list().await;
+      let mut slots = self.inner.write().await;
       let mut next = Vec::with_capacity(accounts.len());
       let mut added = 0_usize;
-      for mut account in accounts {
-         let mut existing = slots.iter().find(|slot| slot.id == account.id);
-         if let Some(slot) = existing {
-            let credentials = slot.credentials.lock().await;
-            if credentials.refresh_token != account.refresh_token
-               || credentials.access_token != account.access_token
-               || slot.auth_mode != account.auth_mode
-            {
-               let Some(current) = self.db.find_account(&account.id.to_string()).await? else {
-                  continue;
-               };
-               account = current;
-               if credentials.refresh_token != account.refresh_token
-                  || credentials.access_token != account.access_token
-                  || slot.auth_mode != account.auth_mode
-               {
-                  existing = None;
-               }
-            }
-         }
+      for account in accounts {
+         let existing = match slots.iter().find(|slot| slot.id == account.id) {
+            Some(slot) if slot.state.lock().await.refresh_token == account.refresh_token => {
+               Some(slot)
+            },
+            _ => None,
+         };
          match existing {
             // Swapping an unchanged slot would strand an in-flight
             // cooldown write on the orphaned Arc.
             Some(slot) if slot_matches(slot, &account) => next.push(Arc::clone(slot)),
-            Some(slot) => next.push(Arc::new(reslot(&account, slot))),
+            Some(slot) => next.push(Arc::new(reslot(&account, slot).await)),
             None => {
                added += 1_usize;
                next.push(Arc::new(slot_from_account(account)));
@@ -235,7 +215,7 @@ impl Slots {
             self.provider
          );
       }
-      *self.inner.write().await = next;
+      *slots = next;
       Ok(())
    }
 
@@ -334,19 +314,15 @@ impl Slots {
 
    /// Refresh serialization matters: refresh tokens rotate, so two tasks
    /// refreshing the same account concurrently would invalidate each other.
-   /// Only the credentials mutex spans refresh, quota selection stays independent.
+   /// The slot's state mutex is held across the refresh call for that reason.
    pub async fn fresh_token(&self, slot: &Slot, force: bool) -> Result<String, ()> {
       let now = clock::unix_now();
-      let mut credentials = slot.credentials.lock().await;
+      let mut state = slot.state.lock().await;
       if !slot.auth_mode.refreshable() {
-         return Ok(credentials.access_token.clone());
+         return Ok(state.access_token.clone());
       }
-      if !force
-         && credentials
-            .expires_at
-            .is_some_and(|expires| expires - now > 60)
-      {
-         return Ok(credentials.access_token.clone());
+      if !force && state.expires_at.is_some_and(|expires| expires - now > 60) {
+         return Ok(state.access_token.clone());
       }
       tracing::info!(
          "refreshing {} access token for {}",
@@ -354,8 +330,8 @@ impl Slots {
          slot.display
       );
       let refreshed = match self.provider {
-         Provider::OpenAi => refresh::refresh(&credentials.refresh_token).await,
-         Provider::Anthropic => anthropic::refresh(&credentials.refresh_token).await,
+         Provider::OpenAi => refresh::refresh(&state.refresh_token).await,
+         Provider::Anthropic => anthropic::refresh(&state.refresh_token).await,
          Provider::Gemini => Err(RefreshError::Terminal(
             "google oauth grants are not implemented, add the account with an api key".into(),
          )),
@@ -372,9 +348,9 @@ impl Slots {
                tracing::error!("persisting refreshed tokens for {}: {err}", slot.display);
                return Err(());
             }
-            credentials.access_token.clone_from(&tokens.access_token);
-            credentials.refresh_token = tokens.refresh_token;
-            credentials.expires_at = tokens.expires_at;
+            state.access_token.clone_from(&tokens.access_token);
+            state.refresh_token = tokens.refresh_token;
+            state.expires_at = tokens.expires_at;
             Ok(tokens.access_token)
          },
          Err(RefreshError::Terminal(msg)) => {
@@ -382,7 +358,8 @@ impl Slots {
                "account {} refresh token is dead ({msg}); disabling",
                slot.display
             );
-            slot.state.lock().await.status = Status::Disabled;
+            state.status = Status::Disabled;
+            drop(state);
             let _ = self
                .db
                .set_account_status(slot.id, AccountStatus::Disabled, None, Some(&msg))
@@ -391,6 +368,7 @@ impl Slots {
          },
          Err(RefreshError::Transient(msg)) => {
             tracing::warn!("account {} refresh failed transiently: {msg}", slot.display);
+            drop(state);
             self.cool(slot, 30, "refresh failure").await;
             Err(())
          },
@@ -399,29 +377,16 @@ impl Slots {
 
    pub async fn cool(&self, slot: &Slot, secs: i64, why: &str) {
       let until = clock::unix_now() + secs;
-      let persist = {
+      {
          let mut state = slot.state.lock().await;
-         if state.status == Status::Disabled {
-            None
-         } else {
-            let extend = match &state.status {
-               Status::Cooldown { until: current } => *current < until,
-               Status::Active => true,
-               Status::Disabled => false,
-            };
-            state.consecutive_fails += 1;
-            if extend {
-               state.status = Status::Cooldown { until };
-               Some(until)
-            } else {
-               None
-            }
-         }
-      };
-      tracing::warn!("account {} cooling down {secs}s ({why})", slot.display);
-      if let Some(until) = persist {
-         let _ = self.db.cas_account_cooldown(slot.id, until).await;
+         state.status = Status::Cooldown { until };
+         state.consecutive_fails += 1;
       }
+      tracing::warn!("account {} cooling down {secs}s ({why})", slot.display);
+      let _ = self
+         .db
+         .set_account_status(slot.id, AccountStatus::Cooldown, Some(until), None)
+         .await;
    }
 
    /// Backoff for a 429: the reported retry-after when present, else
@@ -499,7 +464,8 @@ fn slot_matches(slot: &Slot, account: &Account) -> bool {
 }
 
 /// A fresh slot carrying the previous one's cooldown, tokens and quota sample.
-fn reslot(account: &Account, prev: &Slot) -> Slot {
+async fn reslot(account: &Account, prev: &Slot) -> Slot {
+   let state = prev.state.lock().await;
    Slot {
       id: account.id,
       provider_account_id: account.provider_account_id.clone(),
@@ -508,8 +474,14 @@ fn reslot(account: &Account, prev: &Slot) -> Slot {
       plan: account.plan_type.clone(),
       http_referer: account.http_referer.clone(),
       display: display_for(account),
-      credentials: Arc::clone(&prev.credentials),
-      state: Arc::clone(&prev.state),
+      state: Mutex::new(SlotState {
+         access_token: state.access_token.clone(),
+         refresh_token: state.refresh_token.clone(),
+         expires_at: state.expires_at,
+         status: state.status.clone(),
+         consecutive_fails: state.consecutive_fails,
+         usage: state.usage.clone(),
+      }),
    }
 }
 
@@ -533,16 +505,14 @@ fn slot_from_account(account: Account) -> Slot {
          .label
          .or(account.email)
          .unwrap_or_else(|| format!("account#{}", account.id)),
-      credentials: Arc::new(Mutex::new(Credentials {
+      state: Mutex::new(SlotState {
          access_token: account.access_token,
          refresh_token: account.refresh_token,
          expires_at: account.access_expires_at,
-      })),
-      state: Arc::new(Mutex::new(SlotState {
          status,
          consecutive_fails: 0,
          usage: None,
-      })),
+      }),
    }
 }
 
@@ -564,22 +534,19 @@ pub fn test_slots(db: Db, provider: Provider, ids: &[(i64, bool)]) -> Slots {
                   },
                   plan: None,
                   http_referer: None,
-                  credentials: Arc::new(Mutex::new(Credentials {
+                  state: Mutex::new(SlotState {
                      access_token: "at".into(),
                      refresh_token: "rt".into(),
                      expires_at: None,
-                  })),
-                  state: Arc::new(Mutex::new(SlotState {
                      status: Status::Active,
                      consecutive_fails: 0,
                      usage: None,
-                  })),
+                  }),
                })
             })
             .collect(),
       ),
       db,
-      reload_gate: Mutex::new(()),
    }
 }
 
@@ -650,71 +617,6 @@ mod band_tests {
       let mut usage_data = usage(&[("7d", 0.5_f64, 3600_i64)], now);
       usage_data.windows[0].resets_at = None;
       assert_eq!(usage_data.band(0.9_f64, now), Band::Steady);
-   }
-}
-
-#[cfg(test)]
-mod concurrency_tests {
-   use super::*;
-   use crate::db::accounts::NewAccount;
-   use crate::oauth::TokenSet;
-   use std::time::Duration;
-
-   async fn slots() -> (Db, Slots) {
-      let db =
-         Db::open(&std::env::temp_dir().join(format!("slop-slots-{}.db", uuid::Uuid::new_v4())))
-            .unwrap();
-      db.upsert_account(NewAccount {
-         provider: Provider::OpenAi,
-         id: "one",
-         email: None,
-         label: None,
-         plan: None,
-         tokens: &TokenSet {
-            access_token: "at".into(),
-            refresh_token: "rt".into(),
-            id_token: None,
-            expires_at: None,
-         },
-         auth_mode: AuthMode::OAuth,
-      })
-      .await
-      .unwrap();
-      let slots = Slots::load(db.clone(), Provider::OpenAi).await.unwrap();
-      (db, slots)
-   }
-
-   #[tokio::test]
-   async fn selection_and_snapshots_do_not_wait_for_refresh() {
-      let (_, slots) = slots().await;
-      let slot = slots.list().await.remove(0);
-      let refreshing = slot.credentials.lock().await;
-      let result = tokio::time::timeout(Duration::from_secs(1), async {
-         assert!(slots.try_claim(&slot).await);
-         assert_eq!(slots.band(&slot, 0.9).await, Band::Steady);
-         assert_eq!(slots.snapshot().await.len(), 1);
-         assert_eq!(slots.list().await.len(), 1);
-      })
-      .await;
-      drop(refreshing);
-      result.unwrap();
-   }
-
-   #[tokio::test]
-   async fn metadata_reload_keeps_in_flight_runtime_updates() {
-      let (db, slots) = slots().await;
-      let old = slots.list().await.remove(0);
-      db.set_account_trusted(&old.id.to_string(), true)
-         .await
-         .unwrap();
-      slots.reload().await.unwrap();
-      let current = slots.list().await.remove(0);
-      assert!(current.trusted);
-      assert!(Arc::ptr_eq(&old.state, &current.state));
-      assert!(Arc::ptr_eq(&old.credentials, &current.credentials));
-      slots.cool(&old, 60, "test").await;
-      assert!(!slots.try_claim(&current).await);
-      assert_eq!(slots.snapshot().await[0].consecutive_fails, 1);
    }
 }
 

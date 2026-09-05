@@ -1,5 +1,7 @@
 use axum::body::Bytes;
 
+use std::collections::BTreeMap;
+
 use super::{
    AccountUsage, AuthPolicy, Backend, Cooldown, ModelWindow, Pool, PoolError, Route, Slot,
    UsageWindow,
@@ -49,6 +51,34 @@ impl Backend for AnthropicClient {
 }
 
 impl Pool<AnthropicClient> {
+   /// Averaged across accounts, so a caller's figures do not jump when
+   /// routing moves it.
+   pub async fn pool_windows(&self) -> Vec<UsageWindow> {
+      let mut by_name: BTreeMap<String, (f64, usize, Option<i64>)> = BTreeMap::default();
+      for account in self.slots.snapshot().await {
+         let Some(usage) = account.usage else { continue };
+         for window in usage.windows {
+            let slot = by_name
+               .entry(window.name.clone())
+               .or_insert((0.0_f64, 0_usize, None));
+            slot.0 += window.utilization;
+            slot.1 += 1;
+            slot.2 = match (slot.2, window.resets_at) {
+               (Some(left), Some(right)) => Some(left.min(right)),
+               (left, right) => left.or(right),
+            };
+         }
+      }
+      by_name
+         .into_iter()
+         .map(|(name, (sum, count, resets_at))| UsageWindow {
+            name,
+            utilization: sum / count.max(1) as f64,
+            resets_at,
+         })
+         .collect()
+   }
+
    /// The catalog body untouched, for relaying to an Anthropic client.
    pub async fn models_raw(&self) -> Result<String, PoolError> {
       for slot in self.slots.list().await {

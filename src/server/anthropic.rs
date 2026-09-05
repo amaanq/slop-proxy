@@ -81,6 +81,7 @@ pub async fn messages(
    let route = Route {
       session_key: &session_key,
       model: &req.model,
+      user: &auth.user,
       prefer_trusted: auth.limits.prefer_trusted,
    };
    let Dispatched {

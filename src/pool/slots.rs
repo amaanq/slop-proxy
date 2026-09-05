@@ -13,10 +13,19 @@ pub struct Slot {
    pub provider_account_id: String,
    pub display: String,
    pub trusted: bool,
+   pub allowed_users: Vec<String>,
    pub auth_mode: AuthMode,
    pub plan: Option<String>,
    pub http_referer: Option<String>,
    state: Mutex<SlotState>,
+}
+
+impl Slot {
+   /// An empty allowlist is the common case and serves everyone. A named one
+   /// excludes the proxy's own background callers, which have no user.
+   pub fn serves(&self, user: &str) -> bool {
+      self.allowed_users.is_empty() || self.allowed_users.iter().any(|allowed| allowed == user)
+   }
 }
 
 struct SlotState {
@@ -454,13 +463,19 @@ fn display_for(account: &Account) -> String {
 }
 
 fn slot_matches(slot: &Slot, account: &Account) -> bool {
-   (slot.trusted, &slot.plan, &slot.display, &slot.http_referer)
-      == (
-         account.trusted,
-         &account.plan_type,
-         &display_for(account),
-         &account.http_referer,
-      )
+   (
+      slot.trusted,
+      &slot.plan,
+      &slot.display,
+      &slot.http_referer,
+      &slot.allowed_users,
+   ) == (
+      account.trusted,
+      &account.plan_type,
+      &display_for(account),
+      &account.http_referer,
+      &account.allowed_users,
+   )
 }
 
 /// A fresh slot carrying the previous one's cooldown, tokens and quota sample.
@@ -470,6 +485,7 @@ async fn reslot(account: &Account, prev: &Slot) -> Slot {
       id: account.id,
       provider_account_id: account.provider_account_id.clone(),
       trusted: account.trusted,
+      allowed_users: account.allowed_users.clone(),
       auth_mode: account.auth_mode,
       plan: account.plan_type.clone(),
       http_referer: account.http_referer.clone(),
@@ -498,6 +514,7 @@ fn slot_from_account(account: Account) -> Slot {
       id: account.id,
       provider_account_id: account.provider_account_id,
       trusted: account.trusted,
+      allowed_users: account.allowed_users,
       auth_mode: account.auth_mode,
       plan: account.plan_type,
       http_referer: account.http_referer,
@@ -528,6 +545,7 @@ pub fn test_slots(db: Db, provider: Provider, ids: &[(i64, bool)]) -> Slots {
                   provider_account_id: format!("acct-{id}"),
                   display: format!("a{id}"),
                   trusted,
+                  allowed_users: Vec::new(),
                   auth_mode: match provider {
                      Provider::OpenAi | Provider::Anthropic => AuthMode::OAuth,
                      Provider::Gemini | Provider::Glm | Provider::Zen => AuthMode::ApiKey,
@@ -547,6 +565,42 @@ pub fn test_slots(db: Db, provider: Provider, ids: &[(i64, bool)]) -> Slots {
             .collect(),
       ),
       db,
+   }
+}
+
+#[cfg(test)]
+mod allowlist_tests {
+   use super::*;
+
+   fn slot(allowed: &[&str]) -> Slot {
+      Slot {
+         id: 1,
+         provider_account_id: "acct-1".into(),
+         display: "a1".into(),
+         trusted: false,
+         allowed_users: allowed.iter().map(|user| (*user).to_owned()).collect(),
+         auth_mode: AuthMode::OAuth,
+         plan: None,
+         http_referer: None,
+         state: Mutex::new(SlotState {
+            access_token: "at".into(),
+            refresh_token: "rt".into(),
+            expires_at: None,
+            status: Status::Active,
+            consecutive_fails: 0,
+            usage: None,
+         }),
+      }
+   }
+
+   #[test]
+   fn a_named_allowlist_hides_the_account_from_everyone_else() {
+      assert!(slot(&[]).serves("goth"));
+      assert!(slot(&[]).serves(""));
+      assert!(slot(&["amaan", "fox"]).serves("amaan"));
+      assert!(slot(&["amaan", "fox"]).serves("fox"));
+      assert!(!slot(&["amaan", "fox"]).serves("goth"));
+      assert!(!slot(&["amaan", "fox"]).serves(""));
    }
 }
 

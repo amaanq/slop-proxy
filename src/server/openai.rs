@@ -104,6 +104,7 @@ pub async fn chat_completions(
    let route = Route {
       session_key: &session_key,
       model: &req.model,
+      user: &auth.user,
       prefer_trusted: auth.limits.prefer_trusted,
    };
    let Dispatched {
@@ -586,6 +587,7 @@ pub async fn responses_passthrough(
    let route = Route {
       session_key: &session_key,
       model: &record.requested_model,
+      user: &auth.user,
       prefer_trusted: auth.limits.prefer_trusted,
    };
    let Dispatched {
@@ -954,19 +956,25 @@ mod passthrough_tests {
       assert_eq!(out["reasoning"], body["reasoning"]);
    }
 
+   fn cap(value: serde_json::Value) -> serde_json::Map<String, Value> {
+      let mut rest = serde_json::Map::new();
+      rest.insert("max_output_tokens".into(), value);
+      rest
+   }
+
    #[test]
    fn a_cap_below_the_upstream_floor_is_stripped_from_a_relayed_body() {
-      let mut rest = serde_json::json!({"max_output_tokens": 8}).as_object().unwrap().clone();
-      drop_unusable_max_output_tokens(&mut rest, "u1");
-      assert!(!rest.contains_key("max_output_tokens"));
+      let stripped = &mut cap(serde_json::json!(8_i64));
+      drop_unusable_max_output_tokens(stripped, "u1");
+      assert!(!stripped.contains_key("max_output_tokens"));
 
-      let mut rest = serde_json::json!({"max_output_tokens": 4096}).as_object().unwrap().clone();
-      drop_unusable_max_output_tokens(&mut rest, "u1");
-      assert_eq!(rest["max_output_tokens"], 4096);
+      let kept = &mut cap(serde_json::json!(4096_i64));
+      drop_unusable_max_output_tokens(kept, "u1");
+      assert_eq!(kept["max_output_tokens"], 4096_i64);
 
-      let mut rest = serde_json::json!({"max_output_tokens": "auto"}).as_object().unwrap().clone();
-      drop_unusable_max_output_tokens(&mut rest, "u1");
-      assert_eq!(rest["max_output_tokens"], "auto");
+      let unparsed = &mut cap(serde_json::json!("auto"));
+      drop_unusable_max_output_tokens(unparsed, "u1");
+      assert_eq!(unparsed["max_output_tokens"], "auto");
    }
 }
 

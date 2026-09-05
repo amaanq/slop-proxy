@@ -455,12 +455,12 @@ mod tests {
       let mut req = parse(&serde_json::json!("hi")).unwrap();
 
       req.max_tokens = Some(8);
-      let out = to_responses(&req, &Config::for_tests());
-      assert_eq!(out.max_output_tokens, None);
+      let dropped = to_responses(&req, &Config::for_tests());
+      assert_eq!(dropped.max_output_tokens, None);
 
       req.max_tokens = Some(4096);
-      let out = to_responses(&req, &Config::for_tests());
-      assert_eq!(out.max_output_tokens, Some(4096));
+      let kept = to_responses(&req, &Config::for_tests());
+      assert_eq!(kept.max_output_tokens, Some(4096));
    }
 
    /// A single block the API tolerates used to sink the whole request with

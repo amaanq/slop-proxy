@@ -70,6 +70,7 @@ pub async fn chat_completions(
          Route {
             session_key: &session_key,
             model: &model,
+            user: &auth.user,
             prefer_trusted: false,
          },
          Call::OpenAi(Box::new(body)),
@@ -365,6 +366,7 @@ pub async fn native(
          Route {
             session_key: &key,
             model,
+            user: &auth.user,
             prefer_trusted: false,
          },
          call,

@@ -148,14 +148,14 @@ mod tests {
          max_tokens: Some(8),
          ..Default::default()
       };
-      let out = to_responses(&req, &Config::for_tests()).unwrap();
-      assert_eq!(out.max_output_tokens, None);
+      let dropped = to_responses(&req, &Config::for_tests()).unwrap();
+      assert_eq!(dropped.max_output_tokens, None);
 
-      let req = ChatRequest {
+      let raised = ChatRequest {
          max_tokens: Some(4096),
          ..req
       };
-      let out = to_responses(&req, &Config::for_tests()).unwrap();
-      assert_eq!(out.max_output_tokens, Some(4096));
+      let kept = to_responses(&raised, &Config::for_tests()).unwrap();
+      assert_eq!(kept.max_output_tokens, Some(4096));
    }
 }

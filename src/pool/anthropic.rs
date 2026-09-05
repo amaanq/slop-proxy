@@ -189,6 +189,7 @@ mod tests {
          .ranked(Route {
             session_key,
             model: "",
+            user: "",
             prefer_trusted: false,
          })
          .await

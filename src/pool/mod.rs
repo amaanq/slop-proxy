@@ -58,6 +58,7 @@ pub enum AuthPolicy {
 pub struct Route<'a> {
    pub session_key: &'a str,
    pub model: &'a str,
+   pub user: &'a str,
    pub prefer_trusted: bool,
 }
 
@@ -144,6 +145,8 @@ impl<B: Backend> Pool<B> {
       self.slots.snapshot().await
    }
 
+   /// An account with an allowlist is invisible to everyone else, so a
+   /// restricted one is dropped before ranking rather than merely deprioritised.
    /// Candidates are tried with capacity ahead of preference, so an account
    /// with room left beats a preferred one that is nearly spent, and only
    /// then does the token's trusted preference break the tie. Within a group
@@ -152,6 +155,9 @@ impl<B: Backend> Pool<B> {
    pub(crate) async fn ranked(&self, route: Route<'_>) -> Vec<Arc<Slot>> {
       let mut scored = Vec::new();
       for slot in self.slots.list().await {
+         if !slot.serves(route.user) {
+            continue;
+         }
          let band = self.slots.band(&slot, self.backend.soft_limit()).await;
          scored.push((
             band,
@@ -377,6 +383,7 @@ mod retry_tests {
       Route {
          session_key: "s",
          model: "m",
+         user: "u",
          prefer_trusted: false,
       }
    }

@@ -50,6 +50,8 @@ pub struct ModelWindow {
    pub model: String,
    pub window: String,
    pub utilization: f64,
+   pub is_active: Option<bool>,
+   pub resets_at: Option<i64>,
 }
 
 #[derive(Debug, Clone)]

@@ -138,10 +138,12 @@ impl Pool<AnthropicClient> {
                         windows,
                         model_windows: usage
                            .model_windows()
-                           .map(|(model, window, utilization)| ModelWindow {
+                           .map(|(model, window, limit)| ModelWindow {
                               model,
                               window: window.to_owned(),
-                              utilization,
+                              utilization: limit.percent / 100.0,
+                              is_active: limit.is_active,
+                              resets_at: limit.resets_at_unix(),
                            })
                            .collect(),
                         locked: usage.locked(),
@@ -298,6 +300,91 @@ mod tests {
       assert_ne!(
          reranked[0].id, fresh.id,
          "locked account still ranked first"
+      );
+   }
+
+   #[tokio::test]
+   async fn polling_preserves_model_quota_activity_and_resets() {
+      let reset = 1_800_000_000_i64;
+      let usage = serde_json::json!({
+         "five_hour": {"utilization": 26.0_f64},
+         "seven_day": {"utilization": 99.0_f64},
+         "limits": [
+            {"group": "weekly", "is_active": false, "percent": 99_i32},
+            {"group": "weekly", "is_active": true, "percent": 25_i32,
+             "resets_at": jiff::Timestamp::from_second(reset).unwrap().to_string(),
+             "scope": {"model": {"display_name": "Fable"}}},
+            {"group": "weekly", "is_active": false, "percent": 100_i32,
+             "resets_at": "invalid", "scope": {"model": {"display_name": "Dormant"}}},
+            {"group": "weekly", "percent": 12_i32,
+             "scope": {"model": {"display_name": "Unknown"}}}
+         ]
+      });
+      let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+      let addr = listener.local_addr().unwrap();
+      let app = axum::Router::new().route(
+         "/api/oauth/usage",
+         get(move || {
+            let usage = usage.clone();
+            async move { axum::Json(usage) }
+         }),
+      );
+      let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+      let db = Db::open(&env::temp_dir().join(format!("slop-model-quota-{}.db", Uuid::new_v4())))
+         .unwrap();
+      db.upsert_account(NewAccount {
+         provider: Provider::Anthropic,
+         id: "quota-test",
+         email: None,
+         label: None,
+         plan: None,
+         tokens: &TokenSet {
+            access_token: "test-token".into(),
+            refresh_token: "test-refresh".into(),
+            id_token: None,
+            expires_at: Some(clock::unix_now() + 3600),
+         },
+         auth_mode: AuthMode::OAuth,
+      })
+      .await
+      .unwrap();
+      let pool = AnthropicPool::load(
+         db,
+         AnthropicClient::new(AnthropicConfig {
+            base_url: format!("http://{addr}"),
+            ..AnthropicConfig::default()
+         }),
+      )
+      .await
+      .unwrap();
+      pool.poll_usage().await;
+      server.abort();
+
+      let snapshots = pool.slots.snapshot().await;
+      let reported = snapshots[0].usage.as_ref().unwrap();
+      assert_eq!(reported.windows.len(), 1);
+      assert_eq!(reported.windows[0].name, "5h");
+      assert!((reported.peak() - 0.26_f64).abs() < f64::EPSILON);
+      let models: Vec<_> = reported
+         .model_windows
+         .iter()
+         .map(|window| {
+            (
+               window.model.as_str(),
+               window.window.as_str(),
+               window.utilization,
+               window.is_active,
+               window.resets_at,
+            )
+         })
+         .collect();
+      assert_eq!(
+         models,
+         vec![
+            ("fable", "7d", 0.25_f64, Some(true), Some(reset)),
+            ("dormant", "7d", 1.0_f64, Some(false), None),
+            ("unknown", "7d", 0.12_f64, None, None),
+         ]
       );
    }
 

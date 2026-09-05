@@ -16,7 +16,7 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
    let accounts = state.pools.snapshots().await;
 
    let mut out = String::with_capacity(4096);
-   render_accounts(&mut out, &accounts);
+   render_accounts(&mut out, &accounts, clock::unix_now());
    match state.db.usage_metrics().await {
       Ok(rows) => render_usage(&mut out, &rows),
       Err(err) => tracing::error!("reading usage metrics: {err}"),
@@ -41,7 +41,7 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
    ([(CONTENT_TYPE, "text/plain; version=0.0.4")], out).into_response()
 }
 
-fn render_accounts(out: &mut String, accounts: &[AccountSnapshot]) {
+fn render_accounts(out: &mut String, accounts: &[AccountSnapshot], now: i64) {
    // An info metric keeps slow-moving identity off the sampled series while
    // still letting a dashboard group or weight by it, e.g.
    //   slop_account_utilization_ratio * on(account) group_left(plan) slop_account_info
@@ -55,7 +55,6 @@ fn render_accounts(out: &mut String, accounts: &[AccountSnapshot]) {
       let labels = [("plan", plan), ("trusted", bool_label(snap.trusted))];
       account(out, "slop_account_info", snap, &labels, 1.0_f64);
    }
-   let now = clock::unix_now();
    for (name, help, get) in ACCOUNT_GAUGES {
       gauge(out, name, help);
       for snap in accounts {
@@ -84,6 +83,11 @@ fn render_accounts(out: &mut String, accounts: &[AccountSnapshot]) {
          model's allowance rather than the account's, so it is not comparable \
          to slop_account_utilization_ratio",
    );
+   gauge(
+      out,
+      "slop_account_model_window_reset_seconds",
+      "Seconds until the model's own limit window rolls over",
+   );
    for snap in accounts {
       let Some(usage) = snap.usage.as_ref() else {
          continue;
@@ -92,6 +96,7 @@ fn render_accounts(out: &mut String, accounts: &[AccountSnapshot]) {
          let labels = [
             ("window", window.window.as_str()),
             ("model", window.model.as_str()),
+            ("active", window.is_active.map_or("unknown", bool_label)),
          ];
          account(
             out,
@@ -100,6 +105,15 @@ fn render_accounts(out: &mut String, accounts: &[AccountSnapshot]) {
             &labels,
             window.utilization,
          );
+         if let Some(reset) = window.resets_at {
+            account(
+               out,
+               "slop_account_model_window_reset_seconds",
+               snap,
+               &labels,
+               (reset - now).max(0),
+            );
+         }
       }
    }
 }
@@ -415,4 +429,79 @@ const fn bool_label(value: bool) -> &'static str {
 fn label(text: &str) -> String {
    let text = if text.is_empty() { "none" } else { text };
    format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+#[cfg(test)]
+mod tests {
+   use super::*;
+   use crate::pool::{AccountUsage, ModelWindow};
+
+   #[test]
+   fn model_quota_metrics_keep_activity_and_matching_resets() {
+      let now = 1_800_000_000_i64;
+      let snapshot = AccountSnapshot {
+         provider: Provider::Anthropic,
+         display: "claude".into(),
+         plan: None,
+         trusted: false,
+         status: 0,
+         cooldown_seconds: 0,
+         consecutive_fails: 0,
+         usage: Some(AccountUsage {
+            windows: vec![UsageWindow {
+               name: "5h".into(),
+               utilization: 1.0,
+               resets_at: Some(now + 180),
+            }],
+            model_windows: vec![
+               ModelWindow {
+                  model: "fable".into(),
+                  window: "7d".into(),
+                  utilization: 0.25,
+                  is_active: Some(true),
+                  resets_at: Some(now + 86400),
+               },
+               ModelWindow {
+                  model: "dormant".into(),
+                  window: "7d".into(),
+                  utilization: 1.0,
+                  is_active: Some(false),
+                  resets_at: Some(now - 1),
+               },
+               ModelWindow {
+                  model: "unknown".into(),
+                  window: "7d".into(),
+                  utilization: 0.12,
+                  is_active: None,
+                  resets_at: None,
+               },
+            ],
+            ..AccountUsage::default()
+         }),
+      };
+      let mut out = String::new();
+      render_accounts(&mut out, &[snapshot], now);
+      for (model, active, utilization, reset) in [
+         ("fable", "true", "0.25", Some("86400")),
+         ("dormant", "false", "1", Some("0")),
+         ("unknown", "unknown", "0.12", None),
+      ] {
+         let labels = format!(
+            "{{provider=\"anthropic\",account=\"claude\",window=\"7d\",model=\"{model}\",active=\"{active}\"}}"
+         );
+         assert!(out.contains(&format!(
+            "slop_account_model_utilization_ratio{labels} {utilization}\n"
+         )));
+         let metric = format!("slop_account_model_window_reset_seconds{labels}");
+         if let Some(reset) = reset {
+            assert!(out.contains(&format!("{metric} {reset}\n")));
+         } else {
+            assert!(!out.contains(&metric));
+         }
+      }
+      assert!(!out.contains(
+         "slop_account_utilization_ratio{provider=\"anthropic\",account=\"claude\",window=\"7d\"}"
+      ));
+      assert!(out.contains("slop_account_window_reset_seconds{provider=\"anthropic\",account=\"claude\",window=\"5h\"} 180\n"));
+   }
 }

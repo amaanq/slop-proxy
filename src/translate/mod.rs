@@ -19,6 +19,15 @@ use serde_json::value::{RawValue, to_raw_value};
 use crate::codex::sse::EventStream;
 use crate::codex::types::{OutputContentPart, OutputItem, ResponsesEvent, SummaryPart, Usage};
 
+/// Zen's upstream 400s `max_output_tokens` below 16, and `CodexClient::post`
+/// already salvages that by stripping the field rather than clamping it.
+pub const MIN_MAX_OUTPUT_TOKENS: u64 = 16;
+
+/// A cap the upstream will accept, or `None` to leave the field off entirely.
+pub fn usable_cap(cap: Option<u64>) -> Option<u64> {
+   cap.filter(|&cap| cap >= MIN_MAX_OUTPUT_TOKENS)
+}
+
 /// A tagged or untagged enum, and anything behind a `flatten`, buffers the
 /// map first, and `RawValue` cannot be read back out of that buffer.
 pub fn buffered_raw<'de, D>(deserializer: D) -> Result<Option<Box<RawValue>>, D::Error>
@@ -521,6 +530,13 @@ impl Aggregated {
 #[cfg(test)]
 mod tests {
    use super::*;
+
+   #[test]
+   fn a_cap_too_small_for_any_answer_is_dropped_not_clamped() {
+      assert_eq!(usable_cap(None), None);
+      assert_eq!(usable_cap(Some(8)), None);
+      assert_eq!(usable_cap(Some(16)), Some(16));
+   }
 
    #[test]
    fn signature_roundtrip() {

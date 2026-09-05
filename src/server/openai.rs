@@ -30,7 +30,7 @@ use crate::provider::Provider;
 use crate::translate::chat::ChatRequest;
 use crate::translate::openai_req;
 use crate::translate::openai_stream::{OpenAiStream, render_aggregated};
-use crate::translate::{StopKind, UsageCapture, aggregate, model_map};
+use crate::translate::{StopKind, UsageCapture, aggregate, model_map, usable_cap};
 
 const DIALECT: Dialect = Dialect::OpenAi;
 
@@ -356,6 +356,20 @@ struct TextPart {
    text: String,
 }
 
+/// Zen 400s any `max_output_tokens` under 16, and no other provider wants it either.
+fn drop_unusable_max_output_tokens(rest: &mut serde_json::Map<String, Value>, user: &str) {
+   let Some(value) = rest.get("max_output_tokens") else {
+      return;
+   };
+   let Some(cap) = value.as_u64() else {
+      return;
+   };
+   if usable_cap(Some(cap)).is_none() {
+      tracing::debug!(cap, user = %user, "dropped a max_output_tokens below the upstream floor");
+      rest.remove("max_output_tokens");
+   }
+}
+
 /// Zen 400s these codex-only items as `input[N] did not match any supported type`.
 fn zen_input_fixups(rest: &mut serde_json::Map<String, Value>) -> ZenFixups {
    let mut fixes = ZenFixups::default();
@@ -512,6 +526,7 @@ pub async fn responses_passthrough(
       req.reasoning.get_or_insert_default().effort =
          Some(model_map::clamp_effort(&resolved.model, &effort));
    }
+   drop_unusable_max_output_tokens(&mut req.rest, &auth.user);
 
    if provider == Provider::Zen {
       let fixes = zen_input_fixups(&mut req.rest);
@@ -937,6 +952,21 @@ mod passthrough_tests {
       assert_eq!(out["input"], body["input"]);
       assert_eq!(out["tools"], body["tools"]);
       assert_eq!(out["reasoning"], body["reasoning"]);
+   }
+
+   #[test]
+   fn a_cap_below_the_upstream_floor_is_stripped_from_a_relayed_body() {
+      let mut rest = serde_json::json!({"max_output_tokens": 8}).as_object().unwrap().clone();
+      drop_unusable_max_output_tokens(&mut rest, "u1");
+      assert!(!rest.contains_key("max_output_tokens"));
+
+      let mut rest = serde_json::json!({"max_output_tokens": 4096}).as_object().unwrap().clone();
+      drop_unusable_max_output_tokens(&mut rest, "u1");
+      assert_eq!(rest["max_output_tokens"], 4096);
+
+      let mut rest = serde_json::json!({"max_output_tokens": "auto"}).as_object().unwrap().clone();
+      drop_unusable_max_output_tokens(&mut rest, "u1");
+      assert_eq!(rest["max_output_tokens"], "auto");
    }
 }
 

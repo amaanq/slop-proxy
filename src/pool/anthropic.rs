@@ -104,6 +104,22 @@ impl Pool<AnthropicClient> {
          };
          match self.backend.usage(&token).await {
             Ok(usage) => {
+               match self
+                  .slots
+                  .clear_cooldown_if(&slot, |until| usage.cooldown_is_obsolete(until))
+                  .await
+               {
+                  Ok(true) => tracing::info!(
+                     account = %slot.display,
+                     "cleared cooldown for an inactive Anthropic quota window"
+                  ),
+                  Ok(false) => {},
+                  Err(err) => tracing::warn!(
+                     account = %slot.display,
+                     error = %err,
+                     "failed to clear obsolete Anthropic cooldown"
+                  ),
+               }
                let windows = usage
                   .windows()
                   .map(|(name, window)| UsageWindow {
@@ -142,14 +158,19 @@ impl Pool<AnthropicClient> {
 
 #[cfg(test)]
 mod tests {
+   use axum::routing::get;
    use std::collections::HashSet;
    use std::env;
    use std::sync::Arc;
+   use tokio::net::TcpListener;
 
    use super::*;
    use crate::clock;
    use crate::config::AnthropicConfig;
    use crate::db::Db;
+   use crate::db::accounts::{AccountStatus, NewAccount};
+   use crate::oauth::TokenSet;
+   use crate::provider::AuthMode;
    use uuid::Uuid;
 
    fn test_pool(ids: &[(i64, bool)]) -> AnthropicPool {
@@ -278,5 +299,97 @@ mod tests {
          reranked[0].id, fresh.id,
          "locked account still ranked first"
       );
+   }
+
+   #[tokio::test]
+   async fn polling_clears_only_the_obsolete_window_and_persists_it() {
+      let now = clock::unix_now();
+      let weekly_reset = now + 86400;
+      let session_reset = now + 3600;
+      let usage = serde_json::json!({
+         "five_hour": {"utilization": 26.0_f64},
+         "limits": [
+            {"group": "session", "is_active": true, "percent": 26_i32},
+            {"group": "weekly", "is_active": false, "percent": 6_i32,
+             "resets_at": jiff::Timestamp::from_second(weekly_reset).unwrap().to_string()}
+         ]
+      });
+      let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+      let addr = listener.local_addr().unwrap();
+      let app = axum::Router::new().route(
+         "/api/oauth/usage",
+         get(move || {
+            let usage = usage.clone();
+            async move { axum::Json(usage) }
+         }),
+      );
+      let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+      let db =
+         Db::open(&env::temp_dir().join(format!("slop-inactive-quota-{}.db", Uuid::new_v4())))
+            .unwrap();
+      for (label, status, until) in [
+         ("obsolete", AccountStatus::Cooldown, weekly_reset - 1),
+         ("session", AccountStatus::Cooldown, session_reset),
+         ("disabled", AccountStatus::Disabled, weekly_reset - 1),
+      ] {
+         let id = db
+            .upsert_account(NewAccount {
+               provider: Provider::Anthropic,
+               id: label,
+               email: None,
+               label: Some(label),
+               plan: None,
+               tokens: &TokenSet {
+                  access_token: "test-token".into(),
+                  refresh_token: "test-refresh".into(),
+                  id_token: None,
+                  expires_at: Some(now + 3600),
+               },
+               auth_mode: AuthMode::OAuth,
+            })
+            .await
+            .unwrap();
+         db.set_account_status(id, status, Some(until), None)
+            .await
+            .unwrap();
+      }
+      for label in ["session", "disabled"] {
+         let account = db.find_account(label).await.unwrap().unwrap();
+         assert!(
+            !db.clear_account_cooldown(account.id, weekly_reset - 1)
+               .await
+               .unwrap()
+         );
+      }
+      let config = AnthropicConfig {
+         base_url: format!("http://{addr}"),
+         ..AnthropicConfig::default()
+      };
+      let pool = AnthropicPool::load(db.clone(), AnthropicClient::new(config.clone()))
+         .await
+         .unwrap();
+      pool.poll_usage().await;
+      server.abort();
+
+      let reloaded = AnthropicPool::load(db.clone(), AnthropicClient::new(config))
+         .await
+         .unwrap();
+      for checked in [&pool, &reloaded] {
+         for slot in checked.slots.list().await {
+            assert_eq!(
+               checked.slots.try_claim(&slot).await,
+               slot.display == "obsolete"
+            );
+         }
+      }
+      for (label, status, until) in [
+         ("obsolete", AccountStatus::Active, None),
+         ("session", AccountStatus::Cooldown, Some(session_reset)),
+         ("disabled", AccountStatus::Disabled, Some(weekly_reset - 1)),
+      ] {
+         let account = db.find_account(label).await.unwrap().unwrap();
+         assert_eq!(account.status, status);
+         assert_eq!(account.cooldown_until, until);
+      }
    }
 }

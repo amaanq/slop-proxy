@@ -216,4 +216,13 @@ impl Db {
         )?;
       Ok(())
    }
+
+   pub async fn clear_account_cooldown(&self, id: i64, expected_until: i64) -> Result<bool> {
+      let conn = self.0.lock().await;
+      Ok(conn.execute(
+         "UPDATE accounts SET status = 'active', cooldown_until = NULL, updated_at = unixepoch()
+          WHERE id = ?1 AND status = 'cooldown' AND cooldown_until = ?2",
+         params![id, expected_until],
+      )? > 0)
+   }
 }

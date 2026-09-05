@@ -241,6 +241,7 @@ pub async fn messages(
          Route {
             session_key: &key,
             model: &peek.model,
+            user: &auth.user,
             prefer_trusted: false,
          },
          AnthropicRelay {
@@ -336,6 +337,7 @@ pub async fn glm(
          Route {
             session_key: &key,
             model: &peek.model,
+            user: &auth.user,
             prefer_trusted: false,
          },
          GlmRelay {
@@ -416,6 +418,7 @@ pub async fn count_tokens(
          Route {
             session_key: &key,
             model: &peek.model,
+            user: &auth.user,
             prefer_trusted: false,
          },
          AnthropicRelay {

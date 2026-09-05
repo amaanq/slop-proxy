@@ -145,6 +145,7 @@ impl Pool<CodexClient> {
          .ranked(Route {
             session_key: "",
             model: "",
+            user: "",
             prefer_trusted: true,
          })
          .await

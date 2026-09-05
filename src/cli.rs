@@ -110,6 +110,12 @@ pub enum AccountsCommand {
       #[pound(long)]
       off: bool,
    },
+   /// Restrict an account to these users, comma separated. Omit to allow all.
+   Users {
+      account: String,
+      #[pound(long)]
+      allow: Option<String>,
+   },
 }
 
 #[derive(Parse)]
@@ -203,6 +209,9 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
          } => accounts_add_key(&db, provider, &key, label.as_deref(), referer.as_deref()).await,
          AccountsCommand::Remove { account } => accounts_remove(&db, &account).await,
          AccountsCommand::Trust { account, off } => accounts_trust(&db, &account, !off).await,
+         AccountsCommand::Users { account, allow } => {
+            accounts_users(&db, &account, allow.as_deref().unwrap_or_default()).await
+         },
       },
       Command::Token { command } => match command {
          TokenCommand::Create {
@@ -349,6 +358,27 @@ async fn accounts_trust(db: &Db, account: &str, trusted: bool) -> Result<()> {
       "account {account} is now {}",
       if trusted { "trusted" } else { "untrusted" }
    );
+   Ok(())
+}
+
+async fn accounts_users(db: &Db, account: &str, allow: &str) -> Result<()> {
+   let users: Vec<&str> = allow
+      .split(',')
+      .map(str::trim)
+      .filter(|user| !user.is_empty())
+      .collect();
+   if db
+      .set_account_allowed_users(account, &users.join(","))
+      .await?
+      == 0
+   {
+      bail!("no account matched {account:?}");
+   }
+   if users.is_empty() {
+      println!("account {account} is now open to every user");
+   } else {
+      println!("account {account} now serves only {}", users.join(", "));
+   }
    Ok(())
 }
 

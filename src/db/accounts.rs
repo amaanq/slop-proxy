@@ -42,6 +42,7 @@ pub struct Account {
    pub provider: Provider,
    pub provider_account_id: String,
    pub trusted: bool,
+   pub allowed_users: Vec<String>,
    pub auth_mode: AuthMode,
    pub email: Option<String>,
    pub label: Option<String>,
@@ -55,12 +56,21 @@ pub struct Account {
    pub disabled_reason: Option<String>,
 }
 
+fn parse_users(raw: &str) -> Vec<String> {
+   raw.split(',')
+      .map(str::trim)
+      .filter(|user| !user.is_empty())
+      .map(str::to_owned)
+      .collect()
+}
+
 fn from_row(row: &Row) -> rusqlite::Result<Account> {
    Ok(Account {
       id: row.get("id")?,
       provider: row.get("provider")?,
       provider_account_id: row.get("provider_account_id")?,
       trusted: row.get("trusted")?,
+      allowed_users: parse_users(&row.get::<_, String>("allowed_users")?),
       auth_mode: row.get("auth_mode")?,
       email: row.get("email")?,
       label: row.get("label")?,
@@ -79,7 +89,7 @@ fn from_row(row: &Row) -> rusqlite::Result<Account> {
    })
 }
 
-const COLS: &str = "id, provider, provider_account_id, trusted, auth_mode, email, label, plan_type, access_token, refresh_token, http_referer, access_expires_at, status, cooldown_until, disabled_reason";
+const COLS: &str = "id, provider, provider_account_id, trusted, auth_mode, email, label, plan_type, access_token, refresh_token, http_referer, access_expires_at, status, cooldown_until, disabled_reason, allowed_users";
 
 pub struct NewAccount<'a> {
    pub provider: Provider,
@@ -189,6 +199,16 @@ impl Db {
          "UPDATE accounts SET trusted = ?3, updated_at = unixepoch()
              WHERE id = ?1 OR email = ?2 OR label = ?2",
          params![id, key, trusted],
+      )?)
+   }
+
+   pub async fn set_account_allowed_users(&self, key: &str, users: &str) -> Result<usize> {
+      let conn = self.0.lock().await;
+      let id = key.parse::<i64>().unwrap_or(-1);
+      Ok(conn.execute(
+         "UPDATE accounts SET allowed_users = ?3, updated_at = unixepoch()
+             WHERE id = ?1 OR email = ?2 OR label = ?2",
+         params![id, key, users],
       )?)
    }
 

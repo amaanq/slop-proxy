@@ -1,9 +1,7 @@
 {
-  description = "slop-proxy: serve Anthropic/OpenAI API endpoints from Codex subscription accounts";
+  description = "Serve Anthropic/OpenAI API endpoints from Codex subscription accounts";
 
-  inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs";
-  };
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs";
 
   outputs =
     {
@@ -103,7 +101,7 @@
             };
 
             settings = lib.mkOption {
-              type = settingsFormat.type;
+              inherit (settingsFormat) type;
               default = { };
               description = "Contents of config.toml (codex.*, models.*).";
             };

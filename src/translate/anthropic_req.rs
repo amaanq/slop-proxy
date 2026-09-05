@@ -5,7 +5,7 @@ use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 use serde_json::value::{RawValue, to_raw_value};
 
-use super::{decode_signature, model_map};
+use super::{decode_signature, model_map, usable_cap};
 use crate::codex::types::{
    ContentPart, InputItem, ReasoningConfig, ResponsesRequest, SummaryPart, ToolChoice, ToolDef,
    ToolOutput,
@@ -296,7 +296,7 @@ pub fn to_responses(req: &AnthropicRequest, cfg: &Config) -> ResponsesRequest {
    });
 
    if cfg.codex.forward_max_tokens {
-      out.max_output_tokens = req.max_tokens;
+      out.max_output_tokens = usable_cap(req.max_tokens);
    }
 
    out
@@ -440,13 +440,27 @@ fn tool_result_text(content: Option<&ToolResultContent>) -> String {
 
 #[cfg(test)]
 mod tests {
-   use super::AnthropicRequest;
+   use super::{AnthropicRequest, to_responses};
+   use crate::config::Config;
 
    fn parse(content: &serde_json::Value) -> Result<AnthropicRequest, serde_json::Error> {
       serde_json::from_value(serde_json::json!({
           "model": "m", "max_tokens": 1,
           "messages": [{"role": "user", "content": content}]
       }))
+   }
+
+   #[test]
+   fn a_cap_below_the_upstream_floor_is_not_forwarded() {
+      let mut req = parse(&serde_json::json!("hi")).unwrap();
+
+      req.max_tokens = Some(8);
+      let out = to_responses(&req, &Config::for_tests());
+      assert_eq!(out.max_output_tokens, None);
+
+      req.max_tokens = Some(4096);
+      let out = to_responses(&req, &Config::for_tests());
+      assert_eq!(out.max_output_tokens, Some(4096));
    }
 
    /// A single block the API tolerates used to sink the whole request with

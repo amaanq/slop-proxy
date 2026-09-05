@@ -348,6 +348,24 @@ impl Config {
    }
 }
 
+#[cfg(test)]
+impl Config {
+   pub fn for_tests() -> Self {
+      Self {
+         db_path: PathBuf::new(),
+         bind: String::new(),
+         metrics_bind: None,
+         codex: CodexConfig::default(),
+         anthropic: AnthropicConfig::default(),
+         gemini: GeminiConfig::default(),
+         zen: ZenConfig::default(),
+         glm: GlmConfig::default(),
+         pricing: PricingConfig::default(),
+         models: ModelsConfig::default(),
+      }
+   }
+}
+
 fn xdg_dir(var: &str, fallback: &str) -> PathBuf {
    env::var(var)
       .ok()

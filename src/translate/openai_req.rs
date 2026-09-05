@@ -1,7 +1,7 @@
 use super::TranslateError;
 use super::anthropic_req::empty_schema;
 use super::chat::{ChatContent, ChatMessage, ChatPart, ChatRequest, ChatToolChoice};
-use super::model_map;
+use super::{model_map, usable_cap};
 use crate::codex::types::{
    ContentPart, InputItem, ReasoningConfig, ResponsesRequest, ToolChoice, ToolDef, ToolOutput,
 };
@@ -55,7 +55,7 @@ pub fn to_responses(req: &ChatRequest, cfg: &Config) -> Result<ResponsesRequest,
    });
 
    if cfg.codex.forward_max_tokens {
-      out.max_output_tokens = req.max_completion_tokens.or(req.max_tokens);
+      out.max_output_tokens = usable_cap(req.max_completion_tokens.or(req.max_tokens));
    }
 
    Ok(out)
@@ -134,5 +134,28 @@ fn user_parts(content: Option<&ChatContent>) -> Vec<ContentPart> {
          })
          .collect(),
       None => Vec::new(),
+   }
+}
+
+#[cfg(test)]
+mod tests {
+   use super::*;
+
+   #[test]
+   fn a_cap_below_the_upstream_floor_is_not_forwarded() {
+      let req = ChatRequest {
+         model: "gpt-5".into(),
+         max_tokens: Some(8),
+         ..Default::default()
+      };
+      let out = to_responses(&req, &Config::for_tests()).unwrap();
+      assert_eq!(out.max_output_tokens, None);
+
+      let req = ChatRequest {
+         max_tokens: Some(4096),
+         ..req
+      };
+      let out = to_responses(&req, &Config::for_tests()).unwrap();
+      assert_eq!(out.max_output_tokens, Some(4096));
    }
 }

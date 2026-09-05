@@ -243,6 +243,29 @@ impl Slots {
       slot.state.lock().await.consecutive_fails = 0;
    }
 
+   pub async fn clear_cooldown_if<F>(&self, slot: &Slot, is_obsolete: F) -> eyre::Result<bool>
+   where
+      F: FnOnce(i64) -> bool,
+   {
+      let until = {
+         let state = slot.state.lock().await;
+         match state.status {
+            Status::Cooldown { until } if is_obsolete(until) => until,
+            Status::Active | Status::Disabled | Status::Cooldown { .. } => return Ok(false),
+         }
+      };
+      if !self.db.clear_account_cooldown(slot.id, until).await? {
+         return Ok(false);
+      }
+      let mut state = slot.state.lock().await;
+      if state.status != (Status::Cooldown { until }) {
+         return Ok(false);
+      }
+      state.status = Status::Active;
+      state.consecutive_fails = 0;
+      Ok(true)
+   }
+
    pub async fn note_usage(&self, slot: &Slot, mut usage: AccountUsage) {
       usage.observed_at = clock::unix_now();
       slot.state.lock().await.usage = Some(usage);

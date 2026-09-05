@@ -53,7 +53,9 @@ pub struct Limit {
    #[serde(default)]
    pub scope: Option<Scope>,
    #[serde(default)]
-   pub is_active: bool,
+   pub is_active: Option<bool>,
+   #[serde(default)]
+   pub resets_at: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -101,13 +103,35 @@ impl Usage {
       let dormant: Vec<&'static str> = self
          .limits
          .iter()
-         .filter(|limit| limit.scope.is_none() && !limit.is_active)
+         .filter(|limit| limit.scope.is_none() && limit.is_active == Some(false))
          .map(Limit::window_name)
          .collect();
       [("5h", &self.five_hour), ("7d", &self.seven_day)]
          .into_iter()
          .filter_map(|(name, slot)| slot.as_ref().map(|window| (name, window)))
          .filter(move |&(ref name, _)| !dormant.contains(name))
+   }
+
+   pub fn cooldown_is_obsolete(&self, until: i64) -> bool {
+      if self
+         .windows()
+         .any(|(_, window)| window.utilization >= 100.0_f64 || window.locked_reason.is_some())
+         || self
+            .limits
+            .iter()
+            .any(|limit| limit.is_active != Some(false) && limit.percent >= 100.0_f64)
+      {
+         return false;
+      }
+      self.limits.iter().any(|limit| {
+         limit.scope.is_none()
+            && limit.is_active == Some(false)
+            && limit
+               .resets_at
+               .as_deref()
+               .and_then(|reset| reset.parse::<jiff::Timestamp>().ok())
+               .is_some_and(|reset| reset.as_second().abs_diff(until) <= 1)
+      })
    }
 
    /// Per-model sub-limits, measured against their own allowance rather than
@@ -290,5 +314,56 @@ mod tests {
    fn a_payload_without_limits_reports_none() {
       let usage: Usage = serde_json::from_str(r#"{"seven_day": {"utilization": 10.0}}"#).unwrap();
       assert_eq!(usage.model_windows().count(), 0);
+   }
+
+   #[test]
+   fn only_an_explicitly_inactive_matching_window_clears_a_cooldown() {
+      let reset = "2026-09-06T17:00:00.213156+00:00";
+      let until = reset.parse::<jiff::Timestamp>().unwrap().as_second();
+      let limit = serde_json::json!({
+         "group": "weekly", "is_active": false, "percent": 0_i32, "resets_at": reset
+      });
+      let parse = |value| serde_json::from_value::<Usage>(value).unwrap();
+      let usage = parse(serde_json::json!({
+         "five_hour": {"utilization": 26.0_f64}, "limits": [limit]
+      }));
+      assert!(usage.cooldown_is_obsolete(until));
+      assert!(usage.cooldown_is_obsolete(until - 1));
+      assert!(!usage.cooldown_is_obsolete(until - 3600));
+
+      for (field, value) in [
+         ("is_active", serde_json::json!(true)),
+         ("is_active", serde_json::Value::Null),
+         ("resets_at", serde_json::Value::Null),
+         ("resets_at", serde_json::json!("invalid")),
+         (
+            "scope",
+            serde_json::json!({"model": {"display_name": "Fable"}}),
+         ),
+      ] {
+         let mut changed = limit.clone();
+         changed[field] = value;
+         assert!(!parse(serde_json::json!({"limits": [changed]})).cooldown_is_obsolete(until));
+      }
+      for window in [
+         serde_json::json!({"utilization": 100.0_f64}),
+         serde_json::json!({"utilization": 0.0_f64, "locked_reason": "quota"}),
+      ] {
+         assert!(
+            !parse(serde_json::json!({
+               "five_hour": window, "limits": [limit]
+            }))
+            .cooldown_is_obsolete(until)
+         );
+      }
+      let scoped = serde_json::json!({
+         "group": "weekly", "is_active": true, "percent": 100_i32,
+         "scope": {"model": {"display_name": "Fable"}}
+      });
+      assert!(!parse(serde_json::json!({"limits": [limit, scoped]})).cooldown_is_obsolete(until));
+      assert!(
+         !parse(serde_json::json!({"five_hour": {"utilization": 0.0_f64}}))
+            .cooldown_is_obsolete(until)
+      );
    }
 }

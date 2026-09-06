@@ -97,8 +97,12 @@ pub trait Backend: Send + Sync + 'static {
       req: &Self::Request,
    ) -> Result<Self::Response, SendError>;
 
-   async fn send_anonymous(&self, req: &Self::Request) -> Result<Self::Response, SendError> {
-      let _ = req;
+   async fn send_anonymous(
+      &self,
+      route: Route<'_>,
+      req: &Self::Request,
+   ) -> Result<Self::Response, SendError> {
+      let _ = (route, req);
       Err(SendError::Network("no accounts".into()))
    }
 
@@ -255,7 +259,7 @@ impl<B: Backend> Pool<B> {
       let ranked = self.ranked(route).await;
       if ranked.is_empty() {
          if B::ANONYMOUS {
-            return match self.backend.send_anonymous(req).await {
+            return match self.backend.send_anonymous(route, req).await {
                Ok(resp) => Ok((None, resp)),
                Err(SendError::BadRequest(body)) => Err(PoolError::BadRequest {
                   provider: B::PROVIDER,

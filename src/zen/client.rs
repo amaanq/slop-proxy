@@ -74,6 +74,7 @@ impl ZenClient {
    pub async fn post(
       &self,
       key: Option<&str>,
+      session: &str,
       req: &Bytes,
    ) -> Result<reqwest::Response, SendError> {
       let anonymous = key.is_none_or(str::is_empty);
@@ -83,7 +84,7 @@ impl ZenClient {
       let mut tried = 0;
       for index in available.iter().copied().take(EGRESS_ATTEMPTS) {
          tried += 1;
-         match self.send_via(index, key, req).await {
+         match self.send_via(index, key, session, req).await {
             Ok(response) => {
                if tried > 1 {
                   tracing::info!(
@@ -128,12 +129,14 @@ impl ZenClient {
       &self,
       index: usize,
       key: Option<&str>,
+      session: &str,
       req: &Bytes,
    ) -> Result<reqwest::Response, SendError> {
       let mut builder = self.egresses[index]
          .http
          .post(format!("{}/responses", self.base_url.trim_end_matches('/')))
-         .header("Accept", "text/event-stream");
+         .header("Accept", "text/event-stream")
+         .header("x-opencode-session", session);
       if let Some(key) = key.filter(|key| !key.is_empty()) {
          builder = builder.bearer_auth(key);
       }
@@ -366,7 +369,11 @@ mod tests {
 
       assert_eq!(client.models().await.unwrap(), ["muse-test"]);
       client
-         .post(None, &Bytes::from_static(br#"{"model":"muse-test"}"#))
+         .post(
+            None,
+            "sess-test",
+            &Bytes::from_static(br#"{"model":"muse-test"}"#),
+         )
          .await
          .unwrap();
 
@@ -390,11 +397,19 @@ mod tests {
       .unwrap();
 
       client
-         .post(None, &Bytes::from_static(br#"{"model":"muse-test"}"#))
+         .post(
+            None,
+            "sess-test",
+            &Bytes::from_static(br#"{"model":"muse-test"}"#),
+         )
          .await
          .unwrap();
       client
-         .post(None, &Bytes::from_static(br#"{"model":"muse-test"}"#))
+         .post(
+            None,
+            "sess-test",
+            &Bytes::from_static(br#"{"model":"muse-test"}"#),
+         )
          .await
          .unwrap();
 
@@ -439,7 +454,7 @@ mod tests {
       .unwrap();
 
       let err = client
-         .post(None, &Bytes::from_static(b"{}"))
+         .post(None, "sess-test", &Bytes::from_static(b"{}"))
          .await
          .unwrap_err();
       assert!(
@@ -455,7 +470,7 @@ mod tests {
       assert_eq!(seen(&proxies).await, EGRESS_ATTEMPTS);
 
       let exhausted = client
-         .post(None, &Bytes::from_static(b"{}"))
+         .post(None, "sess-test", &Bytes::from_static(b"{}"))
          .await
          .unwrap_err();
       assert!(

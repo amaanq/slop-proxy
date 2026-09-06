@@ -279,52 +279,11 @@ pub async fn messages(
    record.account_id = account_id;
    record.status = i64::from(resp.status().as_u16());
 
-   let streaming = resp
-      .headers()
-      .get("content-type")
-      .and_then(|value| value.to_str().ok())
-      .is_some_and(|content_type| content_type.contains("text/event-stream"));
    let mut builder = forwarded_response(&resp);
    for (name, value) in pool_rate_limit_headers(&state.pools.anthropic.pool_windows().await) {
       builder = builder.header(name, value);
    }
-
-   if streaming {
-      let capture = UsageCapture::default();
-      let mut scan = SseScan::new(capture.clone());
-      relayed(
-         builder,
-         resp,
-         LogGuard::new(state, capture.clone(), record, started),
-         capture,
-         DIALECT,
-         move |bytes| {
-            scan.feed(&bytes);
-            bytes
-         },
-         Bytes::new,
-      )
-   } else {
-      let ok = resp.status().is_success();
-      let bytes = match read_body(&state, &record, DIALECT, resp).await {
-         Ok(bytes) => bytes,
-         Err(resp) => return resp,
-      };
-      if ok {
-         if let Ok(msg) = serde_json::from_slice::<MessageEnvelope>(&bytes) {
-            record.input_tokens = msg.usage.input_tokens;
-            record.output_tokens = msg.usage.output_tokens;
-            record.cache_read_tokens = msg.usage.cache_read_input_tokens;
-            record.cache_write_tokens = msg.usage.cache_creation_input_tokens;
-         }
-      } else {
-         record.error_kind = Some("upstream_error".into());
-      }
-      log_usage(&state, record);
-      builder
-         .body(Body::from(bytes))
-         .unwrap_or_else(|err| error_response(DIALECT, 502, "api_error", &err.to_string()))
-   }
+   relay_response(state, record, resp, builder, started).await
 }
 
 /// Z.ai answers the messages API directly, so this is the anthropic relay
@@ -375,12 +334,22 @@ pub async fn glm(
    record.account_id = account_id;
    record.status = i64::from(resp.status().as_u16());
 
+   let builder = forwarded_response(&resp);
+   relay_response(state, record, resp, builder, started).await
+}
+
+async fn relay_response(
+   state: AppState,
+   mut record: crate::db::usage::UsageRecord,
+   resp: reqwest::Response,
+   builder: Builder,
+   started: Instant,
+) -> Response {
    let streaming = resp
       .headers()
       .get("content-type")
       .and_then(|value| value.to_str().ok())
       .is_some_and(|content_type| content_type.contains("text/event-stream"));
-   let builder = forwarded_response(&resp);
 
    if streaming {
       let capture = UsageCapture::default();
@@ -414,6 +383,8 @@ pub async fn glm(
    } else {
       record.error_kind = Some("upstream_error".into());
    }
+   record.duration_ms = Some(started.elapsed().as_millis() as i64);
+   record.response_bytes = bytes.len() as i64;
    log_usage(&state, record);
    builder
       .body(Body::from(bytes))
@@ -539,7 +510,6 @@ impl SseScan {
    }
 
    fn feed(&mut self, chunk: &[u8]) {
-      self.capture.note_bytes(chunk.len());
       self.buf.push_str(&String::from_utf8_lossy(chunk));
       let mut consumed = 0;
       while let Some(newline) = self.buf.get(consumed..).and_then(|text| text.find('\n')) {

@@ -272,15 +272,8 @@ impl Drop for LogGuard {
    fn drop(&mut self) {
       let mut record = self.record.clone();
       let cap = self.capture.snapshot();
-      pipeline::apply_snapshot(&mut record, &cap);
-      record.error_kind = cap.error_kind;
-      record.response_bytes = cap.response_bytes;
+      pipeline::apply_snapshot(&mut record, &cap, self.start);
       let finished = cap.completed || cap.stop_reason.is_some();
-      record.stop_reason = cap.stop_reason.unwrap_or_default();
-      record.tools_called = cap.tools_called.join(",");
-      record.ttft_ms = cap
-         .first_byte_at
-         .map(|tick| tick.saturating_duration_since(self.start).as_millis() as i64);
       if !finished && record.error_kind.is_none() {
          record.error_kind = Some(if cap.upstream_eof {
             "upstream_eof".into()
@@ -301,7 +294,6 @@ impl Drop for LogGuard {
              "stream ended without usage"
          );
       }
-      record.duration_ms = Some(self.start.elapsed().as_millis() as i64);
       price(&self.state.prices, &mut record);
       write_usage(&self.state.db, record);
    }

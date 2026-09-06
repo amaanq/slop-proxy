@@ -174,8 +174,10 @@ pub async fn chat_completions(
    {
       let capture = UsageCapture::default();
       capture.record(&usage.into());
-      apply_snapshot(&mut record, &capture.snapshot());
+      apply_snapshot(&mut record, &capture.snapshot(), started);
    }
+   record.duration_ms = Some(started.elapsed().as_millis() as i64);
+   record.response_bytes = bytes.len() as i64;
    super::log_usage(&state, record);
    builder
       .body(Body::from(bytes))
@@ -411,9 +413,11 @@ pub async fn native(
       if let Some(usage) = value.usage_metadata.as_ref() {
          let capture = UsageCapture::default();
          capture.record(&chat_usage(usage).into());
-         apply_snapshot(&mut record, &capture.snapshot());
+         apply_snapshot(&mut record, &capture.snapshot(), started);
       }
    }
+   record.duration_ms = Some(started.elapsed().as_millis() as i64);
+   record.response_bytes = bytes.len() as i64;
    super::log_usage(&state, record);
    builder
       .body(Body::from(bytes))

@@ -3,7 +3,9 @@
 
 use std::collections::VecDeque;
 use std::convert::Infallible;
+use std::time::Instant;
 
+use axum::body::HttpBody as _;
 use axum::body::{Body, Bytes};
 use axum::http::response::Builder;
 use axum::response::IntoResponse as _;
@@ -71,12 +73,36 @@ pub async fn read_body(
    })
 }
 
-pub const fn apply_snapshot(record: &mut UsageRecord, snap: &CapturedUsage) {
+pub fn apply_snapshot(record: &mut UsageRecord, snap: &CapturedUsage, started: Instant) {
+   record.duration_ms = Some(started.elapsed().as_millis() as i64);
+   record.ttft_ms = snap
+      .first_byte_at
+      .map(|tick| tick.saturating_duration_since(started).as_millis() as i64);
    record.input_tokens = snap.input_tokens;
    record.output_tokens = snap.output_tokens;
    record.cache_read_tokens = snap.cache_read_tokens;
    record.cache_write_tokens = snap.cache_write_tokens;
    record.reasoning_tokens = snap.reasoning_tokens;
+   if snap.error_kind.is_some() {
+      record.error_kind.clone_from(&snap.error_kind);
+   }
+   if let Some(reason) = &snap.stop_reason {
+      record.stop_reason.clone_from(reason);
+   }
+   record.tools_called = snap.tools_called.join(",");
+   record.response_bytes = snap.response_bytes;
+}
+
+pub fn logged_json(
+   state: &AppState,
+   mut record: UsageRecord,
+   value: impl serde::Serialize,
+) -> Response {
+   let response = axum::Json(value).into_response();
+   record.status = i64::from(response.status().as_u16());
+   record.response_bytes = response.body().size_hint().exact().unwrap_or(0) as i64;
+   super::log_usage(state, record);
+   response
 }
 
 /// Upstream bytes to the client, `each` seeing every chunk on the way (and
@@ -100,7 +126,11 @@ where
       .map(move |item| {
          let _ = &guard;
          match item {
-            Ok(bytes) => Ok(each(bytes)),
+            Ok(bytes) => {
+               let bytes = each(bytes);
+               capture.note_bytes(bytes.len());
+               Ok(bytes)
+            },
             Err(err) => {
                capture.fail("upstream_stream_error");
                Err(err)
@@ -109,7 +139,9 @@ where
       })
       .chain(stream::once(async move {
          eof.note_upstream_eof();
-         Ok(tail())
+         let bytes = tail();
+         eof.note_bytes(bytes.len());
+         Ok(bytes)
       }));
    builder
       .body(Body::from_stream(stream))

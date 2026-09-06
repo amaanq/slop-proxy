@@ -58,10 +58,13 @@ const MOCK_SSE: &str = concat!(
    "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_123\",\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":20},\"output_tokens_details\":{\"reasoning_tokens\":5}}}}\n\n",
 );
 
-async fn spawn_mock_upstream() -> String {
+async fn spawn_mock_upstream(sse: String) -> String {
    let app = Router::new().route(
       "/responses",
-      post(|| async { ([("content-type", "text/event-stream")], MOCK_SSE).into_response() }),
+      post(move || {
+         let sse = sse.clone();
+         async move { ([("content-type", "text/event-stream")], sse).into_response() }
+      }),
    );
    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
    let addr = listener.local_addr().unwrap();
@@ -81,7 +84,15 @@ fn fresh_tokens() -> TokenSet {
 }
 
 async fn spawn_proxy_with(models: ModelsConfig, anthropic_base: Option<String>) -> (String, Db) {
-   let base_url = spawn_mock_upstream().await;
+   spawn_proxy_with_response(models, anthropic_base, MOCK_SSE.into()).await
+}
+
+async fn spawn_proxy_with_response(
+   models: ModelsConfig,
+   anthropic_base: Option<String>,
+   sse: String,
+) -> (String, Db) {
+   let base_url = spawn_mock_upstream(sse).await;
    let db_path = env::temp_dir().join(format!("slop-test-{}.db", uuid::Uuid::new_v4()));
    let db = Db::open(&db_path).unwrap();
    db.create_token("alice", "sp-test", "sp-test")
@@ -252,6 +263,12 @@ async fn openai_non_streaming_end_to_end() {
    let by_user = db.usage_by(UsageDim::User, 0, i64::MAX).await.unwrap();
    assert_eq!(by_user[0].key, "alice");
    assert_eq!(by_user[0].input_tokens, 80);
+   let metrics = db.insight_metrics().await.unwrap();
+   assert_eq!(
+      metrics[0].response_bytes,
+      serde_json::to_vec(&value).unwrap().len() as i64
+   );
+   assert_eq!(metrics[0].ttft_samples, 1);
 }
 
 #[tokio::test]
@@ -503,17 +520,23 @@ async fn token_request_limit_enforced() {
 const GEMINI_REJECTION: &str = "{\n  \"error\": {\n    \"code\": 400,\n    \"message\": \"contents is not specified\",\n    \"status\": \"INVALID_ARGUMENT\"\n  }\n}\n";
 
 async fn spawn_proxy_with_gemini() -> (String, Db) {
-   let app = Router::new().route(
-      "/models/{spec}",
-      post(|| async {
-         (
-            StatusCode::BAD_REQUEST,
-            [("content-type", "application/json")],
-            GEMINI_REJECTION,
-         )
-            .into_response()
-      }),
-   );
+   spawn_proxy_with_gemini_reply(
+      StatusCode::BAD_REQUEST,
+      "application/json",
+      GEMINI_REJECTION.into(),
+   )
+   .await
+}
+
+async fn spawn_proxy_with_gemini_reply(
+   status: StatusCode,
+   content_type: &'static str,
+   body: String,
+) -> (String, Db) {
+   let app = Router::new().fallback(move || {
+      let body = body.clone();
+      async move { (status, [("content-type", content_type)], body).into_response() }
+   });
    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
    let addr = listener.local_addr().unwrap();
    tokio::spawn(async move {
@@ -604,6 +627,67 @@ async fn a_rejected_gemini_request_keeps_googles_reason() {
 }
 
 #[tokio::test]
+async fn responses_preserve_terminal_status_and_bill_partial_usage() {
+   for kind in ["completed", "incomplete", "failed"] {
+      let terminal = serde_json::json!({
+         "type": format!("response.{kind}"),
+         "response": {"id":"r", "status":kind, "output":[], "usage":{"input_tokens":12,"output_tokens":5}}
+      });
+      let source = format!("event: response.{kind}\ndata: {terminal}\n\n");
+      let (base, db) = spawn_proxy_with_response(ModelsConfig::default(), None, source).await;
+      for streaming in [false, true] {
+         let response = reqwest::Client::new()
+            .post(format!("{base}/v1/responses"))
+            .bearer_auth("sp-test")
+            .json(&serde_json::json!({"model":"gpt-test","stream":streaming,"input":[]}))
+            .timeout(std::time::Duration::from_secs(2))
+            .send()
+            .await
+            .unwrap();
+         assert_eq!(response.status(), 200);
+         if streaming {
+            assert!(
+               response
+                  .text()
+                  .await
+                  .unwrap()
+                  .contains(&format!("response.{kind}"))
+            );
+         } else {
+            let response: serde_json::Value = response.json().await.unwrap();
+            assert_eq!(response["status"], kind);
+            assert_eq!(response["usage"]["output_tokens"], 5);
+         }
+      }
+      db.flush().await.unwrap();
+      let rows = db.usage_metrics().await.unwrap();
+      assert_eq!(rows[0].requests, 2);
+      assert_eq!(rows[0].input_tokens, 24);
+      assert_eq!(rows[0].output_tokens, 10);
+      assert_eq!(rows[0].errors, if kind == "failed" { 2 } else { 0 });
+   }
+}
+
+#[tokio::test]
+async fn responses_eof_is_logged_as_failure() {
+   let (base, db) = spawn_proxy_with_response(ModelsConfig::default(), None,
+      "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"r\"}}\n\n".into()).await;
+   let response = reqwest::Client::new()
+      .post(format!("{base}/v1/responses"))
+      .bearer_auth("sp-test")
+      .json(&serde_json::json!({"model":"gpt-test","input":[]}))
+      .timeout(std::time::Duration::from_secs(2))
+      .send()
+      .await
+      .unwrap();
+   assert_eq!(response.status(), 502);
+   response.bytes().await.unwrap();
+   db.flush().await.unwrap();
+   let rows = db.error_metrics().await.unwrap();
+   assert_eq!(rows[0].kind, "upstream_eof");
+}
+
+#[tokio::test]
 async fn aliases_are_resolved_before_provider_scope_on_every_endpoint() {
    let mut models = ModelsConfig::default();
    models.aliases.insert(
@@ -642,3 +726,55 @@ async fn aliases_are_resolved_before_provider_scope_on_every_endpoint() {
       assert_eq!(response.status(), 403, "{endpoint}");
    }
 }
+
+#[tokio::test]
+async fn bridged_responses_preserve_status_usage_and_output_order() {
+   for (finish, status) in [
+      ("stop", "completed"),
+      ("length", "incomplete"),
+      ("error", "failed"),
+   ] {
+      let first = serde_json::json!({"id":"r","choices":[{"delta":{
+         "content":"partial",
+         "tool_calls":[{"index":0,"id":"upstream","function":{"name":"read","arguments":"{}"}}]
+      }}],"usage":{"prompt_tokens":12,"completion_tokens":5,"total_tokens":17}});
+      let last = if finish == "error" {
+         serde_json::json!({"error":{"message":"boom","code":"UPSTREAM_FAILED"}})
+      } else {
+         serde_json::json!({"choices":[{"finish_reason":finish}]})
+      };
+      let (base, db) = spawn_proxy_with_gemini_reply(
+         StatusCode::OK,
+         "text/event-stream",
+         format!("data: {first}\n\ndata: {last}\n\ndata: [DONE]\n\n"),
+      )
+      .await;
+      let response = reqwest::Client::new()
+         .post(format!("{base}/v1/responses"))
+         .bearer_auth("sp-test")
+         .json(&serde_json::json!({"model":"gemini-test","input":"hello"}))
+         .timeout(std::time::Duration::from_secs(2))
+         .send()
+         .await
+         .unwrap();
+      assert_eq!(response.status(), 200);
+      let value: serde_json::Value = response.json().await.unwrap();
+      assert_eq!(value["status"], status);
+      assert_eq!(value["id"], "r");
+      assert_eq!(value["usage"]["output_tokens"], 5);
+      if status == "failed" {
+         assert_eq!(value["error"]["message"], "boom");
+      } else {
+         assert_eq!(value["output"][0]["type"], "message");
+         assert_eq!(value["output"][0]["content"][0]["text"], "partial");
+         assert_eq!(value["output"][1]["name"], "read");
+      }
+      db.flush().await.unwrap();
+      let rows = db.usage_metrics().await.unwrap();
+      assert_eq!(rows[0].input_tokens, 12);
+      assert_eq!(rows[0].output_tokens, 5);
+      assert_eq!(rows[0].errors, i64::from(status == "failed"));
+   }
+}
+
+mod rate_limits;

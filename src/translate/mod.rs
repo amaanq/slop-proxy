@@ -3,10 +3,15 @@ pub mod anthropic_stream;
 pub mod chat;
 pub mod count_tokens;
 pub mod gemini_bridge;
+pub mod gemini_req;
 pub mod model_map;
 pub mod openai_req;
 pub mod openai_stream;
 
+#[cfg(test)]
+mod stream_tests;
+
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -17,7 +22,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::{RawValue, to_raw_value};
 
 use crate::codex::sse::EventStream;
-use crate::codex::types::{OutputContentPart, OutputItem, ResponsesEvent, SummaryPart, Usage};
+use crate::codex::types::{
+   OutputContentPart, OutputItem, ResponsesEvent, SummaryPart, TerminalKind, Usage,
+};
 
 /// Zen's upstream 400s `max_output_tokens` below 16, and `CodexClient::post`
 /// already salvages that by stripping the field rather than clamping it.
@@ -102,6 +109,28 @@ pub struct CapturedUsage {
 pub struct UsageCapture(pub Arc<Mutex<CapturedUsage>>);
 
 impl UsageCapture {
+   pub fn observe(&self, event: &ResponsesEvent) {
+      self.note_event(event.kind());
+      if let Some((kind, response)) = event.terminal() {
+         if let Some(usage) = &response.usage {
+            self.record_partial(usage);
+         }
+         let mut captured = self.0.lock().unwrap();
+         captured.completed = true;
+         captured.stop_reason = Some(kind.as_str().into());
+         if kind == TerminalKind::Failed {
+            captured.error_kind = Some("upstream_failed".into());
+         }
+      }
+      if let ResponsesEvent::OutputItemDone {
+         item: OutputItem::FunctionCall { name, .. } | OutputItem::CustomToolCall { name, .. },
+         ..
+      } = event
+      {
+         self.note_tool_call(name);
+      }
+   }
+
    /// Codex counts cached tokens inside `input_tokens`, Anthropic reports
    /// them alongside. Subtracting leaves it meaning freshly billed prompt on
    /// both. `reasoning_tokens` stays a subset of `output_tokens`.
@@ -126,6 +155,9 @@ impl UsageCapture {
    }
 
    pub fn note_bytes(&self, len: usize) {
+      if len == 0 {
+         return;
+      }
       let mut captured = self.0.lock().unwrap();
       captured.response_bytes += len as i64;
       captured.first_byte_at.get_or_insert_with(Instant::now);
@@ -220,17 +252,10 @@ pub enum Step {
    Start {
       id: Option<String>,
    },
-   OpenThinking,
-   Thinking(String),
-   Signature(String),
-   OpenText,
-   Text(String),
-   OpenCall {
-      id: String,
-      name: String,
+   Block {
+      index: usize,
+      event: BlockEvent,
    },
-   Args(String),
-   CloseBlock,
    Stop {
       kind: StopKind,
       usage: Usage,
@@ -241,23 +266,23 @@ pub enum Step {
    },
 }
 
-#[derive(PartialEq, Clone, Copy)]
-enum Open {
-   Thinking,
-   Text,
-   Call,
+pub enum BlockEvent {
+   Open(Block),
+   Append(String),
+   Signature(String),
+   Close,
+}
+
+struct TrackedBlock {
+   index: usize,
+   seen: bool,
+   closed: bool,
 }
 
 /// The one state machine every consumer of a Responses stream shares.
-#[expect(
-   clippy::struct_excessive_bools,
-   reason = "each flag answers a different question about the stream so far"
-)]
 pub struct Walker {
-   open: Option<Open>,
+   blocks: BTreeMap<(u64, u64), TrackedBlock>,
    saw_tool: bool,
-   text_seen: bool,
-   args_seen: bool,
    done: bool,
    capture: UsageCapture,
 }
@@ -265,10 +290,8 @@ pub struct Walker {
 impl Walker {
    pub const fn new(capture: UsageCapture) -> Self {
       Self {
-         open: None,
+         blocks: BTreeMap::new(),
          saw_tool: false,
-         text_seen: false,
-         args_seen: false,
          done: false,
          capture,
       }
@@ -279,93 +302,84 @@ impl Walker {
       if self.done {
          return out;
       }
+      self.capture.observe(&event);
       match event {
          ResponsesEvent::Created { response } => out.push(Step::Start { id: response.id }),
-         ResponsesEvent::OutputItemAdded { item, .. } => match item {
-            OutputItem::Reasoning { .. } => self.open(&mut out, Open::Thinking),
+         ResponsesEvent::OutputItemAdded { output_index, item } => match item {
+            OutputItem::Reasoning { .. } => self.open(
+               &mut out,
+               (output_index, 0),
+               Block::Thinking {
+                  text: String::new(),
+                  signature: None,
+               },
+            ),
             OutputItem::FunctionCall { call_id, name, .. } => {
-               self.open(&mut out, Open::Call);
-               out.push(Step::OpenCall { id: call_id, name });
+               self.open(
+                  &mut out,
+                  (output_index, 0),
+                  Block::ToolCall {
+                     id: call_id,
+                     name,
+                     arguments: String::new(),
+                  },
+               );
             },
             OutputItem::Message { .. } | OutputItem::CustomToolCall { .. } | OutputItem::Other => {
             },
          },
-         ResponsesEvent::ReasoningSummaryPartAdded => {
-            if self.open == Some(Open::Thinking) && self.text_seen {
-               out.push(Step::Thinking("\n\n".into()));
+         ResponsesEvent::ReasoningSummaryPartAdded { output_index } => {
+            if self
+               .blocks
+               .get(&(output_index, 0))
+               .is_some_and(|block| block.seen)
+            {
+               self.append(&mut out, (output_index, 0), "\n\n".into());
             }
          },
-         ResponsesEvent::ReasoningSummaryTextDelta { delta }
-         | ResponsesEvent::ReasoningTextDelta { delta } => {
-            self.ensure(&mut out, Open::Thinking);
-            self.text_seen = true;
-            out.push(Step::Thinking(delta));
+         ResponsesEvent::ReasoningSummaryTextDelta {
+            output_index,
+            delta,
+         }
+         | ResponsesEvent::ReasoningTextDelta {
+            output_index,
+            delta,
+         } => {
+            self.open(
+               &mut out,
+               (output_index, 0),
+               Block::Thinking {
+                  text: String::new(),
+                  signature: None,
+               },
+            );
+            self.append(&mut out, (output_index, 0), delta);
          },
-         ResponsesEvent::OutputTextDelta { delta, .. } => {
-            self.ensure(&mut out, Open::Text);
-            self.text_seen = true;
-            out.push(Step::Text(delta));
+         ResponsesEvent::OutputTextDelta {
+            output_index,
+            content_index,
+            delta,
+            ..
+         } => {
+            let key = (output_index, content_index);
+            self.open(
+               &mut out,
+               key,
+               Block::Text {
+                  text: String::new(),
+               },
+            );
+            self.append(&mut out, key, delta);
          },
-         ResponsesEvent::FunctionCallArgumentsDelta { delta, .. } => {
-            if self.open == Some(Open::Call) {
-               self.args_seen = true;
-               out.push(Step::Args(delta));
-            }
+         ResponsesEvent::FunctionCallArgumentsDelta {
+            output_index,
+            delta,
+            ..
+         } => {
+            self.append(&mut out, (output_index, 0), delta);
          },
-         ResponsesEvent::OutputItemDone { item, .. } => match item {
-            OutputItem::Reasoning {
-               id,
-               summary,
-               encrypted_content,
-            } => {
-               self.ensure(&mut out, Open::Thinking);
-               let text = summary
-                  .unwrap_or_default()
-                  .iter()
-                  .map(|&SummaryPart::SummaryText { ref text }| text.as_str())
-                  .collect::<Vec<_>>()
-                  .join("\n\n");
-               if !self.text_seen && !text.is_empty() {
-                  out.push(Step::Thinking(text));
-               }
-               if let Some(content) = encrypted_content {
-                  out.push(Step::Signature(encode_signature(id.as_deref(), &content)));
-               }
-               self.close(&mut out);
-            },
-            OutputItem::Message { content, .. } => {
-               let text = content
-                  .unwrap_or_default()
-                  .iter()
-                  .filter_map(|part| match *part {
-                     OutputContentPart::OutputText { ref text } => Some(text.as_str()),
-                     OutputContentPart::Other => None,
-                  })
-                  .collect::<String>();
-               if self.open != Some(Open::Text) && !text.is_empty() {
-                  self.open(&mut out, Open::Text);
-                  out.push(Step::Text(text));
-               }
-               self.close(&mut out);
-            },
-            OutputItem::FunctionCall {
-               call_id,
-               name,
-               arguments,
-               ..
-            } => {
-               if self.open != Some(Open::Call) {
-                  self.open(&mut out, Open::Call);
-                  out.push(Step::OpenCall { id: call_id, name });
-               }
-               if !self.args_seen
-                  && let Some(args) = arguments.filter(|arg| !arg.is_empty())
-               {
-                  out.push(Step::Args(args));
-               }
-               self.close(&mut out);
-            },
-            OutputItem::Other | OutputItem::CustomToolCall { .. } => {},
+         ResponsesEvent::OutputItemDone { output_index, item } => {
+            self.finish_item(&mut out, output_index, item);
          },
          ResponsesEvent::Completed { response } => {
             let kind = if self.saw_tool {
@@ -389,18 +403,95 @@ impl Walker {
             self.done = true;
             out.push(Step::Failed { message, code });
          },
-         ResponsesEvent::InProgress
-         | ResponsesEvent::ContentPartAdded { .. }
-         | ResponsesEvent::ContentPartDone
-         | ResponsesEvent::OutputTextDone { .. }
-         | ResponsesEvent::ReasoningSummaryPartDone
-         | ResponsesEvent::ReasoningSummaryTextDone
-         | ResponsesEvent::ReasoningTextDone
-         | ResponsesEvent::FunctionCallArgumentsDone { .. }
-         | ResponsesEvent::CustomToolCallInputDone { .. }
-         | ResponsesEvent::Other => {},
+         _ => {},
       }
       out
+   }
+
+   fn finish_item(&mut self, out: &mut Vec<Step>, output_index: u64, item: OutputItem) {
+      match item {
+         OutputItem::Reasoning {
+            id,
+            summary,
+            encrypted_content,
+         } => {
+            let key = (output_index, 0);
+            self.open(
+               out,
+               key,
+               Block::Thinking {
+                  text: String::new(),
+                  signature: None,
+               },
+            );
+            let text = summary
+               .unwrap_or_default()
+               .iter()
+               .map(|&SummaryPart::SummaryText { ref text }| text.as_str())
+               .collect::<Vec<_>>()
+               .join("\n\n");
+            if !self.blocks[&key].seen && !text.is_empty() {
+               self.append(out, key, text);
+            }
+            if let Some(content) = encrypted_content {
+               out.push(Step::Block {
+                  index: self.blocks[&key].index,
+                  event: BlockEvent::Signature(encode_signature(id.as_deref(), &content)),
+               });
+            }
+            self.close(out, key);
+         },
+         OutputItem::Message { content, .. } => {
+            for (content_index, part) in content.unwrap_or_default().into_iter().enumerate() {
+               if let OutputContentPart::OutputText { text } = part {
+                  let key = (output_index, content_index as u64);
+                  self.open(
+                     out,
+                     key,
+                     Block::Text {
+                        text: String::new(),
+                     },
+                  );
+                  if !self.blocks[&key].seen {
+                     self.append(out, key, text);
+                  }
+               }
+            }
+            let keys: Vec<_> = self
+               .blocks
+               .keys()
+               .filter(|(item, _)| *item == output_index)
+               .copied()
+               .collect();
+            for key in keys {
+               self.close(out, key);
+            }
+         },
+         OutputItem::FunctionCall {
+            call_id,
+            name,
+            arguments,
+            ..
+         } => {
+            let key = (output_index, 0);
+            self.open(
+               out,
+               key,
+               Block::ToolCall {
+                  id: call_id,
+                  name,
+                  arguments: String::new(),
+               },
+            );
+            if !self.blocks[&key].seen
+               && let Some(args) = arguments.filter(|arg| !arg.is_empty())
+            {
+               self.append(out, key, args);
+            }
+            self.close(out, key);
+         },
+         OutputItem::Other | OutputItem::CustomToolCall { .. } => {},
+      }
    }
 
    pub fn eof(&mut self) -> Vec<Step> {
@@ -408,43 +499,82 @@ impl Walker {
          return Vec::new();
       }
       self.done = true;
-      self.capture.fail("midstream");
+      self.capture.fail("upstream_eof");
       vec![Step::Failed {
          message: "upstream stream ended unexpectedly".into(),
          code: None,
       }]
    }
 
-   fn ensure(&mut self, out: &mut Vec<Step>, kind: Open) {
-      if self.open != Some(kind) {
-         self.open(out, kind);
+   fn open(&mut self, out: &mut Vec<Step>, key: (u64, u64), block: Block) {
+      if self.blocks.contains_key(&key) {
+         return;
       }
-   }
-
-   fn open(&mut self, out: &mut Vec<Step>, kind: Open) {
-      self.close(out);
-      self.open = Some(kind);
-      self.text_seen = false;
-      match kind {
-         Open::Thinking => out.push(Step::OpenThinking),
-         Open::Text => out.push(Step::OpenText),
-         Open::Call => {
-            self.saw_tool = true;
-            self.args_seen = false;
+      if let Block::ToolCall { name, .. } = &block {
+         self.saw_tool = true;
+         self.capture.note_tool_call(name);
+      }
+      let index = self.blocks.len();
+      self.blocks.insert(
+         key,
+         TrackedBlock {
+            index,
+            seen: false,
+            closed: false,
          },
+      );
+      out.push(Step::Block {
+         index,
+         event: BlockEvent::Open(block),
+      });
+   }
+
+   fn append(&mut self, out: &mut Vec<Step>, key: (u64, u64), text: String) {
+      if let Some(block) = self.blocks.get_mut(&key).filter(|block| !block.closed) {
+         block.seen = true;
+         out.push(Step::Block {
+            index: block.index,
+            event: BlockEvent::Append(text),
+         });
       }
    }
 
-   fn close(&mut self, out: &mut Vec<Step>) {
-      if self.open.take().is_some() {
-         out.push(Step::CloseBlock);
+   fn close(&mut self, out: &mut Vec<Step>, key: (u64, u64)) {
+      if let Some(block) = self.blocks.get_mut(&key).filter(|block| !block.closed) {
+         block.closed = true;
+         out.push(Step::Block {
+            index: block.index,
+            event: BlockEvent::Close,
+         });
       }
    }
 
    fn stop(&mut self, out: &mut Vec<Step>, kind: StopKind, usage: Option<Usage>) {
-      self.close(out);
-      let usage = usage.unwrap_or_default();
-      self.capture.record(&usage);
+      for block in self.blocks.values_mut().filter(|block| !block.closed) {
+         block.closed = true;
+         out.push(Step::Block {
+            index: block.index,
+            event: BlockEvent::Close,
+         });
+      }
+      let usage = usage.unwrap_or_else(|| {
+         let snapshot = self.capture.snapshot();
+         Usage {
+            input_tokens: snapshot.input_tokens + snapshot.cache_read_tokens,
+            output_tokens: snapshot.output_tokens,
+            total_tokens: snapshot.input_tokens
+               + snapshot.cache_read_tokens
+               + snapshot.output_tokens,
+            input_tokens_details: crate::codex::types::TokenDetails {
+               cached_tokens: snapshot.cache_read_tokens,
+               ..Default::default()
+            },
+            output_tokens_details: crate::codex::types::TokenDetails {
+               reasoning_tokens: snapshot.reasoning_tokens,
+               ..Default::default()
+            },
+         }
+      });
       self.capture.note_stop_reason(kind.as_str());
       self.done = true;
       out.push(Step::Stop { kind, usage });
@@ -461,12 +591,12 @@ pub async fn aggregate(mut stream: EventStream, capture: &UsageCapture) -> Aggre
       completed: false,
    };
    let mut walker = Walker::new(capture.clone());
-   let mut steps = Vec::new();
    while let Some(event) = stream.next().await {
-      steps.extend(walker.step(event));
+      for step in walker.step(event) {
+         agg.fold(step);
+      }
    }
-   steps.extend(walker.eof());
-   for step in steps {
+   for step in walker.eof() {
       agg.fold(step);
    }
    agg
@@ -474,55 +604,43 @@ pub async fn aggregate(mut stream: EventStream, capture: &UsageCapture) -> Aggre
 
 impl Aggregated {
    fn fold(&mut self, step: Step) {
-      match (step, self.blocks.last_mut()) {
-         (Step::Start { id: Some(id) }, _) => self.id = id,
-         (Step::OpenThinking, _) => self.blocks.push(Block::Thinking {
-            text: String::new(),
-            signature: None,
-         }),
-         (Step::OpenText, _) => self.blocks.push(Block::Text {
-            text: String::new(),
-         }),
-         (Step::OpenCall { id, name }, _) => self.blocks.push(Block::ToolCall {
-            id,
-            name,
-            arguments: String::new(),
-         }),
-         (Step::Thinking(chunk), Some(&mut Block::Thinking { ref mut text, .. }))
-         | (Step::Text(chunk), Some(&mut Block::Text { ref mut text }))
-         | (
-            Step::Args(chunk),
-            Some(&mut Block::ToolCall {
-               arguments: ref mut text,
-               ..
-            }),
-         ) => text.push_str(&chunk),
-         (
-            Step::Signature(sig),
-            Some(&mut Block::Thinking {
-               ref mut signature, ..
-            }),
-         ) => {
-            *signature = Some(sig);
+      match step {
+         Step::Start { id: Some(id) } => self.id = id,
+         Step::Block {
+            event: BlockEvent::Open(block),
+            ..
+         } => self.blocks.push(block),
+         Step::Block { index, event } => match (event, self.blocks.get_mut(index)) {
+            (
+               BlockEvent::Append(chunk),
+               Some(
+                  Block::Thinking { text, .. }
+                  | Block::Text { text }
+                  | Block::ToolCall {
+                     arguments: text, ..
+                  },
+               ),
+            ) => text.push_str(&chunk),
+            (BlockEvent::Signature(sig), Some(Block::Thinking { signature, .. })) => {
+               *signature = Some(sig);
+            },
+            (BlockEvent::Close, Some(Block::ToolCall { arguments, .. }))
+               if arguments.is_empty() =>
+            {
+               arguments.push_str("{}");
+            },
+            _ => {},
          },
-         (
-            Step::CloseBlock,
-            Some(&mut Block::ToolCall {
-               ref mut arguments, ..
-            }),
-         ) if arguments.is_empty() => {
-            arguments.push_str("{}");
-         },
-         (Step::Stop { kind, usage }, _) => {
+         Step::Stop { kind, usage } => {
             self.stop = kind;
             self.usage = usage;
             self.completed = true;
          },
-         (Step::Failed { message, .. }, _) => {
+         Step::Failed { message, .. } => {
             self.error_message = Some(message);
             self.stop = StopKind::Error;
          },
-         _ => {},
+         Step::Start { .. } => {},
       }
    }
 }

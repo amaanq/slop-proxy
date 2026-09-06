@@ -15,7 +15,6 @@ use crate::codex::types::Usage;
 use crate::db::usage::UsageRecord;
 use crate::gemini::client::GeminiProtocol;
 use crate::gemini::native::{NativeStream, chat_usage, response};
-use crate::gemini::signatures;
 use crate::gemini::sse::Frames;
 use crate::gemini::types::{GenerateContentRequest, GenerateContentResponse};
 use crate::pool::Route;
@@ -25,7 +24,7 @@ use crate::translate::UsageCapture;
 use crate::translate::chat::{
    ChatChunk, ChatEnvelope, ChatError, ChatErrorBody, ChatRequest, ErrorCode, StreamOptions,
 };
-use crate::translate::gemini_bridge;
+use crate::translate::gemini_req;
 
 const DIALECT: Dialect = Dialect::OpenAi;
 
@@ -42,7 +41,7 @@ pub async fn chat_completions(
    let started = Instant::now();
    let streaming = body.stream.unwrap_or(false);
    if let Some(effort) = body.reasoning_effort.as_ref() {
-      body.reasoning_effort = Some(gemini_bridge::gemini_effort(effort).to_owned());
+      body.reasoning_effort = Some(gemini_req::gemini_effort(effort).to_owned());
    }
    // Without this the terminal chunk carries no usage and the request bills
    // as zero tokens.
@@ -337,12 +336,7 @@ pub async fn native(
          );
       },
    };
-   let mut request = parsed;
-   let body = if signatures::restore(&mut request.contents) {
-      serde_json::to_vec(&request).map_or(body, Bytes::from)
-   } else {
-      body
-   };
+   let request = parsed;
    let key = native_session_key(&auth.user, &request);
    let facts = super::facts::RequestFacts::from_native(&request, &headers);
    let mut record = super::pipeline::record(
@@ -409,13 +403,6 @@ pub async fn native(
       Err(resp) => return resp,
    };
    if let Ok(value) = serde_json::from_slice::<GenerateContentResponse>(&bytes) {
-      for content in value
-         .candidates
-         .iter()
-         .filter_map(|candidate| candidate.content.as_ref())
-      {
-         signatures::remember(&content.parts);
-      }
       if let Some(reason) = finish_reason(&value) {
          record.stop_reason = reason;
       }
@@ -470,13 +457,6 @@ impl NativeUsageScan {
          let Ok(value) = serde_json::from_slice::<GenerateContentResponse>(&data) else {
             continue;
          };
-         for content in value
-            .candidates
-            .iter()
-            .filter_map(|candidate| candidate.content.as_ref())
-         {
-            signatures::remember(&content.parts);
-         }
          if let Some(reason) = finish_reason(&value) {
             self.seen_finish = true;
             self.capture.note_stop_reason(&reason);

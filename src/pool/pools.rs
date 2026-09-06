@@ -151,8 +151,8 @@ impl Pools {
                         body: "this request cannot be bridged to gemini; see the proxy log for the field that failed".into(),
                     });
             };
-            let custom = gemini_bridge::custom_tools(req);
-            let chat = gemini_bridge::to_chat(req);
+            let custom = crate::translate::gemini_req::custom_tools(req);
+            let chat = crate::translate::gemini_req::to_chat(req);
             let (account_id, reply) = self
                .gemini
                .execute(route, Call::OpenAi(Box::new(chat)))

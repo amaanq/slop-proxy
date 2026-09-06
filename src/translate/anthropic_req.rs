@@ -1,8 +1,7 @@
-use std::collections::BTreeMap;
 use std::mem;
 
+use serde::Deserialize;
 use serde::de::IgnoredAny;
-use serde::{Deserialize, Serialize};
 use serde_json::value::{RawValue, to_raw_value};
 
 use super::{decode_signature, model_map, usable_cap};
@@ -181,49 +180,9 @@ impl AnthropicRequest {
    }
 }
 
-#[derive(Serialize)]
-pub struct ObjectSchema {
-   #[serde(rename = "type")]
-   kind: &'static str,
-   properties: BTreeMap<&'static str, PropertySchema>,
-   #[serde(skip_serializing_if = "Vec::is_empty")]
-   required: Vec<&'static str>,
-}
-
-#[derive(Serialize)]
-pub struct PropertySchema {
-   #[serde(rename = "type")]
-   kind: &'static str,
-   #[serde(skip_serializing_if = "Option::is_none")]
-   description: Option<&'static str>,
-}
-
-impl ObjectSchema {
-   pub const fn empty() -> Self {
-      Self {
-         kind: "object",
-         properties: BTreeMap::new(),
-         required: Vec::new(),
-      }
-   }
-
-   pub fn one_string(name: &'static str, description: &'static str) -> Self {
-      Self {
-         kind: "object",
-         properties: BTreeMap::from([(
-            name,
-            PropertySchema {
-               kind: "string",
-               description: Some(description),
-            },
-         )]),
-         required: vec![name],
-      }
-   }
-}
-
 pub fn empty_schema() -> Box<RawValue> {
-   to_raw_value(&ObjectSchema::empty()).expect("schema serializes")
+   to_raw_value(&serde_json::json!({"type": "object", "properties": {}}))
+      .expect("schema serializes")
 }
 
 pub fn to_responses(req: &AnthropicRequest, cfg: &Config) -> ResponsesRequest {

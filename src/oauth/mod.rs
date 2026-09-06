@@ -17,7 +17,12 @@ use refresh::TokenResponse;
 /// One shared client so token refreshes reuse connections instead of paying
 /// TLS setup per call (refreshes run while a slot mutex is held).
 pub fn http() -> &'static reqwest::Client {
-   static HTTP: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
+   static HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| {
+      reqwest::Client::builder()
+         .timeout(Duration::from_secs(30))
+         .build()
+         .expect("oauth client")
+   });
    &HTTP
 }
 

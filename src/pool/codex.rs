@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use axum::body::Bytes;
 use reqwest::header::HeaderMap;
 
@@ -66,34 +64,6 @@ impl Backend for CodexClient {
 impl Pool<CodexClient> {
    pub const fn client(&self) -> &CodexClient {
       self.backend()
-   }
-
-   /// Averaged across accounts, so a client's figures do not jump when
-   /// routing moves it.
-   pub async fn pool_windows(&self) -> Vec<UsageWindow> {
-      let mut by_name: BTreeMap<String, (f64, usize, Option<i64>)> = BTreeMap::default();
-      for account in self.slots.snapshot().await {
-         let Some(usage) = account.usage else { continue };
-         for window in usage.windows {
-            let slot = by_name
-               .entry(window.name.clone())
-               .or_insert((0.0_f64, 0_usize, None));
-            slot.0 += window.utilization;
-            slot.1 += 1;
-            slot.2 = match (slot.2, window.resets_at) {
-               (Some(left), Some(right)) => Some(left.min(right)),
-               (left, right) => left.or(right),
-            };
-         }
-      }
-      by_name
-         .into_iter()
-         .map(|(name, (sum, count, resets_at))| UsageWindow {
-            name,
-            utilization: sum / count.max(1) as f64,
-            resets_at,
-         })
-         .collect()
    }
 
    /// Reads quota for every account from the usage endpoint, so idle

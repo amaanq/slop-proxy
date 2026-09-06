@@ -1,7 +1,6 @@
 use std::env;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use axum::Router;
 use axum::body;
@@ -10,7 +9,6 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse as _;
 use axum::routing::post;
 use tokio::net::TcpListener;
-use tokio::time;
 
 use super::{AppState, Inner, metrics, router};
 use crate::clock;
@@ -206,7 +204,7 @@ async fn anthropic_streaming_end_to_end() {
    assert!(text.contains("\"input_tokens\":80"));
    assert!(text.contains("\"cache_read_input_tokens\":20"));
 
-   time::sleep(Duration::from_millis(100)).await;
+   db.flush().await.unwrap();
    let totals = db.usage_totals(0, i64::MAX).await.unwrap();
    assert_eq!(totals.requests, 1);
    // 100 prompt tokens of which 20 were cached, so 80 are freshly billed.
@@ -250,7 +248,7 @@ async fn openai_non_streaming_end_to_end() {
    assert_eq!(value["usage"]["prompt_tokens"], 100_u64);
    assert_eq!(value["usage"]["completion_tokens"], 25_u64);
 
-   time::sleep(Duration::from_millis(100)).await;
+   db.flush().await.unwrap();
    let by_user = db.usage_by(UsageDim::User, 0, i64::MAX).await.unwrap();
    assert_eq!(by_user[0].key, "alice");
    assert_eq!(by_user[0].input_tokens, 80);
@@ -372,7 +370,7 @@ async fn anthropic_relay_passthrough() {
       "Bearer at"
    );
 
-   time::sleep(Duration::from_millis(100)).await;
+   db.flush().await.unwrap();
    let totals = db.usage_totals(0, i64::MAX).await.unwrap();
    assert_eq!(totals.requests, 1);
    assert_eq!(totals.input_tokens, 50);
@@ -393,7 +391,7 @@ async fn metrics_render_accounts_and_usage() {
       .send()
       .await
       .unwrap();
-   time::sleep(Duration::from_millis(100)).await;
+   db.flush().await.unwrap();
 
    let cfg = Config {
       db_path: PathBuf::new(),
@@ -587,23 +585,20 @@ async fn a_rejected_gemini_request_keeps_googles_reason() {
    assert_eq!(resp.status(), 400);
    assert_eq!(resp.text().await.unwrap(), GEMINI_REJECTION);
 
-   let kinds = loop {
-      let rows = db.error_metrics().await.unwrap();
-      if !rows.is_empty() {
-         break rows;
-      }
-      time::sleep(Duration::from_millis(10)).await;
-   };
+   db.flush().await.unwrap();
+   let kinds = db.error_metrics().await.unwrap();
    assert_eq!(kinds[0].kind, "upstream_rejected");
    assert_eq!(kinds[0].provider, "gemini");
 
    let logged = db
-      .0
-      .lock()
-      .await
-      .query_row("SELECT response_bytes FROM usage_log", [], |row| {
-         row.get::<_, i64>(0)
+      .call(|conn| {
+         Ok(
+            conn.query_row("SELECT response_bytes FROM usage_log", [], |row| {
+               row.get::<_, i64>(0)
+            })?,
+         )
       })
+      .await
       .unwrap();
    assert_eq!(logged as usize, GEMINI_REJECTION.len());
 }

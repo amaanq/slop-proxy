@@ -112,7 +112,12 @@ impl Db {
          tokens,
          auth_mode,
       } = account;
-      let conn = self.0.lock().await;
+      let provider_account_id = provider_account_id.to_owned();
+      let email = email.map(str::to_owned);
+      let label = label.map(str::to_owned);
+      let plan_type = plan_type.map(str::to_owned);
+      let tokens = tokens.clone();
+      self.call(move |conn| {
       conn.execute(
             "INSERT INTO accounts (provider, provider_account_id, email, label, plan_type, access_token, refresh_token, access_expires_at, last_refresh_at, auth_mode)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, unixepoch(), ?9)
@@ -147,78 +152,107 @@ impl Db {
          |row| row.get(0),
       )?;
       Ok(id)
+      }).await
    }
 
    pub async fn list_accounts(&self) -> Result<Vec<Account>> {
-      let conn = self.0.lock().await;
-      let mut stmt = conn.prepare(&format!("SELECT {COLS} FROM accounts ORDER BY id"))?;
-      let rows = stmt.query_map([], from_row)?;
-      Ok(rows.collect::<rusqlite::Result<_>>()?)
+      self
+         .call(move |conn| {
+            let mut stmt = conn.prepare(&format!("SELECT {COLS} FROM accounts ORDER BY id"))?;
+            let rows = stmt.query_map([], from_row)?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+         })
+         .await
    }
 
    pub async fn find_account(&self, key: &str) -> Result<Option<Account>> {
-      let conn = self.0.lock().await;
-      let mut stmt = conn.prepare(&format!(
-         "SELECT {COLS} FROM accounts WHERE id = ?1 OR email = ?2 OR label = ?2"
-      ))?;
-      let id = key.parse::<i64>().unwrap_or(-1);
-      let mut rows = stmt.query_map(params![id, key], from_row)?;
-      Ok(rows.next().transpose()?)
+      let key = key.to_owned();
+      self
+         .call(move |conn| {
+            let mut stmt = conn.prepare(&format!(
+               "SELECT {COLS} FROM accounts WHERE id = ?1 OR email = ?2 OR label = ?2"
+            ))?;
+            let id = key.parse::<i64>().unwrap_or(-1);
+            let mut rows = stmt.query_map(params![id, key], from_row)?;
+            Ok(rows.next().transpose()?)
+         })
+         .await
    }
 
    pub async fn remove_account(&self, key: &str) -> Result<usize> {
-      let conn = self.0.lock().await;
-      let id = key.parse::<i64>().unwrap_or(-1);
-      Ok(conn.execute(
-         "DELETE FROM accounts WHERE id = ?1 OR email = ?2 OR label = ?2",
-         params![id, key],
-      )?)
+      let key = key.to_owned();
+      self
+         .call(move |conn| {
+            let id = key.parse::<i64>().unwrap_or(-1);
+            Ok(conn.execute(
+               "DELETE FROM accounts WHERE id = ?1 OR email = ?2 OR label = ?2",
+               params![id, key],
+            )?)
+         })
+         .await
    }
 
    pub async fn update_account_tokens(&self, id: i64, tokens: &TokenSet) -> Result<()> {
-      let conn = self.0.lock().await;
-      conn.execute(
-         "UPDATE accounts SET access_token = ?2, refresh_token = ?3,
+      let tokens = tokens.clone();
+      self
+         .call(move |conn| {
+            conn.execute(
+               "UPDATE accounts SET access_token = ?2, refresh_token = ?3,
                access_expires_at = ?4,
                last_refresh_at = unixepoch(), updated_at = unixepoch()
              WHERE id = ?1",
-         params![
-            id,
-            tokens.access_token,
-            tokens.refresh_token,
-            tokens.expires_at
-         ],
-      )?;
-      Ok(())
+               params![
+                  id,
+                  tokens.access_token,
+                  tokens.refresh_token,
+                  tokens.expires_at
+               ],
+            )?;
+            Ok(())
+         })
+         .await
    }
 
    pub async fn set_account_trusted(&self, key: &str, trusted: bool) -> Result<usize> {
-      let conn = self.0.lock().await;
-      let id = key.parse::<i64>().unwrap_or(-1);
-      Ok(conn.execute(
-         "UPDATE accounts SET trusted = ?3, updated_at = unixepoch()
+      let key = key.to_owned();
+      self
+         .call(move |conn| {
+            let id = key.parse::<i64>().unwrap_or(-1);
+            Ok(conn.execute(
+               "UPDATE accounts SET trusted = ?3, updated_at = unixepoch()
              WHERE id = ?1 OR email = ?2 OR label = ?2",
-         params![id, key, trusted],
-      )?)
+               params![id, key, trusted],
+            )?)
+         })
+         .await
    }
 
    pub async fn set_account_allowed_users(&self, key: &str, users: &str) -> Result<usize> {
-      let conn = self.0.lock().await;
-      let id = key.parse::<i64>().unwrap_or(-1);
-      Ok(conn.execute(
-         "UPDATE accounts SET allowed_users = ?3, updated_at = unixepoch()
-             WHERE id = ?1 OR email = ?2 OR label = ?2",
-         params![id, key, users],
-      )?)
+      let key = key.to_owned();
+      let users = users.to_owned();
+      self
+         .call(move |conn| {
+            let id = key.parse::<i64>().unwrap_or(-1);
+            Ok(conn.execute(
+               "UPDATE accounts SET allowed_users = ?3, updated_at = unixepoch()
+                   WHERE id = ?1 OR email = ?2 OR label = ?2",
+               params![id, key, users],
+            )?)
+         })
+         .await
    }
 
    pub async fn set_account_http_referer(&self, id: i64, referer: Option<&str>) -> Result<()> {
-      let conn = self.0.lock().await;
-      conn.execute(
-         "UPDATE accounts SET http_referer = ?2, updated_at = unixepoch() WHERE id = ?1",
-         params![id, referer],
-      )?;
-      Ok(())
+      let referer = referer.map(str::to_owned);
+      self
+         .call(move |conn| {
+            conn.execute(
+               "UPDATE accounts SET http_referer = ?2, updated_at = unixepoch() WHERE id = ?1",
+               params![id, referer],
+            )?;
+            Ok(())
+         })
+         .await
    }
 
    pub async fn set_account_status(
@@ -228,21 +262,26 @@ impl Db {
       cooldown_until: Option<i64>,
       disabled_reason: Option<&str>,
    ) -> Result<()> {
-      let conn = self.0.lock().await;
+      let disabled_reason = disabled_reason.map(str::to_owned);
+      self.call(move |conn| {
       conn.execute(
             "UPDATE accounts SET status = ?2, cooldown_until = ?3, disabled_reason = ?4, updated_at = unixepoch()
              WHERE id = ?1",
             params![id, status.as_str(), cooldown_until, disabled_reason],
         )?;
       Ok(())
+      }).await
    }
 
    pub async fn clear_account_cooldown(&self, id: i64, expected_until: i64) -> Result<bool> {
-      let conn = self.0.lock().await;
-      Ok(conn.execute(
+      self
+         .call(move |conn| {
+            Ok(conn.execute(
          "UPDATE accounts SET status = 'active', cooldown_until = NULL, updated_at = unixepoch()
           WHERE id = ?1 AND status = 'cooldown' AND cooldown_until = ?2",
          params![id, expected_until],
-      )? > 0)
+         )? > 0)
+         })
+         .await
    }
 }

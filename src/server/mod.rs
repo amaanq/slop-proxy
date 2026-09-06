@@ -163,7 +163,7 @@ pub async fn serve(db: Db, cfg: Config, bind: &str) -> Result<()> {
          }
       });
    }
-   let app = router(state);
+   let app = router(state.clone());
 
    let listener = TcpListener::bind(bind)
       .await
@@ -174,7 +174,7 @@ pub async fn serve(db: Db, cfg: Config, bind: &str) -> Result<()> {
          let _ = signal::ctrl_c().await;
       })
       .await?;
-   Ok(())
+   state.db.flush().await
 }
 
 /// Costs the rows that were logged before their model had a price, so a table
@@ -303,12 +303,7 @@ impl Drop for LogGuard {
       }
       record.duration_ms = Some(self.start.elapsed().as_millis() as i64);
       price(&self.state.prices, &mut record);
-      let db = self.state.db.clone();
-      tokio::spawn(async move {
-         if let Err(err) = db.log_usage(&record).await {
-            tracing::error!("writing usage log: {err}");
-         }
-      });
+      write_usage(&self.state.db, record);
    }
 }
 
@@ -351,12 +346,9 @@ pub fn log_usage(state: &AppState, mut record: UsageRecord) {
 }
 
 fn write_usage(db: &Db, record: UsageRecord) {
-   let db = db.clone();
-   tokio::spawn(async move {
-      if let Err(err) = db.log_usage(&record).await {
-         tracing::error!("writing usage log: {err}");
-      }
-   });
+   if let Err(err) = db.enqueue_usage(record) {
+      tracing::error!("writing usage log failed {err}");
+   }
 }
 
 /// Stable per-conversation cache key so upstream prompt caching can kick in.

@@ -1,5 +1,6 @@
 pub mod anthropic;
 pub mod codex;
+pub mod experiential;
 pub mod gemini;
 pub mod glm;
 pub mod pools;

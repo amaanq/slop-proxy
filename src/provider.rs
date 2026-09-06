@@ -9,6 +9,7 @@ pub enum Provider {
    Gemini,
    Zen,
    Glm,
+   Experiential,
 }
 
 /// `ValueEnum` would derive `open-ai` from the variant name, which is a
@@ -30,6 +31,7 @@ impl Provider {
          "gemini" => Some(Self::Gemini),
          "zen" => Some(Self::Zen),
          "glm" => Some(Self::Glm),
+         "experiential" => Some(Self::Experiential),
          _ => None,
       }
    }
@@ -41,6 +43,7 @@ impl Provider {
          Self::Gemini => "gemini",
          Self::Zen => "zen",
          Self::Glm => "glm",
+         Self::Experiential => "experiential",
       }
    }
 }
@@ -108,6 +111,7 @@ impl FromSql for Provider {
          "gemini" => Ok(Self::Gemini),
          "zen" => Ok(Self::Zen),
          "glm" => Ok(Self::Glm),
+         "experiential" => Ok(Self::Experiential),
          other => Err(FromSqlError::Other(
             format!("unknown provider {other:?}").into(),
          )),

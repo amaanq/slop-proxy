@@ -1,227 +1,33 @@
 //! Claude Code only speaks the messages API and every Gemini surface speaks
 //! chat completions.
 
-use std::collections::{BTreeSet, HashMap};
-use std::io::Error;
-use std::mem;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use futures_util::stream;
-use serde::Serialize;
-use serde_json::value::{RawValue, to_raw_value};
 
+use super::chat::{ChatChunk, ChatErrorBody, ChatToolCall, ErrorCode, FinishReason};
+use super::gemini_req::FREEFORM_ARG;
 use crate::codex::sse::EventStream;
 use crate::codex::types::{
-   ContentPart, InputItem, OutputContentPart, OutputItem, ResponseObj, ResponsesEvent,
-   ResponsesRequest, ToolChoice, UpstreamError, Usage,
+   OutputContentPart, OutputItem, ResponseObj, ResponsesEvent, SummaryPart, UpstreamError, Usage,
 };
 use crate::gemini::client::GeminiProtocol;
-use crate::gemini::native::NativeStream;
+use crate::gemini::native::{NativeEvent, NativeStream};
 use crate::gemini::signatures;
 use crate::gemini::sse::Frames;
-use crate::gemini::types::ApiError;
 use crate::translate::UsageCapture;
-use crate::translate::anthropic_req::{ObjectSchema, empty_schema};
-use crate::translate::chat::{
-   ChatChunk, ChatContent, ChatError, ChatErrorBody, ChatMessage, ChatPart, ChatRequest,
-   ChatToolCall, ChatToolChoice, ChatToolDef, ErrorCode, ExtraContent, FunctionBody, FunctionDef,
-   ImageRef, StreamOptions,
-};
-
-fn remember_signature(call_id: &str, signature: &str) {
-   signatures::put(signatures::call_id_key(call_id), signature);
-}
-
-fn signature_for(call_id: &str) -> Option<String> {
-   signatures::get(signatures::call_id_key(call_id))
-}
-
-fn tool_call_message(call_id: &str, name: &str, arguments: String) -> ChatMessage {
-   let call = ChatToolCall {
-      id: Some(call_id.to_owned()),
-      kind: Some("function".into()),
-      function: FunctionBody {
-         name: Some(name.to_owned()),
-         arguments: Some(arguments),
-      },
-      extra_content: signature_for(call_id)
-         .as_deref()
-         .map(ExtraContent::with_signature),
-      ..Default::default()
-   };
-   ChatMessage {
-      role: "assistant".into(),
-      tool_calls: Some(vec![call]),
-      ..Default::default()
-   }
-}
-
-/// Codex's shell tool is a grammar-constrained freeform tool taking raw text.
-/// Chat completions has no way to say that, so those are offered as a function
-/// over a single string and their calls are turned back on the way out.
-pub fn custom_tools(req: &ResponsesRequest) -> BTreeSet<String> {
-   req.tools
-      .iter()
-      .filter(|tool| tool.kind == "custom")
-      .map(|tool| tool.name.clone())
-      .collect()
-}
-
-/// The single argument a custom tool is presented as taking.
-const FREEFORM_ARG: &str = "input";
-
-#[derive(Serialize)]
-struct Freeform<'a> {
-   input: &'a str,
-}
-
-fn freeform_schema() -> Box<RawValue> {
-   to_raw_value(&ObjectSchema::one_string(
-      FREEFORM_ARG,
-      "The complete tool input, verbatim.",
-   ))
-   .expect("schema serializes")
-}
-
-pub fn to_chat(req: &ResponsesRequest) -> ChatRequest {
-   let mut messages = vec![ChatMessage {
-      role: "system".into(),
-      content: Some(ChatContent::Text(req.instructions.clone())),
-      ..Default::default()
-   }];
-   for item in &req.input {
-      match *item {
-         InputItem::Message {
-            ref role,
-            ref content,
-         } => messages.push(ChatMessage {
-            role: chat_role(role).to_owned(),
-            content: Some(parts(content)),
-            ..Default::default()
-         }),
-         InputItem::FunctionCall {
-            ref call_id,
-            ref name,
-            ref arguments,
-         } => messages.push(tool_call_message(call_id, name, arguments.clone())),
-         InputItem::FunctionCallOutput {
-            ref call_id,
-            ref output,
-         }
-         | InputItem::CustomToolCallOutput {
-            ref call_id,
-            ref output,
-         } => messages.push(ChatMessage {
-            role: "tool".into(),
-            tool_call_id: Some(call_id.clone()),
-            content: Some(ChatContent::Text(output.text())),
-            ..Default::default()
-         }),
-         InputItem::CustomToolCall {
-            ref call_id,
-            ref name,
-            ref input,
-         } => messages.push(tool_call_message(
-            call_id,
-            name,
-            serde_json::to_string(&Freeform { input }).unwrap_or_default(),
-         )),
-         // Gemini rejects an unknown role rather than ignoring it.
-         InputItem::Reasoning { .. } | InputItem::AdditionalTools { .. } | InputItem::Other => {},
-      }
-   }
-
-   let tools: Vec<ChatToolDef> = req
-      .tools
-      .iter()
-      .filter(|tool| !tool.name.is_empty())
-      .map(|tool| {
-         let parameters = if tool.kind == "custom" {
-            freeform_schema()
-         } else {
-            tool.parameters.clone().unwrap_or_else(empty_schema)
-         };
-         ChatToolDef::function(FunctionDef {
-            name: Some(tool.name.clone()),
-            description: tool.description.clone(),
-            parameters: Some(parameters),
-            strict: None,
-         })
-      })
-      .collect();
-
-   ChatRequest {
-      model: req.model.clone(),
-      messages,
-      stream: Some(true),
-      // Without this the terminal chunk carries no usage and the request
-      // bills as zero tokens.
-      stream_options: Some(StreamOptions {
-         include_usage: true,
-      }),
-      max_tokens: req.max_output_tokens,
-      reasoning_effort: req
-         .reasoning
-         .as_ref()
-         .filter(|reasoning| !reasoning.effort.is_empty())
-         .map(|reasoning| gemini_effort(&reasoning.effort).to_owned()),
-      tools: (!tools.is_empty()).then_some(tools),
-      tool_choice: req.tool_choice.as_ref().map(|choice| match *choice {
-         ToolChoice::Mode(ref mode) => ChatToolChoice::Mode(mode.clone()),
-         ToolChoice::Function { ref name, .. } => ChatToolChoice::function(name.clone()),
-      }),
-      ..Default::default()
-   }
-}
-
-/// Gemini takes none, low, medium or high and rejects anything else outright,
-/// so codex asking for xhigh would 400 the whole turn.
-pub fn gemini_effort(effort: &str) -> &str {
-   match effort {
-      "none" | "minimal" => "none",
-      "low" => "low",
-      "medium" => "medium",
-      _ => "high",
-   }
-}
-
-/// Chat completions has no `developer` role.
-fn chat_role(role: &str) -> &str {
-   match role {
-      "developer" => "system",
-      other => other,
-   }
-}
-
-fn parts(content: &[ContentPart]) -> ChatContent {
-   ChatContent::Parts(
-      content
-         .iter()
-         .map(|part| match part {
-            &ContentPart::InputImage { ref image_url } => ChatPart::ImageUrl {
-               image_url: ImageRef::Url(image_url.clone()),
-            },
-            &ContentPart::InputText { ref text } | &ContentPart::OutputText { ref text } => {
-               ChatPart::Text { text: text.clone() }
-            },
-            &ContentPart::Other => ChatPart::Text {
-               text: String::new(),
-            },
-         })
-         .collect(),
-   )
-}
 
 /// Tool calls arrive spread across chunks keyed by index, so a slot holds the
 /// name until there is enough to open an item.
 #[derive(Default)]
 pub struct ChatToResponses {
    custom: BTreeSet<String>,
-   opened: bool,
-   calls: Vec<OpenCall>,
-   text: String,
-   msg_id: Option<String>,
+   response_id: Option<String>,
+   calls: BTreeMap<u64, OpenCall>,
+   text: Option<TextOutput>,
+   reasoning: Option<TextOutput>,
    next_index: u64,
-   finished: bool,
+   finish_reason: Option<FinishReason>,
    usage: Option<Usage>,
    completed: bool,
    frames: usize,
@@ -253,6 +59,24 @@ struct OpenCall {
    announced: bool,
 }
 
+struct TextOutput {
+   id: String,
+   index: u64,
+   text: String,
+}
+
+impl TextOutput {
+   fn new(prefix: &str, next_index: &mut u64) -> Self {
+      let index = *next_index;
+      *next_index += 1;
+      Self {
+         id: format!("{prefix}_{}", uuid::Uuid::new_v4().simple()),
+         index,
+         text: String::new(),
+      }
+   }
+}
+
 impl ChatToResponses {
    pub fn with_custom(custom: BTreeSet<String>) -> Self {
       let mut bridge = Self::default();
@@ -275,22 +99,36 @@ impl ChatToResponses {
                .collect(),
          );
       }
-      let response_id = (!chunk.id.is_empty()).then(|| chunk.id.clone());
+      let first_frame = self.response_id.is_none();
+      let response_id = Some(
+         self
+            .response_id
+            .get_or_insert_with(|| {
+               if chunk.id.is_empty() {
+                  format!("resp_{}", uuid::Uuid::new_v4().simple())
+               } else {
+                  chunk.id.clone()
+               }
+            })
+            .clone(),
+      );
       let mut out = Vec::new();
       if self.completed {
          return out;
       }
       if let Some(err) = chunk.error.as_ref() {
          self.completed = true;
-         self.finished = true;
          self.calls.clear();
-         self.text.clear();
          self.emitted += 1;
          out.push(ResponsesEvent::Failed {
             response: ResponseObj {
                id: response_id,
                status: Some("failed".into()),
-               usage: None,
+               usage: chunk
+                  .usage
+                  .clone()
+                  .map(Usage::from)
+                  .or_else(|| self.usage.take()),
                error: Some(UpstreamError {
                   code: err.code.as_ref().map(|error_code| match *error_code {
                      ErrorCode::Text(ref code) => code.clone(),
@@ -302,8 +140,7 @@ impl ChatToResponses {
          });
          return out;
       }
-      if !self.opened {
-         self.opened = true;
+      if first_frame {
          out.push(ResponsesEvent::Created {
             response: ResponseObj {
                id: response_id.clone(),
@@ -313,18 +150,57 @@ impl ChatToResponses {
       }
       let first = chunk.choices.first();
       let delta = first.map(|choice| &choice.delta);
+      if delta.is_some_and(|delta| {
+         delta
+            .images
+            .as_ref()
+            .is_some_and(|images| !images.is_empty())
+      }) {
+         return self.fail(
+            "image output cannot be represented on this endpoint",
+            "unsupported_output",
+         );
+      }
+      if let Some(text) = delta
+         .and_then(|delta| delta.reasoning_content.as_deref())
+         .filter(|text| !text.is_empty())
+      {
+         let first = self.reasoning.is_none();
+         let reasoning = self
+            .reasoning
+            .get_or_insert_with(|| TextOutput::new("rs", &mut self.next_index));
+         if first {
+            out.push(ResponsesEvent::OutputItemAdded {
+               output_index: reasoning.index,
+               item: OutputItem::Reasoning {
+                  id: Some(reasoning.id.clone()),
+                  summary: Some(Vec::new()),
+                  encrypted_content: None,
+               },
+            });
+            out.push(ResponsesEvent::ReasoningSummaryPartAdded {
+               output_index: reasoning.index,
+            });
+         }
+         reasoning.text.push_str(text);
+         out.push(ResponsesEvent::ReasoningSummaryTextDelta {
+            output_index: reasoning.index,
+            delta: text.to_owned(),
+         });
+      }
       if let Some(text) = delta.and_then(|delta| delta.content.as_deref())
          && !text.is_empty()
       {
          // Codex attaches a delta to an item by id, so text streamed before
          // the item is announced is parsed and then dropped.
-         let id = self
-            .msg_id
-            .get_or_insert_with(|| format!("msg_{}", uuid::Uuid::new_v4().simple()))
-            .clone();
-         if self.text.is_empty() {
+         let first = self.text.is_none();
+         let message = self
+            .text
+            .get_or_insert_with(|| TextOutput::new("msg", &mut self.next_index));
+         let id = message.id.clone();
+         if first {
             out.push(ResponsesEvent::OutputItemAdded {
-               output_index: 0,
+               output_index: message.index,
                item: OutputItem::Message {
                   id: Some(id.clone()),
                   role: Some("assistant".into()),
@@ -334,7 +210,7 @@ impl ChatToResponses {
             });
             out.push(ResponsesEvent::ContentPartAdded {
                item_id: Some(id.clone()),
-               output_index: 0,
+               output_index: message.index,
                content_index: 0,
                part: Some(OutputContentPart::OutputText {
                   text: String::new(),
@@ -343,20 +219,21 @@ impl ChatToResponses {
          }
          out.push(ResponsesEvent::OutputTextDelta {
             item_id: Some(id),
-            output_index: 0,
+            output_index: message.index,
             content_index: 0,
             delta: text.to_owned(),
          });
-         self.text.push_str(text);
+         message.text.push_str(text);
       }
       if let Some(calls) = delta.and_then(|delta| delta.tool_calls.as_ref()) {
          for call in calls {
             out.extend(self.tool_call(call));
          }
       }
-      if first.is_some_and(|choice| choice.finish_reason.is_some()) {
-         self.finished = true;
-         for call in &self.calls {
+      if self.finish_reason.is_none() && first.is_some_and(|choice| choice.finish_reason.is_some())
+      {
+         self.finish_reason = first.and_then(|choice| choice.finish_reason);
+         for call in self.calls.values() {
             if !call.announced {
                continue;
             }
@@ -401,25 +278,31 @@ impl ChatToResponses {
             });
          }
          self.calls.clear();
-         // The streaming translator reads text deltas, but `aggregate`
-         // builds its blocks only from finished items, so a non-streaming
-         // turn needs the whole message restated as one.
-         if !self.text.is_empty() {
-            let id = self.msg_id.clone().unwrap_or_default();
-            let text = mem::take(&mut self.text);
+         // Responses clients recover final output from output_item.done.
+         if let Some(TextOutput { id, index, text }) = self.text.take() {
             out.push(ResponsesEvent::OutputTextDone {
                item_id: Some(id.clone()),
-               output_index: 0,
+               output_index: index,
                content_index: 0,
                text: text.clone(),
             });
             out.push(ResponsesEvent::OutputItemDone {
-               output_index: 0,
+               output_index: index,
                item: OutputItem::Message {
                   id: Some(id),
                   role: Some("assistant".into()),
                   status: Some("completed".into()),
                   content: Some(vec![OutputContentPart::OutputText { text }]),
+               },
+            });
+         }
+         if let Some(TextOutput { id, index, text }) = self.reasoning.take() {
+            out.push(ResponsesEvent::OutputItemDone {
+               output_index: index,
+               item: OutputItem::Reasoning {
+                  id: Some(id),
+                  summary: Some(vec![SummaryPart::SummaryText { text }]),
+                  encrypted_content: None,
                },
             });
          }
@@ -430,19 +313,12 @@ impl ChatToResponses {
       // Gemini reports usage on a chunk of its own, often before the one
       // carrying finish_reason, so emitting on usage alone closed the
       // response before its content and then closed it twice.
-      if self.finished
+      if self.finish_reason.is_some()
          && !self.completed
          && let Some(usage) = self.usage.take()
       {
          self.completed = true;
-         out.push(ResponsesEvent::Completed {
-            response: ResponseObj {
-               id: response_id,
-               status: Some("completed".into()),
-               usage: Some(usage),
-               error: None,
-            },
-         });
+         out.push(self.terminal(response_id, Some(usage)));
       }
       // `created` and `completed` carry no answer, so they do not count as
       // content when deciding whether the bridge produced anything.
@@ -459,29 +335,29 @@ impl ChatToResponses {
    }
 
    fn tool_call(&mut self, call: &ChatToolCall) -> Vec<ResponsesEvent> {
-      let idx = call.index.unwrap_or(0) as usize;
-      if self.calls.len() <= idx {
-         self.calls.resize_with(idx + 1, OpenCall::default);
-      }
       let mut out = Vec::new();
-      let slot = &mut self.calls[idx];
-      if let Some(id) = call.id.as_ref() {
-         slot.id.clone_from(id);
+      let slot = self.calls.entry(call.index.unwrap_or(0)).or_default();
+      if slot.id.is_empty() {
+         slot.id = format!("call_{}", uuid::Uuid::new_v4().simple());
       }
       if let Some(name) = call.function.name.as_ref() {
          slot.name.clone_from(name);
       }
+      let was_announced = slot.announced;
+      if let Some(args) = &call.function.arguments {
+         slot.arguments.push_str(args);
+      }
       if let Some(sig) = call.thought_signature()
          && !slot.id.is_empty()
       {
-         remember_signature(&slot.id, sig);
+         signatures::put(&slot.id, sig);
       }
       if !slot.announced && !slot.name.is_empty() {
          slot.announced = true;
          slot.item_id = format!("fc_{}", uuid::Uuid::new_v4().simple());
          slot.index = self.next_index;
          self.next_index += 1;
-         let ready = &self.calls[idx];
+         let ready = &*slot;
          let item = if self.custom.contains(&ready.name) {
             OutputItem::CustomToolCall {
                id: Some(ready.item_id.clone()),
@@ -504,18 +380,65 @@ impl ChatToResponses {
             item,
          });
       }
-      let args_slot = &mut self.calls[idx];
-      if let Some(args) = call.function.arguments.as_deref()
-         && !args.is_empty()
-      {
-         args_slot.arguments.push_str(args);
+      let args = if was_announced {
+         call.function.arguments.as_deref().unwrap_or_default()
+      } else {
+         &slot.arguments
+      };
+      if slot.announced && !args.is_empty() {
          out.push(ResponsesEvent::FunctionCallArgumentsDelta {
-            item_id: Some(args_slot.item_id.clone()),
-            output_index: args_slot.index,
+            item_id: Some(slot.item_id.clone()),
+            output_index: slot.index,
             delta: args.to_owned(),
          });
       }
       out
+   }
+
+   fn terminal(&self, id: Option<String>, usage: Option<Usage>) -> ResponsesEvent {
+      let mut response = ResponseObj {
+         id,
+         usage,
+         ..Default::default()
+      };
+      match self.finish_reason {
+         Some(FinishReason::Stop | FinishReason::ToolCalls) => {
+            response.status = Some("completed".into());
+            ResponsesEvent::Completed { response }
+         },
+         Some(FinishReason::Length | FinishReason::ContentFilter) => {
+            response.status = Some("incomplete".into());
+            ResponsesEvent::Incomplete { response }
+         },
+         _ => {
+            response.status = Some("failed".into());
+            response.error = Some(UpstreamError {
+               code: Some("upstream_eof".into()),
+               message: Some("upstream ended without a supported finish reason".into()),
+            });
+            ResponsesEvent::Failed { response }
+         },
+      }
+   }
+
+   pub fn finalize(&mut self) -> Vec<ResponsesEvent> {
+      if self.completed {
+         return Vec::new();
+      }
+      self.completed = true;
+      let usage = self.usage.take();
+      vec![self.terminal(self.response_id.clone(), usage)]
+   }
+
+   fn fail(&mut self, message: &str, code: &str) -> Vec<ResponsesEvent> {
+      self.feed(&ChatChunk {
+         error: Some(ChatErrorBody {
+            message: message.to_owned(),
+            kind: Some("server_error".into()),
+            code: Some(ErrorCode::Text(code.to_owned())),
+         }),
+         ..Default::default()
+      })
    }
 }
 
@@ -528,81 +451,64 @@ pub fn event_stream(
    custom: BTreeSet<String>,
    capture: UsageCapture,
 ) -> EventStream {
-   use eventsource_stream::Eventsource as _;
    use futures_util::StreamExt as _;
 
    let mut native = (protocol == GeminiProtocol::Native).then(|| NativeStream::new(model));
    let mut frames = Frames::default();
-   let mut cut = false;
-   let head = capture;
-   let chat_bytes = resp.bytes_stream().flat_map(move |item| {
-      let chunks = match (&mut native, item) {
-         (&mut Some(ref mut native), Ok(bytes)) => {
-            head.note_upstream_head(&bytes);
-            native.feed(&bytes)
-         },
-         (&mut None, Ok(bytes)) => {
-            head.note_upstream_head(&bytes);
-            let mut chunks: Vec<Vec<u8>> = frames
-               .feed(&bytes)
-               .into_iter()
-               .map(|frame| format!("data: {}\n\n", String::from_utf8_lossy(&frame)).into_bytes())
-               .collect();
-            if !cut && let Some(error) = frames.cutoff() {
-               cut = true;
-               chunks.push(cutoff_frame(&error));
-            }
-            chunks
-         },
-         (_, Err(err)) => {
-            tracing::warn!("gemini stream error: {err}");
-            Vec::new()
-         },
-      };
-      stream::iter(chunks.into_iter().map(Ok::<_, Error>))
-   });
-
    let mut bridge = ChatToResponses::with_custom(custom);
-   let stream = chat_bytes.eventsource().flat_map(move |event| {
-      let events = match event {
-         Ok(event) if event.data != "[DONE]" => {
-            match serde_json::from_str::<ChatChunk>(&event.data) {
-               Ok(chunk) => bridge.feed(&chunk),
+   let bytes = resp
+      .bytes_stream()
+      .map(Some)
+      .chain(stream::once(async { None }));
+   Box::pin(bytes.flat_map(move |item| {
+      let Some(item) = item else {
+         return stream::iter(bridge.finalize());
+      };
+      let bytes = match item {
+         Ok(bytes) => bytes,
+         Err(error) => return stream::iter(bridge.fail(&error.to_string(), "upstream_read")),
+      };
+      capture.note_upstream_head(&bytes);
+      let chunks = if let Some(native) = &mut native {
+         native.events(&bytes)
+      } else {
+         let mut chunks = Vec::new();
+         for data in frames.feed(&bytes) {
+            if data == b"[DONE]" {
+               continue;
+            }
+            match serde_json::from_slice::<ChatChunk>(&data) {
+               Ok(chunk) => chunks.push(NativeEvent::Chunk(chunk)),
                Err(error) => {
-                  tracing::warn!(%error, frame = %event.data, "gemini chunk did not parse");
-                  Vec::new()
+                  return stream::iter(bridge.fail(&error.to_string(), "upstream_decode"));
                },
             }
-         },
-         Ok(_) => Vec::new(),
-         Err(err) => {
-            tracing::warn!("gemini SSE parse error: {err}");
-            Vec::new()
-         },
+         }
+         if let Some(error) = frames.cutoff() {
+            chunks.push(NativeEvent::Error(error));
+         }
+         chunks
       };
+      let mut events = Vec::new();
+      for chunk in chunks {
+         match chunk {
+            NativeEvent::Chunk(chunk) => events.extend(bridge.feed(&chunk)),
+            NativeEvent::Error(error) => events.extend(bridge.fail(
+               error.message.as_deref().unwrap_or("upstream failure"),
+               error.status.as_deref().unwrap_or("upstream_error"),
+            )),
+            NativeEvent::Done => {},
+         }
+      }
       stream::iter(events)
-   });
-   Box::pin(stream)
-}
-
-fn cutoff_frame(error: &ApiError) -> Vec<u8> {
-   let body = ChatError {
-      error: ChatErrorBody {
-         message: error.message.clone().unwrap_or_default(),
-         kind: Some("server_error".into()),
-         code: error.status.clone().map(ErrorCode::Text),
-      },
-   };
-   format!(
-      "data: {}\n\ndata: [DONE]\n\n",
-      serde_json::to_string(&body).unwrap_or_default()
-   )
-   .into_bytes()
+   }))
 }
 
 #[cfg(test)]
 mod tests {
    use super::*;
+   use crate::codex::types::ResponsesRequest;
+   use crate::translate::gemini_req::{custom_tools, to_chat};
    use serde_json::{Value, json};
 
    fn chunk(value: Value) -> ChatChunk {
@@ -939,29 +845,32 @@ mod full_chain {
       let mut kinds = Vec::new();
       let mut text = String::new();
       // The network delivers arbitrary chunks, not whole frames.
-      let frames: Vec<Vec<u8>> = raw
-         .chunks(64)
-         .flat_map(|chunk| native.feed(chunk))
-         .collect();
-      for frame in frames {
-         let line = String::from_utf8_lossy(&frame);
-         for data in line.lines().filter_map(|line| line.strip_prefix("data:")) {
-            let data = data.trim();
-            if data == "[DONE]" {
-               continue;
-            }
-            let Ok(chunk) = serde_json::from_str::<ChatChunk>(data) else {
-               continue;
-            };
-            for event in bridge.feed(&chunk) {
-               if let &ResponsesEvent::OutputTextDelta { ref delta, .. } = &event {
-                  text.push_str(delta);
+      let mut terminals = Vec::new();
+      for event in raw.chunks(64).flat_map(|chunk| native.events(chunk)) {
+         match event {
+            NativeEvent::Chunk(chunk) => {
+               for event in bridge.feed(&chunk) {
+                  if let ResponsesEvent::OutputTextDelta { delta, .. } = &event {
+                     text.push_str(delta);
+                  }
+                  kinds.push(event.kind().to_owned());
+                  if let Some((_, response)) = event.terminal() {
+                     terminals.push(response.clone());
+                  }
                }
-               kinds.push(serde_json::to_value(&event).unwrap()["type"].to_string());
-            }
+            },
+            NativeEvent::Error(error) => panic!("{error:?}"),
+            NativeEvent::Done => {},
          }
       }
-      assert!(!text.is_empty(), "no text recovered, events were {kinds:?}");
+      assert_eq!(text, "ok");
+      assert_eq!(kinds.last().map(String::as_str), Some("response.completed"));
+      assert_eq!(terminals.len(), 1);
+      let usage = terminals[0].usage.as_ref().unwrap();
+      assert_eq!(usage.input_tokens, 3);
+      assert_eq!(usage.output_tokens, 89);
+      assert_eq!(usage.output_tokens_details.reasoning_tokens, 88);
+      assert!(bridge.finalize().is_empty());
    }
 }
 
@@ -1025,27 +934,7 @@ mod aggregate_path {
                OutputContentPart::OutputText { ref text } => text.clone(),
                OutputContentPart::Other => String::new(),
             }),
-         ResponsesEvent::OutputItemDone { .. }
-         | ResponsesEvent::Created { .. }
-         | ResponsesEvent::InProgress
-         | ResponsesEvent::OutputItemAdded { .. }
-         | ResponsesEvent::ContentPartAdded { .. }
-         | ResponsesEvent::ContentPartDone
-         | ResponsesEvent::OutputTextDelta { .. }
-         | ResponsesEvent::OutputTextDone { .. }
-         | ResponsesEvent::ReasoningSummaryPartAdded
-         | ResponsesEvent::ReasoningSummaryPartDone
-         | ResponsesEvent::ReasoningSummaryTextDelta { .. }
-         | ResponsesEvent::ReasoningSummaryTextDone
-         | ResponsesEvent::ReasoningTextDelta { .. }
-         | ResponsesEvent::ReasoningTextDone
-         | ResponsesEvent::FunctionCallArgumentsDelta { .. }
-         | ResponsesEvent::FunctionCallArgumentsDone { .. }
-         | ResponsesEvent::CustomToolCallInputDone { .. }
-         | ResponsesEvent::Completed { .. }
-         | ResponsesEvent::Incomplete { .. }
-         | ResponsesEvent::Failed { .. }
-         | ResponsesEvent::Other => None,
+         _ => None,
       });
       assert_eq!(text.as_deref(), Some("ok"));
    }

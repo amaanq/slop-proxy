@@ -739,7 +739,7 @@ async fn bridged_responses(
          | ResponsesEvent::ContentPartDone
          | ResponsesEvent::OutputTextDelta { .. }
          | ResponsesEvent::OutputTextDone { .. }
-         | ResponsesEvent::ReasoningSummaryPartAdded
+         | ResponsesEvent::ReasoningSummaryPartAdded { .. }
          | ResponsesEvent::ReasoningSummaryPartDone
          | ResponsesEvent::ReasoningSummaryTextDelta { .. }
          | ResponsesEvent::ReasoningSummaryTextDone

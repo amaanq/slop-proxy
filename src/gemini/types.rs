@@ -121,6 +121,8 @@ pub struct GenerationConfig {
 #[serde(rename_all = "camelCase", default)]
 pub struct ThinkingConfig {
    #[serde(skip_serializing_if = "Option::is_none")]
+   pub thinking_level: Option<String>,
+   #[serde(skip_serializing_if = "Option::is_none")]
    pub thinking_budget: Option<i64>,
    #[serde(skip_serializing_if = "Option::is_none")]
    pub include_thoughts: Option<bool>,

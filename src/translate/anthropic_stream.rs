@@ -1,7 +1,7 @@
 use serde::Serialize;
 use serde_json::value::RawValue;
 
-use super::{Aggregated, Block, Step, StopKind, UsageCapture, Walker};
+use super::{Aggregated, Block, BlockEvent, Step, StopKind, UsageCapture, Walker};
 use crate::codex::types::{ResponsesEvent, Usage};
 
 pub struct AnthropicStream {
@@ -9,8 +9,15 @@ pub struct AnthropicStream {
    est_input_tokens: i64,
    emit_thinking: bool,
    next_index: usize,
-   hiding: bool,
+   blocks: Vec<Option<(usize, Channel)>>,
    walker: Walker,
+}
+
+#[derive(Clone, Copy)]
+enum Channel {
+   Text,
+   Thinking,
+   Call,
 }
 
 pub type OutEvent = (&'static str, String);
@@ -90,7 +97,7 @@ enum ContentBlockStart {
 }
 
 #[derive(Serialize)]
-struct EmptyObject;
+struct EmptyObject {}
 
 #[derive(Serialize)]
 #[serde(tag = "type")]
@@ -148,7 +155,7 @@ impl AnthropicStream {
          est_input_tokens,
          emit_thinking,
          next_index: 0,
-         hiding: false,
+         blocks: Vec::new(),
          walker: Walker::new(capture),
       }
    }
@@ -168,25 +175,12 @@ impl AnthropicStream {
          .into_iter()
          .filter_map(|step| match step {
             Step::Failed { message, .. } => Some(error("overloaded_error", message)),
-            Step::Start { .. }
-            | Step::OpenThinking
-            | Step::Thinking(..)
-            | Step::Signature(..)
-            | Step::OpenText
-            | Step::Text(..)
-            | Step::OpenCall { .. }
-            | Step::Args(..)
-            | Step::CloseBlock
-            | Step::Stop { .. } => None,
+            _ => None,
          })
          .collect()
    }
 
    fn render(&mut self, out: &mut Vec<OutEvent>, step: Step) {
-      if self.hiding && !matches!(step, Step::Failed { .. }) {
-         self.hiding = !matches!(step, Step::CloseBlock);
-         return;
-      }
       match step {
          Step::Start { id } => {
             let id = id.unwrap_or_else(|| format!("msg_{}", uuid::Uuid::new_v4().simple()));
@@ -212,31 +206,51 @@ impl AnthropicStream {
             );
             out.push(AnthEvent::Ping.out());
          },
-         Step::OpenThinking if !self.emit_thinking => self.hiding = true,
-         Step::OpenThinking => self.open(out, ContentBlockStart::Thinking { thinking: "" }),
-         Step::OpenText => self.open(out, ContentBlockStart::Text { text: "" }),
-         Step::OpenCall { id, name } => self.open(
-            out,
-            ContentBlockStart::ToolUse {
-               id,
-               name,
-               input: EmptyObject,
-            },
-         ),
-         Step::Thinking(thinking) => out.push(self.delta(BlockDelta::Thinking { thinking })),
-         Step::Signature(signature) => {
-            out.push(self.delta(BlockDelta::Signature { signature }));
+         Step::Block {
+            event: BlockEvent::Open(block),
+            ..
+         } => {
+            let (content, channel) = match block {
+               Block::Thinking { .. } if !self.emit_thinking => {
+                  self.blocks.push(None);
+                  return;
+               },
+               Block::Thinking { .. } => (
+                  ContentBlockStart::Thinking { thinking: "" },
+                  Channel::Thinking,
+               ),
+               Block::Text { .. } => (ContentBlockStart::Text { text: "" }, Channel::Text),
+               Block::ToolCall { id, name, .. } => (
+                  ContentBlockStart::ToolUse {
+                     id,
+                     name,
+                     input: EmptyObject {},
+                  },
+                  Channel::Call,
+               ),
+            };
+            self.blocks.push(Some((self.next_index, channel)));
+            self.open(out, content);
          },
-         Step::Text(text) => out.push(self.delta(BlockDelta::Text { text })),
-         Step::Args(partial_json) => {
-            out.push(self.delta(BlockDelta::InputJson { partial_json }));
+         Step::Block { index, event } => {
+            let Some((index, channel)) = self.blocks[index] else {
+               return;
+            };
+            let delta = match event {
+               BlockEvent::Append(text) => match channel {
+                  Channel::Thinking => BlockDelta::Thinking { thinking: text },
+                  Channel::Text => BlockDelta::Text { text },
+                  Channel::Call => BlockDelta::InputJson { partial_json: text },
+               },
+               BlockEvent::Signature(signature) => BlockDelta::Signature { signature },
+               BlockEvent::Close => {
+                  out.push(AnthEvent::ContentBlockStop { index }.out());
+                  return;
+               },
+               BlockEvent::Open(_) => unreachable!(),
+            };
+            out.push(Self::delta(index, delta));
          },
-         Step::CloseBlock => out.push(
-            AnthEvent::ContentBlockStop {
-               index: self.next_index - 1,
-            }
-            .out(),
-         ),
          Step::Stop { kind, usage } => {
             out.push(
                AnthEvent::MessageDelta {
@@ -275,12 +289,8 @@ impl AnthropicStream {
       );
    }
 
-   fn delta(&self, delta: BlockDelta) -> OutEvent {
-      AnthEvent::ContentBlockDelta {
-         index: self.next_index - 1,
-         delta,
-      }
-      .out()
+   fn delta(index: usize, delta: BlockDelta) -> OutEvent {
+      AnthEvent::ContentBlockDelta { index, delta }.out()
    }
 }
 
@@ -389,6 +399,7 @@ mod tests {
             item: reasoning.clone(),
          },
          ResponsesEvent::ReasoningSummaryTextDelta {
+            output_index: 0,
             delta: "secret".into(),
          },
          ResponsesEvent::OutputItemDone {

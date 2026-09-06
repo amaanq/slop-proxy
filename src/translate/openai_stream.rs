@@ -6,7 +6,7 @@ use super::chat::{
    ChatChoice, ChatChunk, ChatCompletion, ChatContent, ChatDelta, ChatError, ChatErrorBody,
    ChatMessage, ChatToolCall, ChatUsage, ChunkChoice, FinishReason, FunctionBody,
 };
-use super::{Aggregated, Block, Step, StopKind, UsageCapture, Walker};
+use super::{Aggregated, Block, BlockEvent, Step, StopKind, UsageCapture, Walker};
 use crate::clock::unix_now;
 use crate::codex::types::ResponsesEvent;
 
@@ -15,10 +15,17 @@ pub struct OpenAiStream {
    id: String,
    created: i64,
    include_usage: bool,
-   tool_index: Option<u64>,
+   blocks: Vec<Channel>,
+   tool_count: u64,
    reasoning_seen: bool,
    separator_due: bool,
    walker: Walker,
+}
+
+enum Channel {
+   Text,
+   Thinking,
+   Call(u64),
 }
 
 fn to_json<T>(payload: T) -> String
@@ -53,7 +60,8 @@ impl OpenAiStream {
          id: format!("chatcmpl-{}", uuid::Uuid::new_v4().simple()),
          created: unix_now(),
          include_usage,
-         tool_index: None,
+         blocks: Vec::new(),
+         tool_count: 0,
          reasoning_seen: false,
          separator_due: false,
          walker: Walker::new(capture),
@@ -91,32 +99,24 @@ impl OpenAiStream {
                None,
             ));
          },
-         Step::Text(content) => out.push(self.chunk(
-            ChatDelta {
-               content: Some(content),
-               ..Default::default()
-            },
-            None,
-         )),
-         Step::OpenThinking => self.separator_due = self.reasoning_seen,
-         Step::Thinking(delta) => {
-            let reasoning_content = if mem::take(&mut self.separator_due) {
-               format!("\n\n{delta}")
-            } else {
-               delta
-            };
-            self.reasoning_seen = true;
-            out.push(self.chunk(
-               ChatDelta {
-                  reasoning_content: Some(reasoning_content),
-                  ..Default::default()
-               },
-               None,
-            ));
+         Step::Block {
+            event: BlockEvent::Open(Block::Text { .. }),
+            ..
+         } => self.blocks.push(Channel::Text),
+         Step::Block {
+            event: BlockEvent::Open(Block::Thinking { .. }),
+            ..
+         } => {
+            self.blocks.push(Channel::Thinking);
+            self.separator_due = self.reasoning_seen;
          },
-         Step::OpenCall { id, name } => {
-            let index = self.tool_index.map_or(0, |idx| idx + 1);
-            self.tool_index = Some(index);
+         Step::Block {
+            event: BlockEvent::Open(Block::ToolCall { id, name, .. }),
+            ..
+         } => {
+            let index = self.tool_count;
+            self.tool_count += 1;
+            self.blocks.push(Channel::Call(index));
             out.push(self.chunk(
                ChatDelta {
                   tool_calls: Some(vec![ChatToolCall {
@@ -134,20 +134,34 @@ impl OpenAiStream {
                None,
             ));
          },
-         Step::Args(arguments) => out.push(self.chunk(
-            ChatDelta {
-               tool_calls: Some(vec![ChatToolCall {
-                  index: self.tool_index,
-                  function: FunctionBody {
-                     name: None,
-                     arguments: Some(arguments),
-                  },
-                  ..Default::default()
-               }]),
-               ..Default::default()
-            },
-            None,
-         )),
+         Step::Block {
+            index,
+            event: BlockEvent::Append(text),
+         } => {
+            let mut delta = ChatDelta::default();
+            match self.blocks[index] {
+               Channel::Text => delta.content = Some(text),
+               Channel::Thinking => {
+                  delta.reasoning_content = Some(if mem::take(&mut self.separator_due) {
+                     format!("\n\n{text}")
+                  } else {
+                     text
+                  });
+                  self.reasoning_seen = true;
+               },
+               Channel::Call(index) => {
+                  delta.tool_calls = Some(vec![ChatToolCall {
+                     index: Some(index),
+                     function: FunctionBody {
+                        name: None,
+                        arguments: Some(text),
+                     },
+                     ..Default::default()
+                  }]);
+               },
+            }
+            out.push(self.chunk(delta, None));
+         },
          Step::Stop { kind, usage } => {
             out.push(self.chunk(ChatDelta::default(), Some(finish_reason(kind))));
             if self.include_usage {
@@ -163,7 +177,7 @@ impl OpenAiStream {
             }
          },
          Step::Failed { message, .. } => out.push(error_chunk(message)),
-         Step::OpenText | Step::Signature(_) | Step::CloseBlock => {},
+         Step::Block { .. } => {},
       }
    }
 
@@ -250,9 +264,9 @@ mod tests {
    fn tool_call_indices_start_at_zero_and_count_up() {
       let mut stream = OpenAiStream::new("m".into(), false, UsageCapture::default());
       let mut indices = Vec::new();
-      for _ in 0_usize..3_usize {
+      for index in 0..3 {
          let frames = stream.handle(ResponsesEvent::OutputItemAdded {
-            output_index: 0,
+            output_index: index,
             item: OutputItem::FunctionCall {
                id: None,
                call_id: "c".into(),

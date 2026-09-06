@@ -242,7 +242,24 @@ fn generation_config(req: &ChatRequest) -> Option<GenerationConfig> {
       stop_sequences: req.stop.clone().map(chat::StopSequences::into_vec),
       response_mime_type: mime,
       response_json_schema: schema,
-      thinking_config: None,
+      thinking_config: req.reasoning_effort.as_deref().map(|effort| {
+         let level = crate::translate::gemini_req::gemini_effort(effort);
+         let gemini_three = req
+            .model
+            .trim_start_matches("models/")
+            .starts_with("gemini-3");
+         super::types::ThinkingConfig {
+            thinking_level: gemini_three
+               .then(|| if level == "none" { "minimal" } else { level }.to_owned()),
+            thinking_budget: (!gemini_three).then_some(match level {
+               "none" => 0,
+               "low" => 1024,
+               "medium" => 8192,
+               _ => 24576,
+            }),
+            include_thoughts: Some(true),
+         }
+      }),
    };
    let empty = serde_json::to_value(&config)
       .ok()
@@ -343,10 +360,14 @@ fn choice(
    streaming: bool,
 ) -> (u64, ChatMessage, Option<chat::FinishReason>) {
    let mut text = String::new();
+   let mut reasoning = String::new();
    let mut tool_calls = Vec::new();
    let mut images = Vec::new();
    for part in candidate.content.iter().flat_map(|content| &content.parts) {
       if part.thought == Some(true) {
+         if let Some(value) = &part.text {
+            reasoning.push_str(value);
+         }
          continue;
       }
       if let Some(value) = part.text.as_ref() {
@@ -377,6 +398,7 @@ fn choice(
    let message = ChatMessage {
       role: "assistant".into(),
       content: (!text.is_empty()).then_some(ChatContent::Text(text)),
+      reasoning_content: (!reasoning.is_empty()).then_some(reasoning),
       tool_calls: used_tools.then_some(tool_calls),
       images: (!images.is_empty()).then_some(images),
       ..Default::default()
@@ -407,7 +429,7 @@ fn tool_call(
          call
             .id
             .clone()
-            .unwrap_or_else(|| format!("call_native_{index}")),
+            .unwrap_or_else(|| format!("call_{}", uuid::Uuid::new_v4().simple())),
       ),
       index: streaming.then_some(index as u64),
       kind: Some("function".into()),
@@ -425,7 +447,7 @@ fn finish_reason(reason: Option<FinishReason>) -> Option<chat::FinishReason> {
       FinishReason::Stop => Some(chat::FinishReason::Stop),
       FinishReason::MaxTokens => Some(chat::FinishReason::Length),
       FinishReason::MalformedFunctionCall | FinishReason::UnexpectedToolCall => {
-         Some(chat::FinishReason::Stop)
+         Some(chat::FinishReason::Other)
       },
       FinishReason::Other(_) => Some(chat::FinishReason::ContentFilter),
    }
@@ -456,7 +478,14 @@ pub struct NativeStream {
    created: i64,
    frames: Frames,
    sent_roles: BTreeSet<u64>,
+   tool_counts: BTreeMap<u64, u64>,
    done: bool,
+}
+
+pub enum NativeEvent {
+   Chunk(ChatChunk),
+   Error(ApiError),
+   Done,
 }
 
 impl NativeStream {
@@ -467,11 +496,24 @@ impl NativeStream {
          created: unix_now(),
          frames: Frames::default(),
          sent_roles: BTreeSet::new(),
+         tool_counts: BTreeMap::new(),
          done: false,
       }
    }
 
    pub fn feed(&mut self, bytes: &[u8]) -> Vec<Vec<u8>> {
+      self
+         .events(bytes)
+         .into_iter()
+         .map(|event| match event {
+            NativeEvent::Chunk(chunk) => sse(&chunk),
+            NativeEvent::Error(error) => sse(&ErrorFrame { error: &error }),
+            NativeEvent::Done => b"data: [DONE]\n\n".to_vec(),
+         })
+         .collect()
+   }
+
+   pub fn events(&mut self, bytes: &[u8]) -> Vec<NativeEvent> {
       let mut output = Vec::new();
       for data in self.frames.feed(bytes) {
          if let Ok(event) = serde_json::from_slice::<GenerateContentResponse>(&data) {
@@ -482,33 +524,40 @@ impl NativeStream {
          && let Some(error) = self.frames.cutoff()
       {
          self.done = true;
-         output.push(sse(&ErrorFrame { error: &error }));
-         output.push(b"data: [DONE]\n\n".to_vec());
+         output.push(NativeEvent::Error(error));
+         output.push(NativeEvent::Done);
       }
       output
    }
 
-   fn event(&mut self, event: &GenerateContentResponse) -> Vec<Vec<u8>> {
+   fn event(&mut self, event: &GenerateContentResponse) -> Vec<NativeEvent> {
       if let Some(response_id) = event.response_id.as_ref() {
          self.id = format!("chatcmpl-{response_id}");
       }
       if let Some(error) = event.error.as_ref() {
          self.done = true;
-         let frame = ErrorFrame { error };
-         return vec![sse(&frame), b"data: [DONE]\n\n".to_vec()];
+         return vec![NativeEvent::Error(error.clone()), NativeEvent::Done];
       }
 
       let mut choices = Vec::new();
       let mut finished = false;
       for (fallback_index, candidate) in event.candidates.iter().enumerate() {
-         let (index, message, finish_reason) = choice(candidate, fallback_index, true);
+         let (index, mut message, mut finish_reason) = choice(candidate, fallback_index, true);
+         let count = self.tool_counts.entry(index).or_default();
+         for call in message.tool_calls.iter_mut().flatten() {
+            call.index = Some(*count);
+            *count += 1;
+         }
+         if *count > 0 && finish_reason == Some(chat::FinishReason::Stop) {
+            finish_reason = Some(chat::FinishReason::ToolCalls);
+         }
          let delta = ChatDelta {
             role: self.sent_roles.insert(index).then(|| "assistant".into()),
             content: match message.content {
                Some(ChatContent::Text(text)) => Some(text),
                _ => None,
             },
-            reasoning_content: None,
+            reasoning_content: message.reasoning_content,
             tool_calls: message.tool_calls,
             images: message.images,
          };
@@ -530,10 +579,10 @@ impl NativeStream {
          usage: event.usage_metadata.as_ref().map(chat_usage),
          error: None,
       };
-      let mut output = vec![sse(&chunk)];
+      let mut output = vec![NativeEvent::Chunk(chunk)];
       if finished && !self.done {
          self.done = true;
-         output.push(b"data: [DONE]\n\n".to_vec());
+         output.push(NativeEvent::Done);
       }
       output
    }

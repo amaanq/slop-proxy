@@ -302,15 +302,26 @@ pub enum ResponsesEvent {
       text: String,
    },
    #[serde(rename = "response.reasoning_summary_part.added")]
-   ReasoningSummaryPartAdded,
+   ReasoningSummaryPartAdded {
+      #[serde(default)]
+      output_index: u64,
+   },
    #[serde(rename = "response.reasoning_summary_part.done")]
    ReasoningSummaryPartDone,
    #[serde(rename = "response.reasoning_summary_text.delta")]
-   ReasoningSummaryTextDelta { delta: String },
+   ReasoningSummaryTextDelta {
+      #[serde(default)]
+      output_index: u64,
+      delta: String,
+   },
    #[serde(rename = "response.reasoning_summary_text.done")]
    ReasoningSummaryTextDone,
    #[serde(rename = "response.reasoning_text.delta")]
-   ReasoningTextDelta { delta: String },
+   ReasoningTextDelta {
+      #[serde(default)]
+      output_index: u64,
+      delta: String,
+   },
    #[serde(rename = "response.reasoning_text.done")]
    ReasoningTextDone,
    #[serde(rename = "response.function_call_arguments.delta")]
@@ -350,6 +361,15 @@ pub enum ResponsesEvent {
 }
 
 impl ResponsesEvent {
+   pub const fn terminal(&self) -> Option<(TerminalKind, &ResponseObj)> {
+      match self {
+         Self::Completed { response } => Some((TerminalKind::Completed, response)),
+         Self::Incomplete { response } => Some((TerminalKind::Incomplete, response)),
+         Self::Failed { response } => Some((TerminalKind::Failed, response)),
+         _ => None,
+      }
+   }
+
    /// The wire name, which is also the SSE event name the stream carries.
    pub const fn kind(&self) -> &'static str {
       match *self {
@@ -361,7 +381,7 @@ impl ResponsesEvent {
          Self::ContentPartDone => "response.content_part.done",
          Self::OutputTextDelta { .. } => "response.output_text.delta",
          Self::OutputTextDone { .. } => "response.output_text.done",
-         Self::ReasoningSummaryPartAdded => "response.reasoning_summary_part.added",
+         Self::ReasoningSummaryPartAdded { .. } => "response.reasoning_summary_part.added",
          Self::ReasoningSummaryPartDone => "response.reasoning_summary_part.done",
          Self::ReasoningSummaryTextDelta { .. } => "response.reasoning_summary_text.delta",
          Self::ReasoningSummaryTextDone => "response.reasoning_summary_text.done",
@@ -374,6 +394,24 @@ impl ResponsesEvent {
          Self::Incomplete { .. } => "response.incomplete",
          Self::Failed { .. } => "response.failed",
          Self::Other => "message",
+      }
+   }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalKind {
+   Completed,
+   Incomplete,
+   Failed,
+}
+
+impl TerminalKind {
+   pub const fn as_str(self) -> &'static str {
+      match self {
+         Self::Completed => "completed",
+         Self::Incomplete => "incomplete",
+         Self::Failed => "failed",
       }
    }
 }

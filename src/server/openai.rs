@@ -603,9 +603,12 @@ pub async fn responses_passthrough(
       Ok(dispatched) => dispatched,
       Err(err) => {
          if provider == Provider::Zen
-            && let PoolError::BadRequest { ref body, .. } = err
+            && let PoolError::BadRequest {
+               body: ref error_body,
+               ..
+            } = err
          {
-            note_rejected_item(body, &req.rest);
+            note_rejected_item(error_body, &req.rest);
          }
          return dispatch_failed(&state, record, DIALECT, err);
       },
@@ -630,53 +633,59 @@ pub async fn responses_passthrough(
       );
    }
 
-   {
-      // Upstream only streams; recover the final response object from the
-      // terminal event for non-streaming clients.
-      let mut raw_events = resp.bytes_stream().eventsource();
-      let mut final_response = Option::<Box<RawValue>>::None;
-      while let Some(event) = raw_events.next().await {
-         let Ok(event) = event else { break };
-         let Ok(TerminalEvent {
-            kind,
-            response: Some(response),
-         }) = serde_json::from_str::<TerminalEvent>(&event.data)
-         else {
-            continue;
-         };
-         if !TerminalEvent::is_terminal(&kind) {
-            continue;
-         }
-         if let Ok(env) = serde_json::from_str::<UsageEnvelope>(&event.data)
-            && let Some(usage) = env.response.usage
-         {
-            capture.record(&usage);
-         }
-         final_response = Some(response);
-      }
-      let snap = capture.snapshot();
-      apply_snapshot(&mut record, &snap);
-      log_usage(&state, record);
-      final_response.map_or_else(
-         || {
-            super::error::error_response(
-               DIALECT,
-               502,
-               "api_error",
-               "upstream stream ended unexpectedly",
-            )
-         },
-         |value| {
-            (
-               [("content-type", "application/json")],
-               value.get().to_owned(),
-            )
-               .into_response()
-         },
-      )
-   }
+   raw_response(state, record, resp, capture).await
 }
 
+async fn raw_response(
+   state: AppState,
+   mut record: UsageRecord,
+   resp: reqwest::Response,
+   capture: UsageCapture,
+) -> Response {
+   // Upstream only streams; recover the final response object from the
+   // terminal event for non-streaming clients.
+   let mut raw_events = resp.bytes_stream().eventsource();
+   let mut final_response = Option::<Box<RawValue>>::None;
+   while let Some(event) = raw_events.next().await {
+      let Ok(event) = event else { break };
+      let Ok(TerminalEvent {
+         kind,
+         response: Some(response),
+      }) = serde_json::from_str::<TerminalEvent>(&event.data)
+      else {
+         continue;
+      };
+      if !TerminalEvent::is_terminal(&kind) {
+         continue;
+      }
+      if let Ok(env) = serde_json::from_str::<UsageEnvelope>(&event.data)
+         && let Some(usage) = env.response.usage
+      {
+         capture.record(&usage);
+      }
+      final_response = Some(response);
+   }
+   let snap = capture.snapshot();
+   apply_snapshot(&mut record, &snap);
+   log_usage(&state, record);
+   final_response.map_or_else(
+      || {
+         super::error::error_response(
+            DIALECT,
+            502,
+            "api_error",
+            "upstream stream ended unexpectedly",
+         )
+      },
+      |value| {
+         (
+            [("content-type", "application/json")],
+            value.get().to_owned(),
+         )
+            .into_response()
+      },
+   )
+}
 /// The bridge's frames are relayed rather than the events they parse into.
 async fn bridged_responses(
    state: AppState,

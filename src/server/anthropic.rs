@@ -37,13 +37,10 @@ pub async fn messages(
       return super::error::out_of_scope(DIALECT, provider);
    }
    match provider {
-      Provider::Anthropic => {
-         return super::relay::messages(state, auth, headers, body, peek).await;
-      },
       // Z.ai speaks this dialect, so the body it needs is the one that
       // arrived and the reply needs no translating back.
-      Provider::Glm => {
-         return super::relay::glm(state, auth, headers, body, peek).await;
+      Provider::Anthropic | Provider::Glm | Provider::Experiential => {
+         return super::relay::messages(state, auth, headers, body, peek, provider).await;
       },
       Provider::Gemini | Provider::Zen | Provider::OpenAi => {},
    }
@@ -150,7 +147,11 @@ pub async fn count_tokens(
       Provider::Anthropic => {
          return super::relay::count_tokens(state, auth, headers, body, peek).await;
       },
-      Provider::Gemini | Provider::Zen | Provider::Glm | Provider::OpenAi => {},
+      Provider::Gemini
+      | Provider::Zen
+      | Provider::Glm
+      | Provider::OpenAi
+      | Provider::Experiential => {},
    }
    let req = match serde_json::from_slice::<AnthropicRequest>(&body) {
       Ok(req) => req,

@@ -74,7 +74,7 @@ pub async fn chat_completions(
          req.reasoning_effort = req.reasoning_effort.or(resolved.effort);
          return super::gemini::chat_completions(state, auth, req, model, facts).await;
       },
-      Provider::Glm => {
+      Provider::Glm | Provider::Experiential => {
          log_rejected(&state, &auth, "chat", &req.model);
          return translation_error(DIALECT, "this model is served over /v1/messages");
       },

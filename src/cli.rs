@@ -201,6 +201,9 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
          Provider::Glm => Err(eyre::eyre!(
             "z.ai issues static keys, use `accounts add-key --provider glm`"
          )),
+         Provider::Experiential => Err(eyre::eyre!(
+            "experiential issues static keys, use `accounts add-key --provider experiential`"
+         )),
          Provider::Zen => Err(eyre::eyre!(
             "zen serves its free models without a credential, use `accounts add-key --provider zen` if you have one"
          )),
@@ -564,7 +567,7 @@ async fn debug_refresh(db: &Db, account: &str) -> Result<()> {
    let tokens = match acc.provider {
       Provider::OpenAi => refresh::refresh(&acc.refresh_token).await?,
       Provider::Anthropic => anthropic::refresh(&acc.refresh_token).await?,
-      Provider::Gemini | Provider::Zen | Provider::Glm => {
+      Provider::Gemini | Provider::Zen | Provider::Glm | Provider::Experiential => {
          bail!("this provider has no refresh flow")
       },
    };

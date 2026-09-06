@@ -13,6 +13,7 @@ use super::pipeline::{dispatch_failed, read_body, relayed};
 use super::{AppState, LogGuard, log_error, log_usage};
 use crate::anthropic::client::RelayHeaders;
 use crate::pool::anthropic::Relay as AnthropicRelay;
+use crate::pool::experiential::Relay as ExperientialRelay;
 use crate::pool::glm::Relay as GlmRelay;
 use crate::pool::{Route, UsageWindow};
 use crate::provider::Provider;
@@ -227,12 +228,18 @@ fn normalized_body(body: &Bytes, peek: &Peek) -> Bytes {
    Bytes::from(serde_json::to_vec(&value).expect("request serializes"))
 }
 
+/// Z.ai answers the messages API directly, so this is the anthropic relay
+/// without the subscription guard, which covers Claude Code and not a paid
+/// third-party key.
+/// The Experiential gateway answers the messages API directly, same shape
+/// as the z.ai relay.
 pub async fn messages(
    state: AppState,
    auth: AuthInfo,
    headers: HeaderMap,
    body: Bytes,
    peek: Peek,
+   provider: Provider,
 ) -> Response {
    let started = Instant::now();
    let key = peek.session_key(&auth);
@@ -240,101 +247,83 @@ pub async fn messages(
    let mut record = super::pipeline::record(
       &auth,
       "messages",
-      Provider::Anthropic,
+      provider,
       peek.model.clone(),
       peek.upstream_model.clone(),
       facts,
    );
    record.effort = peek.effort.clone();
    record.session_key = key.clone();
-
-   if state.cfg.anthropic.require_claude_code && !is_claude_code(&headers) {
+   if provider == Provider::Anthropic
+      && state.cfg.anthropic.require_claude_code
+      && !is_claude_code(&headers)
+   {
       log_error(&state, record, 403, "not_claude_code");
       return not_claude_code(&auth.user, &headers);
    }
-
-   let hdrs = relay_headers(&headers);
-   let (account_id, resp) = match state
-      .pools
-      .anthropic
-      .execute(
-         Route {
-            session_key: &key,
-            model: &peek.upstream_model,
-            user: &auth.user,
-            pinned_account: auth.limits.pinned_account,
-            prefer_trusted: false,
-         },
-         AnthropicRelay {
-            path: "/v1/messages",
-            body: normalized_body(&body, &peek),
-            hdrs: hdrs.clone(),
-         },
-      )
-      .await
-   {
-      Ok(res) => res,
+   let route = Route {
+      session_key: &key,
+      model: &peek.upstream_model,
+      user: &auth.user,
+      pinned_account: auth.limits.pinned_account,
+      prefer_trusted: false,
+   };
+   let body = normalized_body(&body, &peek);
+   let result = match provider {
+      Provider::Anthropic => {
+         state
+            .pools
+            .anthropic
+            .execute(
+               route,
+               AnthropicRelay {
+                  path: "/v1/messages",
+                  body,
+                  hdrs: relay_headers(&headers),
+               },
+            )
+            .await
+      },
+      Provider::Glm => {
+         state
+            .pools
+            .glm
+            .execute(
+               route,
+               GlmRelay {
+                  path: "/v1/messages",
+                  body,
+               },
+            )
+            .await
+      },
+      Provider::Experiential => {
+         state
+            .pools
+            .experiential
+            .execute(
+               route,
+               ExperientialRelay {
+                  path: "/v1/messages",
+                  body,
+               },
+            )
+            .await
+      },
+      _ => unreachable!(),
+   };
+   let (account_id, resp) = match result {
+      Ok(result) => result,
       Err(err) => return dispatch_failed(&state, record, DIALECT, err),
    };
    record.account_id = account_id;
    record.status = i64::from(resp.status().as_u16());
-
    let mut builder = forwarded_response(&resp);
-   for (name, value) in pool_rate_limit_headers(&state.pools.anthropic.pool_windows().await) {
-      builder = builder.header(name, value);
+   if provider == Provider::Anthropic {
+      for (name, value) in pool_rate_limit_headers(&state.pools.anthropic.pool_windows().await) {
+         builder = builder.header(name, value);
+      }
    }
-   relay_response(state, record, resp, builder, started).await
-}
-
-/// Z.ai answers the messages API directly, so this is the anthropic relay
-/// without the subscription guard, which covers Claude Code and not a paid
-/// third-party key.
-pub async fn glm(
-   state: AppState,
-   auth: AuthInfo,
-   headers: HeaderMap,
-   body: Bytes,
-   peek: Peek,
-) -> Response {
-   let started = Instant::now();
-   let key = peek.session_key(&auth);
-   let facts = anthropic_facts(&body, &headers);
-   let mut record = super::pipeline::record(
-      &auth,
-      "messages",
-      Provider::Glm,
-      peek.model.clone(),
-      peek.upstream_model.clone(),
-      facts,
-   );
-   record.effort = peek.effort.clone();
-   record.session_key = key.clone();
-
-   let (account_id, resp) = match state
-      .pools
-      .glm
-      .execute(
-         Route {
-            session_key: &key,
-            model: &peek.upstream_model,
-            user: &auth.user,
-            pinned_account: auth.limits.pinned_account,
-            prefer_trusted: false,
-         },
-         GlmRelay {
-            path: "/v1/messages",
-            body: normalized_body(&body, &peek),
-         },
-      )
-      .await
-   {
-      Ok(res) => res,
-      Err(err) => return dispatch_failed(&state, record, DIALECT, err),
-   };
-   record.account_id = account_id;
-   record.status = i64::from(resp.status().as_u16());
-
-   let builder = forwarded_response(&resp);
    relay_response(state, record, resp, builder, started).await
 }
 

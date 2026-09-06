@@ -13,6 +13,7 @@ mod clock;
 mod codex;
 mod config;
 mod db;
+mod experiential;
 mod gemini;
 mod glm;
 mod oauth;

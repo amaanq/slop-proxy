@@ -67,6 +67,23 @@ slop-proxy accounts add-key \
 Referrer-restricted keys use Google's native Gemini surface because its
 OpenAI-compatible endpoint drops the referrer before validating the key.
 
+## Experiential keys
+
+Add a gateway key and opt models into its messages endpoint.
+
+```sh
+slop-proxy accounts add-key --provider experiential --key "$EXPERIENTIAL_API_KEY"
+```
+
+```toml
+[models]
+experiential_patterns = ["gpt-6-astra"]
+```
+
+This integration supports `/v1/messages` only. Experiential models are not
+served over `/v1/responses` or `/v1/chat/completions`. Existing provider routes
+stay unchanged until you configure `experiential_patterns`.
+
 ## Zen egress proxies
 
 Set `zen.proxy_urls` to send only OpenCode Zen traffic through HTTP proxies.

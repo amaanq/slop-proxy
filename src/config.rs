@@ -21,6 +21,7 @@ pub struct Config {
    pub gemini: GeminiConfig,
    pub zen: ZenConfig,
    pub glm: GlmConfig,
+   pub experiential: ExperientialConfig,
    pub pricing: PricingConfig,
    pub models: ModelsConfig,
 }
@@ -60,6 +61,20 @@ impl Default for PricingConfig {
       Self {
             url: "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json".into(),
         }
+   }
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(default)]
+pub struct ExperientialConfig {
+   pub base_url: String,
+}
+
+impl Default for ExperientialConfig {
+   fn default() -> Self {
+      Self {
+         base_url: "https://api.experientiallabs.ai".into(),
+      }
    }
 }
 
@@ -198,6 +213,9 @@ pub struct ModelsConfig {
    pub zen_patterns: Vec<String>,
    /// Model patterns served by Z.ai's anthropic-compatible endpoint.
    pub glm_patterns: Vec<String>,
+   /// Model patterns relayed verbatim to the Experiential gateway over
+   /// /v1/messages only. Empty by default, set to opt in.
+   pub experiential_patterns: Vec<String>,
 }
 
 impl Default for ModelsConfig {
@@ -211,6 +229,7 @@ impl Default for ModelsConfig {
          gemini_patterns: vec!["gemini-*".into()],
          zen_patterns: Vec::new(),
          glm_patterns: vec!["glm-*".into()],
+         experiential_patterns: Vec::new(),
       }
    }
 }
@@ -240,12 +259,13 @@ impl ModelsConfig {
       best.map(|(_, provider)| provider)
    }
 
-   const fn sets(&self) -> [(Provider, &Vec<String>); 4] {
+   const fn sets(&self) -> [(Provider, &Vec<String>); 5] {
       [
          (Provider::Anthropic, &self.anthropic_patterns),
          (Provider::Gemini, &self.gemini_patterns),
          (Provider::Zen, &self.zen_patterns),
          (Provider::Glm, &self.glm_patterns),
+         (Provider::Experiential, &self.experiential_patterns),
       ]
    }
 
@@ -300,6 +320,7 @@ struct FileConfig {
    gemini: Option<GeminiConfig>,
    zen: Option<ZenConfig>,
    glm: Option<GlmConfig>,
+   experiential: Option<ExperientialConfig>,
    pricing: Option<PricingConfig>,
    models: Option<ModelsConfig>,
 }
@@ -342,6 +363,7 @@ impl Config {
          gemini: file.gemini.unwrap_or_default(),
          zen: file.zen.unwrap_or_default(),
          glm: file.glm.unwrap_or_default(),
+         experiential: file.experiential.unwrap_or_default(),
          pricing: file.pricing.unwrap_or_default(),
          models: file.models.unwrap_or_default(),
       })
@@ -360,6 +382,7 @@ impl Config {
          gemini: GeminiConfig::default(),
          zen: ZenConfig::default(),
          glm: GlmConfig::default(),
+         experiential: ExperientialConfig::default(),
          pricing: PricingConfig::default(),
          models: ModelsConfig::default(),
       }
@@ -450,6 +473,27 @@ mod route_tests {
          with_zen(&["claude-*"]).route("claude-opus-5"),
          Provider::Anthropic
       );
+   }
+
+   #[test]
+   fn experiential_names_beat_the_vendor_patterns() {
+      let cfg = ModelsConfig {
+         experiential_patterns: vec!["gpt-6-astra".into(), "claude-fable-5.1".into()],
+         ..ModelsConfig::default()
+      };
+      assert!(ModelsConfig::default().experiential_patterns.is_empty());
+      assert_eq!(
+         ModelsConfig::default().route("gpt-6-astra"),
+         Provider::OpenAi
+      );
+      assert_eq!(
+         ModelsConfig::default().route("claude-fable-5.1"),
+         Provider::Anthropic
+      );
+      assert_eq!(cfg.route("gpt-6-astra"), Provider::Experiential);
+      assert_eq!(cfg.route("claude-fable-5.1"), Provider::Experiential);
+      assert_eq!(cfg.route("claude-opus-5"), Provider::Anthropic);
+      assert_eq!(cfg.route("gemini-2-flash"), Provider::Gemini);
    }
 }
 

@@ -30,7 +30,7 @@ pub async fn zstd_requests(req: Request, next: Next) -> Response {
          "request body too large",
       );
    };
-   let plain = match decode(&bytes) {
+   let plain = match decode(&bytes, MAX_BODY) {
       Ok(plain) => plain,
       Err(DecodeError::TooLarge) => {
          tracing::warn!(
@@ -70,15 +70,15 @@ enum DecodeError {
 
 /// Reads one byte past the ceiling so a body that would exceed it is refused
 /// rather than truncated.
-fn decode(bytes: &Bytes) -> Result<Vec<u8>, DecodeError> {
+fn decode(bytes: &Bytes, limit: usize) -> Result<Vec<u8>, DecodeError> {
    use std::io::Read as _;
-   let mut out = Vec::with_capacity(bytes.len() * 4);
+   let mut out = Vec::with_capacity(bytes.len().saturating_mul(4).min(limit));
    StreamingDecoder::new(&mut &**bytes)
       .map_err(|_| DecodeError::Malformed)?
-      .take(MAX_BODY as u64 + 1)
+      .take(limit as u64 + 1)
       .read_to_end(&mut out)
       .map_err(|_| DecodeError::Malformed)?;
-   if out.len() > MAX_BODY {
+   if out.len() > limit {
       return Err(DecodeError::TooLarge);
    }
    Ok(out)
@@ -124,12 +124,16 @@ mod tests {
    /// the wrong cause.
    #[test]
    fn an_oversized_body_is_refused_rather_than_truncated() {
-      let big = vec![b'a'; super::MAX_BODY + 4096];
-      let framed = zstd_frame(&big);
+      let framed = zstd_frame(&[b'a'; 65]);
       assert!(matches!(
-         super::decode(&Bytes::from(framed)),
+         super::decode(&Bytes::from(framed), 64),
          Err(super::DecodeError::TooLarge)
       ));
+      let framed = zstd_frame(&[b'a'; 64]);
+      assert_eq!(
+         super::decode(&Bytes::from(framed), 64).ok(),
+         Some(vec![b'a'; 64])
+      );
    }
 
    /// zstd's raw-block form, so the test needs no compressor.

@@ -375,6 +375,70 @@ fn drop_unusable_max_output_tokens(rest: &mut serde_json::Map<String, Value>, us
    }
 }
 
+const ENCRYPTED_PAYLOAD_NOTE: &str = "[this payload was encrypted by OpenAI before it reached the proxy and cannot be read here. The parent session has to send its requests through the proxy as well.]";
+
+/// The backend returns any argument whose schema says `encrypted: true` as a Fernet
+/// token only its own backend can read, which is how a spawned agent on
+/// another provider ends up with the header of a task and no payload.
+fn strip_encrypted_argument_flags(rest: &mut serde_json::Map<String, Value>) -> usize {
+   let Some(&mut Value::Array(ref mut tools)) = rest.get_mut("tools") else {
+      return 0;
+   };
+   let mut stripped = 0;
+   for tool in tools.iter_mut() {
+      let Some(&mut Value::Object(ref mut properties)) =
+         tool.pointer_mut("/parameters/properties")
+      else {
+         continue;
+      };
+      for schema in properties.values_mut() {
+         if let Some(schema) = schema.as_object_mut()
+            && schema.remove("encrypted").is_some()
+         {
+            stripped += 1;
+         }
+      }
+   }
+   stripped
+}
+
+fn is_fernet_token(text: &str) -> bool {
+   text.starts_with("gAAAA")
+}
+
+/// Codex wraps a plaintext task as `encrypted_content` whenever the backend
+/// omits `encrypted_function_args`, and the backend 400s that with
+/// `invalid_encrypted_content`.
+fn unwrap_plaintext_agent_payloads(rest: &mut serde_json::Map<String, Value>) -> usize {
+   let Some(&mut Value::Array(ref mut items)) = rest.get_mut("input") else {
+      return 0;
+   };
+   let mut unwrapped = 0;
+   for item in items.iter_mut() {
+      if item.get("type").and_then(Value::as_str) != Some("agent_message") {
+         continue;
+      }
+      let Some(&mut Value::Array(ref mut parts)) = item.get_mut("content") else {
+         continue;
+      };
+      for part in parts.iter_mut() {
+         let Some(text) = part.get("encrypted_content").and_then(Value::as_str) else {
+            continue;
+         };
+         if is_fernet_token(text) {
+            continue;
+         }
+         *part = serde_json::to_value(TextPart {
+            kind: "input_text",
+            text: text.to_owned(),
+         })
+         .unwrap_or(Value::Null);
+         unwrapped += 1;
+      }
+   }
+   unwrapped
+}
+
 /// Zen 400s these codex-only items as `input[N] did not match any supported type`.
 fn zen_input_fixups(rest: &mut serde_json::Map<String, Value>) -> ZenFixups {
    let mut fixes = ZenFixups::default();
@@ -401,7 +465,12 @@ fn zen_input_fixups(rest: &mut serde_json::Map<String, Value>) -> ZenFixups {
                   .map(|parts| {
                      parts
                         .iter()
-                        .filter_map(|part| part.get("text").and_then(Value::as_str))
+                        .filter_map(|part| {
+                           part
+                              .get("text")
+                              .and_then(Value::as_str)
+                              .or_else(|| part.get("encrypted_content").map(|_| ENCRYPTED_PAYLOAD_NOTE))
+                        })
                         .collect::<String>()
                   })
                   .unwrap_or_default();
@@ -537,6 +606,11 @@ pub async fn responses_passthrough(
          Some(model_map::clamp_effort(&resolved.model, &effort));
    }
    drop_unusable_max_output_tokens(&mut req.rest, &auth.user);
+   let flags = strip_encrypted_argument_flags(&mut req.rest);
+   let payloads = unwrap_plaintext_agent_payloads(&mut req.rest);
+   if flags + payloads > 0 {
+      tracing::debug!(flags, payloads, user = %auth.user, "kept inter-agent payloads readable");
+   }
 
    if provider == Provider::Zen {
       let fixes = zen_input_fixups(&mut req.rest);

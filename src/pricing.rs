@@ -78,6 +78,12 @@ impl PriceTable {
    /// spellings, so a lookup that misses is retried against the prefixed
    /// forms before giving up.
    pub fn find(&self, model: &str) -> Option<ModelPrice> {
+      self
+         .lookup(model)
+         .or_else(|| self.lookup(model.strip_prefix("gpt-")?)) // daybreak lol
+   }
+
+   fn lookup(&self, model: &str) -> Option<ModelPrice> {
       if let Some(price) = self.0.get(model) {
          return Some(*price);
       }
@@ -91,9 +97,13 @@ impl PriceTable {
    }
 
    pub fn cost(&self, model: &str, tokens: Tokens) -> f64 {
+      self.cost_at(model, tokens, clock::unix_now())
+   }
+
+   fn cost_at(&self, model: &str, tokens: Tokens, now: i64) -> f64 {
       self
          .find(model)
-         .or_else(|| unpublished(model, clock::unix_now()))
+         .or_else(|| unpublished(model, now))
          .map_or(0.0, |price| price.cost(tokens))
    }
 
@@ -332,6 +342,20 @@ mod tests {
       );
    }
 
+   /// litellm publishes a codename bare where the codex catalog prefixes it.
+   #[test]
+   fn a_gpt_prefixed_codename_finds_its_bare_listing() {
+      let table = PriceTable::parse(
+         r#"{"daybreak-blue-latest": {"input_cost_per_token": 1.25e-6, "output_cost_per_token": 1e-5}}"#,
+      )
+      .unwrap();
+      let tokens = Tokens {
+         input: 1_000_000,
+         ..Tokens::default()
+      };
+      assert!((table.cost("gpt-daybreak-blue-latest", tokens) - 1.25).abs() < 1e-9);
+   }
+
    #[test]
    fn an_unpublished_model_still_bills() {
       let prices = table();
@@ -341,7 +365,9 @@ mod tests {
          cache_read: 1_000_000,
          ..Tokens::default()
       };
-      assert!((prices.cost("gemini-3.8-flash", tokens) - 4.575_f64).abs() < 1e-9_f64);
+      assert!(
+         (prices.cost_at("gemini-3.8-flash", tokens, 1_798_761_599) - 4.575_f64).abs() < 1e-9_f64
+      );
       assert!(prices.cost("gemini-3.8-pro", tokens).abs() < f64::EPSILON);
    }
 

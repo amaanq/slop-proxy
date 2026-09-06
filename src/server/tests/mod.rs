@@ -1,6 +1,7 @@
 use std::env;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::Router;
 use axum::body;
@@ -14,8 +15,8 @@ use super::{AppState, Inner, metrics, router};
 use crate::clock;
 use crate::codex::client::CodexClient;
 use crate::config::{
-   AnthropicConfig, CodexConfig, Config, ExperientialConfig, GeminiConfig, GlmConfig, ModelsConfig,
-   PricingConfig, ZenConfig,
+   AnthropicConfig, CodexConfig, Config, ExperientialConfig, GeminiConfig, GlmConfig, ModelAlias,
+   ModelsConfig, PricingConfig, ZenConfig,
 };
 use crate::db::Db;
 use crate::db::accounts::NewAccount;
@@ -634,7 +635,7 @@ async fn responses_preserve_terminal_status_and_bill_partial_usage() {
    for kind in ["completed", "incomplete", "failed"] {
       let terminal = serde_json::json!({
          "type": format!("response.{kind}"),
-         "response": {"id":"r", "status":kind, "output":[], "usage":{"input_tokens":12,"output_tokens":5}}
+         "response": {"id":"r", "status":kind, "output":[], "usage":{"input_tokens":12_i32,"output_tokens":5_i32}}
       });
       let source = format!("event: response.{kind}\ndata: {terminal}\n\n");
       let (base, db) = spawn_proxy_with_response(ModelsConfig::default(), None, source).await;
@@ -643,7 +644,7 @@ async fn responses_preserve_terminal_status_and_bill_partial_usage() {
             .post(format!("{base}/v1/responses"))
             .bearer_auth("sp-test")
             .json(&serde_json::json!({"model":"gpt-test","stream":streaming,"input":[]}))
-            .timeout(std::time::Duration::from_secs(2))
+            .timeout(Duration::from_secs(2))
             .send()
             .await
             .unwrap();
@@ -659,7 +660,7 @@ async fn responses_preserve_terminal_status_and_bill_partial_usage() {
          } else {
             let response: serde_json::Value = response.json().await.unwrap();
             assert_eq!(response["status"], kind);
-            assert_eq!(response["usage"]["output_tokens"], 5);
+            assert_eq!(response["usage"]["output_tokens"], 5_i32);
          }
       }
       db.flush().await.unwrap();
@@ -679,7 +680,7 @@ async fn responses_eof_is_logged_as_failure() {
       .post(format!("{base}/v1/responses"))
       .bearer_auth("sp-test")
       .json(&serde_json::json!({"model":"gpt-test","input":[]}))
-      .timeout(std::time::Duration::from_secs(2))
+      .timeout(Duration::from_secs(2))
       .send()
       .await
       .unwrap();
@@ -695,7 +696,7 @@ async fn aliases_are_resolved_before_provider_scope_on_every_endpoint() {
    let mut models = ModelsConfig::default();
    models.aliases.insert(
       "shortcut".into(),
-      crate::config::ModelAlias {
+      ModelAlias {
          model: "gemini-test".into(),
          effort: Some("low".into()),
       },
@@ -720,9 +721,9 @@ async fn aliases_are_resolved_before_provider_scope_on_every_endpoint() {
          .post(format!("{base}/v1/{endpoint}"))
          .bearer_auth("sp-test")
          .json(
-            &serde_json::json!({"model":"shortcut:high","input":[],"messages":[],"max_tokens":1}),
+            &serde_json::json!({"model":"shortcut:high","input":[],"messages":[],"max_tokens":1_i32}),
          )
-         .timeout(std::time::Duration::from_secs(2))
+         .timeout(Duration::from_secs(2))
          .send()
          .await
          .unwrap();
@@ -739,8 +740,8 @@ async fn bridged_responses_preserve_status_usage_and_output_order() {
    ] {
       let first = serde_json::json!({"id":"r","choices":[{"delta":{
          "content":"partial",
-         "tool_calls":[{"index":0,"id":"upstream","function":{"name":"read","arguments":"{}"}}]
-      }}],"usage":{"prompt_tokens":12,"completion_tokens":5,"total_tokens":17}});
+         "tool_calls":[{"index":0_i32,"id":"upstream","function":{"name":"read","arguments":"{}"}}]
+      }}],"usage":{"prompt_tokens":12_i32,"completion_tokens":5_i32,"total_tokens":17_i32}});
       let last = if finish == "error" {
          serde_json::json!({"error":{"message":"boom","code":"UPSTREAM_FAILED"}})
       } else {
@@ -756,7 +757,7 @@ async fn bridged_responses_preserve_status_usage_and_output_order() {
          .post(format!("{base}/v1/responses"))
          .bearer_auth("sp-test")
          .json(&serde_json::json!({"model":"gemini-test","input":"hello"}))
-         .timeout(std::time::Duration::from_secs(2))
+         .timeout(Duration::from_secs(2))
          .send()
          .await
          .unwrap();
@@ -764,7 +765,7 @@ async fn bridged_responses_preserve_status_usage_and_output_order() {
       let value: serde_json::Value = response.json().await.unwrap();
       assert_eq!(value["status"], status);
       assert_eq!(value["id"], "r");
-      assert_eq!(value["usage"]["output_tokens"], 5);
+      assert_eq!(value["usage"]["output_tokens"], 5_i32);
       if status == "failed" {
          assert_eq!(value["error"]["message"], "boom");
       } else {

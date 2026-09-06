@@ -124,14 +124,14 @@ mod tests {
    /// the wrong cause.
    #[test]
    fn an_oversized_body_is_refused_rather_than_truncated() {
-      let framed = zstd_frame(&[b'a'; 65]);
+      let oversized = zstd_frame(&[b'a'; 65]);
       assert!(matches!(
-         super::decode(&Bytes::from(framed), 64),
+         super::decode(&Bytes::from(oversized), 64),
          Err(super::DecodeError::TooLarge)
       ));
-      let framed = zstd_frame(&[b'a'; 64]);
+      let fitting = zstd_frame(&[b'a'; 64]);
       assert_eq!(
-         super::decode(&Bytes::from(framed), 64).ok(),
+         super::decode(&Bytes::from(fitting), 64).ok(),
          Some(vec![b'a'; 64])
       );
    }

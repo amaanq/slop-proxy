@@ -22,6 +22,7 @@ use crate::glm::client::GlmClient;
 use crate::provider::Provider;
 use crate::translate::UsageCapture;
 use crate::translate::gemini_bridge;
+use crate::translate::gemini_req::{custom_tools, to_chat};
 use crate::zen::client::ZenClient;
 
 /// A backend's reply to a Responses request, before anything reads it.
@@ -99,23 +100,25 @@ impl Pools {
    }
 
    pub async fn reload(&self) {
-      if let Err(err) = self.codex.reload().await {
-         tracing::warn!("reloading {} accounts: {err}", Provider::OpenAi);
-      }
-      if let Err(err) = self.anthropic.reload().await {
-         tracing::warn!("reloading {} accounts: {err}", Provider::Anthropic);
-      }
-      if let Err(err) = self.gemini.reload().await {
-         tracing::warn!("reloading {} accounts: {err}", Provider::Gemini);
-      }
-      if let Err(err) = self.zen.reload().await {
-         tracing::warn!("reloading {} accounts: {err}", Provider::Zen);
-      }
-      if let Err(err) = self.glm.reload().await {
-         tracing::warn!("reloading {} accounts: {err}", Provider::Glm);
-      }
-      if let Err(err) = self.experiential.reload().await {
-         tracing::warn!("reloading {} accounts: {err}", Provider::Experiential);
+      let (codex, anthropic, gemini, zen, glm, experiential) = tokio::join!(
+         self.codex.reload(),
+         self.anthropic.reload(),
+         self.gemini.reload(),
+         self.zen.reload(),
+         self.glm.reload(),
+         self.experiential.reload()
+      );
+      for (provider, result) in [
+         (Provider::OpenAi, codex),
+         (Provider::Anthropic, anthropic),
+         (Provider::Gemini, gemini),
+         (Provider::Zen, zen),
+         (Provider::Glm, glm),
+         (Provider::Experiential, experiential),
+      ] {
+         if let Err(err) = result {
+            tracing::warn!("reloading {provider} accounts: {err}");
+         }
       }
    }
 
@@ -164,8 +167,8 @@ impl Pools {
                         body: "this request cannot be bridged to gemini; see the proxy log for the field that failed".into(),
                     });
             };
-            let custom = crate::translate::gemini_req::custom_tools(req);
-            let chat = crate::translate::gemini_req::to_chat(req);
+            let custom = custom_tools(req);
+            let chat = to_chat(req);
             let (account_id, reply) = self
                .gemini
                .execute(route, Call::OpenAi(Box::new(chat)))

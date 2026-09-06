@@ -2,6 +2,7 @@ use super::*;
 use crate::config::ModelAlias;
 use axum::body::Bytes;
 use axum::http::HeaderMap;
+use std::time::Duration;
 
 type Requests = Arc<Mutex<Vec<(HeaderMap, Bytes)>>>;
 
@@ -11,7 +12,7 @@ async fn gateway(
    reply: String,
 ) -> (String, Db, Requests) {
    let requests = Requests::default();
-   let seen = requests.clone();
+   let seen = Arc::clone(&requests);
    let upstream = Router::new().route(
       "/v1/messages",
       post(move |headers: HeaderMap, body: Bytes| {
@@ -30,10 +31,10 @@ async fn gateway(
          }
       }),
    );
-   let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-   let upstream_url = format!("http://{}", listener.local_addr().unwrap());
+   let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+   let upstream_url = format!("http://{}", upstream_listener.local_addr().unwrap());
    tokio::spawn(async move {
-      axum::serve(listener, upstream).await.unwrap();
+      axum::serve(upstream_listener, upstream).await.unwrap();
    });
    let db_path = env::temp_dir().join(format!("slop-gateway-{}.db", uuid::Uuid::new_v4()));
    let db = Db::open(&db_path).unwrap();
@@ -81,10 +82,10 @@ async fn gateway(
       models: super::super::ModelCache::new(),
       pools,
    }));
-   let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-   let base = format!("http://{}", listener.local_addr().unwrap());
+   let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+   let base = format!("http://{}", proxy_listener.local_addr().unwrap());
    tokio::spawn(async move {
-      axum::serve(listener, router(state)).await.unwrap();
+      axum::serve(proxy_listener, router(state)).await.unwrap();
    });
    (base, db, requests)
 }
@@ -93,7 +94,7 @@ async fn gateway(
 async fn messages_preserve_payloads_usage_and_provider_scope() {
    let message = serde_json::json!({
       "id": "msg-test", "type": "message", "content": [], "stop_reason": "end_turn",
-      "usage": {"input_tokens": 12, "output_tokens": 5}
+      "usage": {"input_tokens": 12_i32, "output_tokens": 5_i32}
    })
    .to_string();
    let sse = concat!(
@@ -107,11 +108,11 @@ async fn messages_preserve_payloads_usage_and_provider_scope() {
    ] {
       let (base, db, requests) = gateway(StatusCode::OK, content_type, reply.clone()).await;
       let client = reqwest::Client::builder()
-         .timeout(std::time::Duration::from_secs(3))
+         .timeout(Duration::from_secs(3))
          .build()
          .unwrap();
       let mut request = serde_json::json!({
-         "model":"gateway", "stream":streaming, "max_tokens":32,
+         "model":"gateway", "stream":streaming, "max_tokens":32_i32,
          "messages":[{"role":"user","content":"hello"}], "unknown_field":{"keep":true}
       });
       let response = client
@@ -149,14 +150,14 @@ async fn messages_preserve_payloads_usage_and_provider_scope() {
       )
       .await
       .unwrap();
-      let response = client
+      let denied_response = client
          .post(format!("{base}/v1/messages"))
          .bearer_auth("sp-test")
          .json(&request)
          .send()
          .await
          .unwrap();
-      assert_eq!(response.status(), 403);
+      assert_eq!(denied_response.status(), 403);
       assert_eq!(requests.lock().unwrap().len(), 1);
    }
 }
@@ -172,8 +173,8 @@ async fn quota_exhaustion_keeps_the_retry_header() {
    let response = reqwest::Client::new()
       .post(format!("{base}/v1/messages"))
       .bearer_auth("sp-test")
-      .json(&serde_json::json!({"model":"gateway-model","messages":[],"max_tokens":32}))
-      .timeout(std::time::Duration::from_secs(3))
+      .json(&serde_json::json!({"model":"gateway-model","messages":[],"max_tokens":32_i32}))
+      .timeout(Duration::from_secs(3))
       .send()
       .await
       .unwrap();

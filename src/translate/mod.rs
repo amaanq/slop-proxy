@@ -23,7 +23,7 @@ use serde_json::value::{RawValue, to_raw_value};
 
 use crate::codex::sse::EventStream;
 use crate::codex::types::{
-   OutputContentPart, OutputItem, ResponsesEvent, SummaryPart, TerminalKind, Usage,
+   OutputContentPart, OutputItem, ResponsesEvent, SummaryPart, TerminalKind, TokenDetails, Usage,
 };
 
 /// Zen's upstream 400s `max_output_tokens` below 16, and `CodexClient::post`
@@ -112,7 +112,7 @@ impl UsageCapture {
    pub fn observe(&self, event: &ResponsesEvent) {
       self.note_event(event.kind());
       if let Some((kind, response)) = event.terminal() {
-         if let Some(usage) = &response.usage {
+         if let Some(usage) = response.usage.as_ref() {
             self.record_partial(usage);
          }
          let mut captured = self.0.lock().unwrap();
@@ -122,8 +122,9 @@ impl UsageCapture {
             captured.error_kind = Some("upstream_failed".into());
          }
       }
-      if let ResponsesEvent::OutputItemDone {
-         item: OutputItem::FunctionCall { name, .. } | OutputItem::CustomToolCall { name, .. },
+      if let &ResponsesEvent::OutputItemDone {
+         item:
+            OutputItem::FunctionCall { ref name, .. } | OutputItem::CustomToolCall { ref name, .. },
          ..
       } = event
       {
@@ -403,7 +404,16 @@ impl Walker {
             self.done = true;
             out.push(Step::Failed { message, code });
          },
-         _ => {},
+         ResponsesEvent::InProgress
+         | ResponsesEvent::ContentPartAdded { .. }
+         | ResponsesEvent::ContentPartDone
+         | ResponsesEvent::OutputTextDone { .. }
+         | ResponsesEvent::ReasoningSummaryPartDone
+         | ResponsesEvent::ReasoningSummaryTextDone
+         | ResponsesEvent::ReasoningTextDone
+         | ResponsesEvent::FunctionCallArgumentsDone { .. }
+         | ResponsesEvent::CustomToolCallInputDone { .. }
+         | ResponsesEvent::Other => {},
       }
       out
    }
@@ -460,7 +470,7 @@ impl Walker {
             let keys: Vec<_> = self
                .blocks
                .keys()
-               .filter(|(item, _)| *item == output_index)
+               .filter(|key| key.0 == output_index)
                .copied()
                .collect();
             for key in keys {
@@ -510,7 +520,7 @@ impl Walker {
       if self.blocks.contains_key(&key) {
          return;
       }
-      if let Block::ToolCall { name, .. } = &block {
+      if let Block::ToolCall { ref name, .. } = block {
          self.saw_tool = true;
          self.capture.note_tool_call(name);
       }
@@ -565,11 +575,11 @@ impl Walker {
             total_tokens: snapshot.input_tokens
                + snapshot.cache_read_tokens
                + snapshot.output_tokens,
-            input_tokens_details: crate::codex::types::TokenDetails {
+            input_tokens_details: TokenDetails {
                cached_tokens: snapshot.cache_read_tokens,
                ..Default::default()
             },
-            output_tokens_details: crate::codex::types::TokenDetails {
+            output_tokens_details: TokenDetails {
                reasoning_tokens: snapshot.reasoning_tokens,
                ..Default::default()
             },
@@ -611,22 +621,28 @@ impl Aggregated {
             ..
          } => self.blocks.push(block),
          Step::Block { index, event } => match (event, self.blocks.get_mut(index)) {
+            (BlockEvent::Append(chunk), Some(block)) => match *block {
+               Block::Thinking { ref mut text, .. }
+               | Block::Text { ref mut text }
+               | Block::ToolCall {
+                  arguments: ref mut text,
+                  ..
+               } => text.push_str(&chunk),
+            },
             (
-               BlockEvent::Append(chunk),
-               Some(
-                  Block::Thinking { text, .. }
-                  | Block::Text { text }
-                  | Block::ToolCall {
-                     arguments: text, ..
-                  },
-               ),
-            ) => text.push_str(&chunk),
-            (BlockEvent::Signature(sig), Some(Block::Thinking { signature, .. })) => {
+               BlockEvent::Signature(sig),
+               Some(&mut Block::Thinking {
+                  ref mut signature, ..
+               }),
+            ) => {
                *signature = Some(sig);
             },
-            (BlockEvent::Close, Some(Block::ToolCall { arguments, .. }))
-               if arguments.is_empty() =>
-            {
+            (
+               BlockEvent::Close,
+               Some(&mut Block::ToolCall {
+                  ref mut arguments, ..
+               }),
+            ) if arguments.is_empty() => {
                arguments.push_str("{}");
             },
             _ => {},

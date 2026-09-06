@@ -86,7 +86,7 @@ enum ContentBlockStart {
    ToolUse {
       id: String,
       name: String,
-      input: EmptyObject,
+      input: serde_json::Map<String, serde_json::Value>,
    },
    Thinking {
       thinking: &'static str,
@@ -95,9 +95,6 @@ enum ContentBlockStart {
       text: &'static str,
    },
 }
-
-#[derive(Serialize)]
-struct EmptyObject {}
 
 #[derive(Serialize)]
 #[serde(tag = "type")]
@@ -175,7 +172,7 @@ impl AnthropicStream {
          .into_iter()
          .filter_map(|step| match step {
             Step::Failed { message, .. } => Some(error("overloaded_error", message)),
-            _ => None,
+            Step::Start { .. } | Step::Block { .. } | Step::Stop { .. } => None,
          })
          .collect()
    }
@@ -224,7 +221,7 @@ impl AnthropicStream {
                   ContentBlockStart::ToolUse {
                      id,
                      name,
-                     input: EmptyObject {},
+                     input: serde_json::Map::new(),
                   },
                   Channel::Call,
                ),
@@ -247,7 +244,7 @@ impl AnthropicStream {
                   out.push(AnthEvent::ContentBlockStop { index }.out());
                   return;
                },
-               BlockEvent::Open(_) => unreachable!(),
+               BlockEvent::Open(_) => return,
             };
             out.push(Self::delta(index, delta));
          },

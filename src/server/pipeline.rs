@@ -86,18 +86,17 @@ pub fn apply_snapshot(record: &mut UsageRecord, snap: &CapturedUsage, started: I
    if snap.error_kind.is_some() {
       record.error_kind.clone_from(&snap.error_kind);
    }
-   if let Some(reason) = &snap.stop_reason {
+   if let Some(reason) = snap.stop_reason.as_ref() {
       record.stop_reason.clone_from(reason);
    }
    record.tools_called = snap.tools_called.join(",");
    record.response_bytes = snap.response_bytes;
 }
 
-pub fn logged_json(
-   state: &AppState,
-   mut record: UsageRecord,
-   value: impl serde::Serialize,
-) -> Response {
+pub fn logged_json<T>(state: &AppState, mut record: UsageRecord, value: T) -> Response
+where
+   T: serde::Serialize,
+{
    let response = axum::Json(value).into_response();
    record.status = i64::from(response.status().as_u16());
    record.response_bytes = response.body().size_hint().exact().unwrap_or(0) as i64;

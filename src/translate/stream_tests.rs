@@ -8,7 +8,8 @@ use super::gemini_bridge::ChatToResponses;
 use super::gemini_req::{custom_tools, to_chat};
 use super::openai_stream::OpenAiStream;
 use super::{Block, StopKind, UsageCapture, aggregate};
-use crate::codex::types::ResponsesEvent;
+use crate::codex::types::{OutputItem, ResponsesEvent};
+use crate::gemini::native::{NativeEvent, NativeStream, request};
 
 fn interleaved() -> Vec<ResponsesEvent> {
    vec![
@@ -34,10 +35,10 @@ async fn interleaved_calls_keep_their_arguments_in_every_renderer() {
       .blocks
       .iter()
       .filter_map(|block| match block {
-         Block::ToolCall {
-            id,
-            name,
-            arguments,
+         &Block::ToolCall {
+            ref id,
+            ref name,
+            ref arguments,
          } => Some((id.as_str(), name.as_str(), arguments.as_str())),
          _ => None,
       })
@@ -62,8 +63,8 @@ async fn interleaved_calls_keep_their_arguments_in_every_renderer() {
       if let Some(content) = delta["content"].as_str() {
          text.push_str(content);
       }
-      if let Some(calls) = delta["tool_calls"].as_array() {
-         for call in calls {
+      if let Some(tool_calls) = delta["tool_calls"].as_array() {
+         for call in tool_calls {
             let index = call["index"].as_u64().unwrap();
             if let Some(id) = call["id"].as_str() {
                ids.insert(index, id.to_owned());
@@ -82,7 +83,7 @@ async fn interleaved_calls_keep_their_arguments_in_every_renderer() {
    );
 
    let mut messages = AnthropicStream::new("m".into(), 10, false, UsageCapture::default());
-   let mut arguments = BTreeMap::<u64, String>::new();
+   let mut anthropic_arguments = BTreeMap::<u64, String>::new();
    let mut closed = Vec::new();
    for (kind, frame) in interleaved()
       .into_iter()
@@ -97,7 +98,7 @@ async fn interleaved_calls_keep_their_arguments_in_every_renderer() {
          );
       }
       if let Some(args) = value["delta"]["partial_json"].as_str() {
-         arguments
+         anthropic_arguments
             .entry(value["index"].as_u64().unwrap())
             .or_default()
             .push_str(args);
@@ -107,7 +108,7 @@ async fn interleaved_calls_keep_their_arguments_in_every_renderer() {
       }
    }
    assert_eq!(
-      arguments,
+      anthropic_arguments,
       BTreeMap::from([(0, "{\"x\":1}".into()), (1, "{\"y\":2}".into())])
    );
    assert_eq!(closed, [0, 1, 2]);
@@ -119,7 +120,7 @@ fn every_terminal_event_records_usage_and_status() {
       let capture = UsageCapture::default();
       let event = serde_json::from_value(json!({
          "type": format!("response.{kind}"),
-         "response": {"usage": {"input_tokens": 12, "output_tokens": 5, "input_tokens_details": {"cached_tokens": 2}}}
+         "response": {"usage": {"input_tokens": 12_i32, "output_tokens": 5_i32, "input_tokens_details": {"cached_tokens": 2_i32}}}
       })).unwrap();
       capture.observe(&event);
       let snapshot = capture.snapshot();
@@ -155,7 +156,7 @@ fn bridge_distinguishes_incomplete_responses_and_missing_terminals() {
    let mut bridge = ChatToResponses::default();
    bridge.feed(
       &serde_json::from_value(
-         json!({"choices":[{"delta":{"content":"partial"}}], "usage":{"prompt_tokens":5}}),
+         json!({"choices":[{"delta":{"content":"partial"}}], "usage":{"prompt_tokens":5_i32}}),
       )
       .unwrap(),
    );
@@ -181,7 +182,7 @@ fn upstream_call_ids_cannot_mix_signatures_between_turns() {
       let mut bridge = ChatToResponses::default();
       let events = bridge.feed(
          &serde_json::from_value(json!({"choices":[{"delta":{"tool_calls":[{
-            "id":"call_native_0", "index":0, "function":{"name":"read","arguments":"{}"},
+            "id":"call_native_0", "index":0_i32, "function":{"name":"read","arguments":"{}"},
             "extra_content":{"google":{"thought_signature":signature}}
          }]}}]}))
          .unwrap(),
@@ -189,8 +190,8 @@ fn upstream_call_ids_cannot_mix_signatures_between_turns() {
       let call_id = events
          .iter()
          .find_map(|event| match event {
-            ResponsesEvent::OutputItemAdded {
-               item: crate::codex::types::OutputItem::FunctionCall { call_id, .. },
+            &ResponsesEvent::OutputItemAdded {
+               item: OutputItem::FunctionCall { ref call_id, .. },
                ..
             } => Some(call_id.clone()),
             _ => None,
@@ -226,16 +227,16 @@ fn additional_tool_definitions_reach_gemini() {
 
 #[tokio::test]
 async fn native_reasoning_and_tool_calls_survive_separate_frames() {
-   let mut native = crate::gemini::native::NativeStream::new("gemini-test");
+   let mut native = NativeStream::new("gemini-test");
    let mut bridge = ChatToResponses::default();
    let mut events = Vec::new();
    for value in [
       json!({"candidates":[{"content":{"parts":[{"thought":true,"text":"considering"},{"text":"answer"}]}}]}),
-      json!({"candidates":[{"content":{"parts":[{"functionCall":{"name":"alpha","args":{"x":1}}}]}}]}),
-      json!({"candidates":[{"content":{"parts":[{"functionCall":{"name":"beta","args":{"y":2}}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2}}),
+      json!({"candidates":[{"content":{"parts":[{"functionCall":{"name":"alpha","args":{"x":1_i32}}}]}}]}),
+      json!({"candidates":[{"content":{"parts":[{"functionCall":{"name":"beta","args":{"y":2_i32}}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10_i32,"candidatesTokenCount":2_i32}}),
    ] {
       for event in native.events(format!("data: {value}\n\n").as_bytes()) {
-         if let crate::gemini::native::NativeEvent::Chunk(chunk) = event {
+         if let NativeEvent::Chunk(chunk) = event {
             events.extend(bridge.feed(&chunk));
          }
       }
@@ -243,7 +244,7 @@ async fn native_reasoning_and_tool_calls_survive_separate_frames() {
    assert!(events.iter().any(|event| matches!(
       event,
       ResponsesEvent::OutputItemDone {
-         item: crate::codex::types::OutputItem::Reasoning { .. },
+         item: OutputItem::Reasoning { .. },
          ..
       }
    )));
@@ -267,13 +268,13 @@ fn reasoning_effort_reaches_the_native_generation_config() {
       ),
       (
          "gemini-2.5-flash",
-         json!({"thinkingBudget":24576,"includeThoughts":true}),
+         json!({"thinkingBudget":24_576_i32,"includeThoughts":true}),
       ),
    ] {
       let req =
          serde_json::from_value(json!({"model":model,"messages":[],"reasoning_effort":"high"}))
             .unwrap();
-      let native = crate::gemini::native::request(&req).unwrap();
+      let native = request(&req).unwrap();
       let body = serde_json::to_value(&native.body).unwrap();
       assert_eq!(body["generationConfig"]["thinkingConfig"], expected);
    }

@@ -25,6 +25,7 @@ use crate::translate::chat::{
    ChatChunk, ChatEnvelope, ChatError, ChatErrorBody, ChatRequest, ErrorCode, StreamOptions,
 };
 use crate::translate::gemini_req;
+use crate::translate::model_map::resolve;
 
 const DIALECT: Dialect = Dialect::OpenAi;
 
@@ -314,7 +315,7 @@ pub async fn native(
          "unsupported action on the native surface",
       );
    }
-   let resolved = crate::translate::model_map::resolve(&state.cfg.models, raw_model);
+   let resolved = resolve(&state.cfg.models, raw_model);
    if state.cfg.models.route(&resolved.model) != Provider::Gemini {
       return error_response(
          DIALECT,

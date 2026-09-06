@@ -8,7 +8,7 @@ use super::chat::{
    ChatContent, ChatMessage, ChatPart, ChatRequest, ChatToolCall, ChatToolChoice, ChatToolDef,
    ExtraContent, FunctionBody, FunctionDef, ImageRef, StreamOptions,
 };
-use crate::codex::types::{ContentPart, InputItem, ResponsesRequest, ToolChoice};
+use crate::codex::types::{ContentPart, InputItem, ResponsesRequest, ToolChoice, ToolDef};
 use crate::gemini::signatures;
 
 fn tool_call_message(call_id: &str, name: &str, arguments: String) -> ChatMessage {
@@ -41,13 +41,19 @@ pub fn custom_tools(req: &ResponsesRequest) -> BTreeSet<String> {
       .collect()
 }
 
-fn request_tools(req: &ResponsesRequest) -> impl Iterator<Item = &crate::codex::types::ToolDef> {
+fn request_tools(req: &ResponsesRequest) -> impl Iterator<Item = &ToolDef> {
    req.tools.iter().chain(
       req.input
          .iter()
-         .filter_map(|item| match item {
-            InputItem::AdditionalTools { tools, .. } => Some(tools.as_slice()),
-            _ => None,
+         .filter_map(|item| match *item {
+            InputItem::AdditionalTools { ref tools, .. } => Some(tools.as_slice()),
+            InputItem::Message { .. }
+            | InputItem::FunctionCall { .. }
+            | InputItem::FunctionCallOutput { .. }
+            | InputItem::CustomToolCall { .. }
+            | InputItem::CustomToolCallOutput { .. }
+            | InputItem::Reasoning { .. }
+            | InputItem::Other => None,
          })
          .flatten(),
    )

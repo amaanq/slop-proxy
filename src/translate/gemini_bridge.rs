@@ -148,8 +148,8 @@ impl ChatToResponses {
             },
          });
       }
-      let first = chunk.choices.first();
-      let delta = first.map(|choice| &choice.delta);
+      let first_choice = chunk.choices.first();
+      let delta = first_choice.map(|choice| &choice.delta);
       if delta.is_some_and(|delta| {
          delta
             .images
@@ -230,9 +230,10 @@ impl ChatToResponses {
             out.extend(self.tool_call(call));
          }
       }
-      if self.finish_reason.is_none() && first.is_some_and(|choice| choice.finish_reason.is_some())
+      if self.finish_reason.is_none()
+         && first_choice.is_some_and(|choice| choice.finish_reason.is_some())
       {
-         self.finish_reason = first.and_then(|choice| choice.finish_reason);
+         self.finish_reason = first_choice.and_then(|choice| choice.finish_reason);
          for call in self.calls.values() {
             if !call.announced {
                continue;
@@ -344,7 +345,7 @@ impl ChatToResponses {
          slot.name.clone_from(name);
       }
       let was_announced = slot.announced;
-      if let Some(args) = &call.function.arguments {
+      if let Some(args) = call.function.arguments.as_ref() {
          slot.arguments.push_str(args);
       }
       if let Some(sig) = call.thought_signature()
@@ -456,24 +457,24 @@ pub fn event_stream(
    let mut native = (protocol == GeminiProtocol::Native).then(|| NativeStream::new(model));
    let mut frames = Frames::default();
    let mut bridge = ChatToResponses::with_custom(custom);
-   let bytes = resp
+   let upstream = resp
       .bytes_stream()
       .map(Some)
       .chain(stream::once(async { None }));
-   Box::pin(bytes.flat_map(move |item| {
+   Box::pin(upstream.flat_map(move |item| {
       let Some(item) = item else {
          return stream::iter(bridge.finalize());
       };
-      let bytes = match item {
-         Ok(bytes) => bytes,
+      let payload = match item {
+         Ok(payload) => payload,
          Err(error) => return stream::iter(bridge.fail(&error.to_string(), "upstream_read")),
       };
-      capture.note_upstream_head(&bytes);
-      let chunks = if let Some(native) = &mut native {
-         native.events(&bytes)
+      capture.note_upstream_head(&payload);
+      let chunks = if let Some(native) = native.as_mut() {
+         native.events(&payload)
       } else {
          let mut chunks = Vec::new();
-         for data in frames.feed(&bytes) {
+         for data in frames.feed(&payload) {
             if data == b"[DONE]" {
                continue;
             }
@@ -849,12 +850,12 @@ mod full_chain {
       for event in raw.chunks(64).flat_map(|chunk| native.events(chunk)) {
          match event {
             NativeEvent::Chunk(chunk) => {
-               for event in bridge.feed(&chunk) {
-                  if let ResponsesEvent::OutputTextDelta { delta, .. } = &event {
+               for response_event in bridge.feed(&chunk) {
+                  if let &ResponsesEvent::OutputTextDelta { ref delta, .. } = &response_event {
                      text.push_str(delta);
                   }
-                  kinds.push(event.kind().to_owned());
-                  if let Some((_, response)) = event.terminal() {
+                  kinds.push(response_event.kind().to_owned());
+                  if let Some((_, response)) = response_event.terminal() {
                      terminals.push(response.clone());
                   }
                }

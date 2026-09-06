@@ -95,7 +95,7 @@ mod unpaired_tool_tests {
       let mut rest = input(serde_json::json!([
           {"type": "additional_tools", "role": "developer", "tools": [{"type": "function", "name": "spawn_agent"}, {"type": "function", "name": "wait_agent"}]},
           {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "go"}]},
-          {"type": "agent_message", "author": "main", "recipient": "worker", "content": [{"type": "input_text", "text": "check "}, {"type": "encrypted_content", "encrypted_content": "x"}, {"type": "input_text", "text": "the tree"}]},
+          {"type": "agent_message", "author": "main", "recipient": "worker", "content": [{"type": "input_text", "text": "check "}, {"type": "encrypted_content", "encrypted_content": "gAAAAx"}, {"type": "input_text", "text": "the tree"}]},
           {"type": "local_shell_call", "call_id": "sh1", "action": {"type": "exec", "command": ["ls"]}},
           {"type": "function_call_output", "call_id": "sh1", "output": "files"},
           {"type": "context_compaction", "summary": "earlier"},
@@ -125,7 +125,46 @@ mod unpaired_tool_tests {
          rest["input"],
          serde_json::json!([
              {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "go"}]},
-             {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "check the tree"}]},
+             {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": format!("check {ENCRYPTED_PAYLOAD_NOTE}the tree")}]},
+         ])
+      );
+   }
+
+   #[test]
+   fn the_encrypted_flag_leaves_a_tool_schema_and_nothing_else_moves() {
+      let mut rest = serde_json::Map::new();
+      rest.insert(
+         "tools".into(),
+         serde_json::json!([
+             {"type": "function", "name": "spawn_agent", "parameters": {"type": "object", "properties": {"message": {"type": "string", "encrypted": true, "description": "task"}, "task_name": {"type": "string"}}}},
+             {"type": "custom", "name": "apply_patch", "format": {"type": "grammar"}},
+         ]),
+      );
+      assert_eq!(strip_encrypted_argument_flags(&mut rest), 1);
+      assert_eq!(
+         rest["tools"][0]["parameters"]["properties"]["message"],
+         serde_json::json!({"type": "string", "description": "task"})
+      );
+      assert_eq!(rest["tools"][1]["format"]["type"], "grammar");
+   }
+
+   #[test]
+   fn a_plaintext_payload_becomes_input_text_and_a_fernet_token_stays() {
+      let mut rest = input(serde_json::json!([
+          {"type": "agent_message", "author": "/root", "recipient": "/root/t", "content": [
+              {"type": "input_text", "text": "Payload:\n"},
+              {"type": "encrypted_content", "encrypted_content": "reply PINEAPPLE"},
+              {"type": "encrypted_content", "encrypted_content": "gAAAABqni"},
+          ]},
+          {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "go"}]},
+      ]));
+      assert_eq!(unwrap_plaintext_agent_payloads(&mut rest), 1);
+      assert_eq!(
+         rest["input"][0]["content"],
+         serde_json::json!([
+             {"type": "input_text", "text": "Payload:\n"},
+             {"type": "input_text", "text": "reply PINEAPPLE"},
+             {"type": "encrypted_content", "encrypted_content": "gAAAABqni"},
          ])
       );
    }

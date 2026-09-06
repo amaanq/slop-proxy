@@ -273,6 +273,17 @@ impl Db {
       }).await
    }
 
+   pub async fn cas_account_cooldown(&self, id: i64, until: i64) -> Result<bool> {
+      self.call(move |conn| {
+         let rows = conn.execute(
+            "UPDATE accounts SET status = 'cooldown', cooldown_until = ?2, disabled_reason = NULL, updated_at = unixepoch()
+             WHERE id = ?1 AND status != 'disabled' AND (status != 'cooldown' OR cooldown_until IS NULL OR cooldown_until < ?2)",
+            params![id, until],
+         )?;
+         Ok(rows > 0)
+      }).await
+   }
+
    pub async fn clear_account_cooldown(&self, id: i64, expected_until: i64) -> Result<bool> {
       self
          .call(move |conn| {

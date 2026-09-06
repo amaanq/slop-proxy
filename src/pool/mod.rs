@@ -10,6 +10,7 @@ use crate::db::Db;
 use crate::provider::Provider;
 use crate::upstream::SendError;
 use std::cmp::Reverse;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -123,6 +124,34 @@ pub struct Pool<B: Backend> {
 }
 
 impl<B: Backend> Pool<B> {
+   /// Averaged across accounts, so a caller's figures do not jump when
+   /// routing moves it.
+   pub async fn pool_windows(&self) -> Vec<UsageWindow> {
+      let mut by_name: BTreeMap<String, (f64, usize, Option<i64>)> = BTreeMap::default();
+      for account in self.slots.snapshot().await {
+         let Some(usage) = account.usage else { continue };
+         for window in usage.windows {
+            let slot = by_name
+               .entry(window.name.clone())
+               .or_insert((0.0_f64, 0_usize, None));
+            slot.0 += window.utilization;
+            slot.1 += 1;
+            slot.2 = match (slot.2, window.resets_at) {
+               (Some(left), Some(right)) => Some(left.min(right)),
+               (left, right) => left.or(right),
+            };
+         }
+      }
+      by_name
+         .into_iter()
+         .map(|(name, (sum, count, resets_at))| UsageWindow {
+            name,
+            utilization: sum / count.max(1) as f64,
+            resets_at,
+         })
+         .collect()
+   }
+
    pub async fn load(db: Db, backend: B) -> eyre::Result<Self> {
       Ok(Self {
          slots: Slots::load(db, B::PROVIDER).await?,

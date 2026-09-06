@@ -140,12 +140,26 @@ mod unpaired_tool_tests {
              {"type": "custom", "name": "apply_patch", "format": {"type": "grammar"}},
          ]),
       );
-      assert_eq!(strip_encrypted_argument_flags(&mut rest), 1);
+      rest.insert(
+         "input".into(),
+         serde_json::json!([
+             {"type": "additional_tools", "role": "developer", "tools": [{"type": "namespace", "name": "collab", "tools": [{"type": "function", "name": "send_message", "parameters": {"type": "object", "properties": {"message": {"type": "string", "encrypted": true}}}}]}, {"type": "namespace", "name": "collaboration", "tools": [{"type": "function", "name": "followup_task", "parameters": {"type": "object", "properties": {"message": {"type": "string", "encrypted": true}}}}]}]},
+         ]),
+      );
+      assert_eq!(strip_encrypted_argument_flags(&mut rest), 2);
       assert_eq!(
          rest["tools"][0]["parameters"]["properties"]["message"],
          serde_json::json!({"type": "string", "description": "task"})
       );
       assert_eq!(rest["tools"][1]["format"]["type"], "grammar");
+      assert_eq!(
+         rest["input"][0]["tools"][0]["tools"][0]["parameters"]["properties"]["message"],
+         serde_json::json!({"type": "string"})
+      );
+      assert_eq!(
+         rest["input"][0]["tools"][1]["tools"][0]["parameters"]["properties"]["message"]["encrypted"],
+         true
+      );
    }
 
    #[test]

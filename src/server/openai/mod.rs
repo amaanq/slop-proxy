@@ -381,13 +381,37 @@ const ENCRYPTED_PAYLOAD_NOTE: &str = "[this payload was encrypted by OpenAI befo
 /// token only its own backend can read, which is how a spawned agent on
 /// another provider ends up with the header of a task and no payload.
 fn strip_encrypted_argument_flags(rest: &mut serde_json::Map<String, Value>) -> usize {
-   let Some(&mut Value::Array(ref mut tools)) = rest.get_mut("tools") else {
-      return 0;
-   };
+   let mut stripped = 0;
+   if let Some(&mut Value::Array(ref mut tools)) = rest.get_mut("tools") {
+      stripped += strip_encrypted_from_tools(tools);
+   }
+   if let Some(&mut Value::Array(ref mut items)) = rest.get_mut("input") {
+      for item in items.iter_mut() {
+         if item.get("type").and_then(Value::as_str) == Some("additional_tools")
+            && let Some(&mut Value::Array(ref mut tools)) = item.get_mut("tools")
+         {
+            stripped += strip_encrypted_from_tools(tools);
+         }
+      }
+   }
+   stripped
+}
+
+/// The backend 400s any edit to a tool under this namespace as "reserved for
+/// use by this model and must match the configured schema".
+const RESERVED_NAMESPACE: &str = "collaboration";
+
+fn strip_encrypted_from_tools(tools: &mut [Value]) -> usize {
    let mut stripped = 0;
    for tool in tools.iter_mut() {
-      let Some(&mut Value::Object(ref mut properties)) =
-         tool.pointer_mut("/parameters/properties")
+      if tool.get("name").and_then(Value::as_str) == Some(RESERVED_NAMESPACE) {
+         continue;
+      }
+      if let Some(&mut Value::Array(ref mut nested)) = tool.get_mut("tools") {
+         stripped += strip_encrypted_from_tools(nested);
+         continue;
+      }
+      let Some(&mut Value::Object(ref mut properties)) = tool.pointer_mut("/parameters/properties")
       else {
          continue;
       };
@@ -466,10 +490,11 @@ fn zen_input_fixups(rest: &mut serde_json::Map<String, Value>) -> ZenFixups {
                      parts
                         .iter()
                         .filter_map(|part| {
-                           part
-                              .get("text")
-                              .and_then(Value::as_str)
-                              .or_else(|| part.get("encrypted_content").map(|_| ENCRYPTED_PAYLOAD_NOTE))
+                           part.get("text").and_then(Value::as_str).or_else(|| {
+                              part
+                                 .get("encrypted_content")
+                                 .map(|_| ENCRYPTED_PAYLOAD_NOTE)
+                           })
                         })
                         .collect::<String>()
                   })
@@ -606,10 +631,14 @@ pub async fn responses_passthrough(
          Some(model_map::clamp_effort(&resolved.model, &effort));
    }
    drop_unusable_max_output_tokens(&mut req.rest, &auth.user);
-   let flags = strip_encrypted_argument_flags(&mut req.rest);
-   let payloads = unwrap_plaintext_agent_payloads(&mut req.rest);
-   if flags + payloads > 0 {
-      tracing::debug!(flags, payloads, user = %auth.user, "kept inter-agent payloads readable");
+   // OpenAI reserves the collaboration.* functions and rejects a request whose
+   // schema it did not write, so the native pairing travels untouched.
+   if provider != Provider::OpenAi {
+      let flags = strip_encrypted_argument_flags(&mut req.rest);
+      let payloads = unwrap_plaintext_agent_payloads(&mut req.rest);
+      if flags + payloads > 0 {
+         tracing::debug!(flags, payloads, user = %auth.user, "kept inter-agent payloads readable");
+      }
    }
 
    if provider == Provider::Zen {

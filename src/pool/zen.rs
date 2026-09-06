@@ -30,15 +30,38 @@ impl Backend for ZenClient {
       &self,
       token: &str,
       _slot: &Slot,
-      _route: Route<'_>,
+      route: Route<'_>,
       req: &Self::Request,
    ) -> Result<Self::Response, SendError> {
-      Self::post(self, Some(token), req).await
+      Self::post(self, Some(token), &session(route), req).await
    }
 
-   async fn send_anonymous(&self, req: &Self::Request) -> Result<Self::Response, SendError> {
-      Self::post(self, None, req).await
+   async fn send_anonymous(
+      &self,
+      route: Route<'_>,
+      req: &Self::Request,
+   ) -> Result<Self::Response, SendError> {
+      Self::post(self, None, &session(route), req).await
    }
+}
+
+fn session(route: Route<'_>) -> String {
+   const ALPHABET: &[u8; 62] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+   let mut hasher = hmac_sha256::Hash::new();
+   if route.session_key.is_empty() {
+      hasher.update(route.user.as_bytes());
+      hasher.update(b"\0");
+      hasher.update(route.model.as_bytes());
+   } else {
+      hasher.update(route.session_key.as_bytes());
+   }
+   let digest = hasher.finalize();
+   let body = digest
+      .iter()
+      .take(26)
+      .map(|byte| char::from(ALPHABET[usize::from(*byte) % ALPHABET.len()]))
+      .collect::<String>();
+   format!("ses_{body}")
 }
 
 impl Pool<ZenClient> {

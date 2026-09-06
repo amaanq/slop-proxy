@@ -16,7 +16,7 @@ use crate::pool::pools::Dispatched;
 use crate::provider::Provider;
 use crate::translate::anthropic_req::{self, AnthropicRequest};
 use crate::translate::anthropic_stream::{AnthropicStream, render_aggregated};
-use crate::translate::{StopKind, UsageCapture, aggregate, count_tokens, model_map};
+use crate::translate::{StopKind, UsageCapture, aggregate, count_tokens};
 
 const DIALECT: Dialect = Dialect::Anthropic;
 
@@ -27,14 +27,11 @@ pub async fn messages(
    body: Bytes,
 ) -> Response {
    let started = Instant::now();
-   let peek = super::relay::Peek::from_slice(&body);
+   let peek = super::relay::Peek::from_slice(&body, &state.cfg.models);
    // An effort suffix is part of what the caller typed, not part of the model
    // name a pattern matches, so routing the raw string sent muse:high to
    // codex and burned the pool on a model it cannot serve.
-   let provider = state
-      .cfg
-      .models
-      .route(&model_map::resolve(&state.cfg.models, &peek.model).model);
+   let provider = state.cfg.models.route(&peek.upstream_model);
    if !auth.may_use(provider) {
       log_rejected(&state, &auth, "messages", &peek.model);
       return super::error::out_of_scope(DIALECT, provider);
@@ -80,7 +77,7 @@ pub async fn messages(
    record.session_key = session_key.clone();
    let route = Route {
       session_key: &session_key,
-      model: &req.model,
+      model: &upstream_req.model,
       user: &auth.user,
       pinned_account: auth.limits.pinned_account,
       prefer_trusted: auth.limits.prefer_trusted,
@@ -140,8 +137,8 @@ pub async fn count_tokens(
       input_tokens: i64,
    }
 
-   let peek = super::relay::Peek::from_slice(&body);
-   let provider = state.cfg.models.route(&peek.model);
+   let peek = super::relay::Peek::from_slice(&body, &state.cfg.models);
+   let provider = state.cfg.models.route(&peek.upstream_model);
    if !auth.may_use(provider) {
       return super::error::out_of_scope(DIALECT, provider);
    }

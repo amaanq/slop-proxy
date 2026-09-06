@@ -70,98 +70,120 @@ pub fn hash(raw: &str) -> Vec<u8> {
 
 impl Db {
    pub async fn create_token(&self, user: &str, raw: &str, prefix: &str) -> Result<i64> {
-      let conn = self.0.lock().await;
-      conn.execute(
-         "INSERT INTO api_tokens (user, token_hash, token_prefix) VALUES (?1, ?2, ?3)",
-         params![user, hash(raw), prefix],
-      )?;
-      Ok(conn.last_insert_rowid())
+      let user = user.to_owned();
+      let token_hash = hash(raw);
+      let prefix = prefix.to_owned();
+      self
+         .call(move |conn| {
+            conn.execute(
+               "INSERT INTO api_tokens (user, token_hash, token_prefix) VALUES (?1, ?2, ?3)",
+               params![user, token_hash, prefix],
+            )?;
+            Ok(conn.last_insert_rowid())
+         })
+         .await
    }
 
    pub async fn list_tokens(&self) -> Result<Vec<ApiToken>> {
-      let conn = self.0.lock().await;
-      let mut stmt = conn.prepare(
-         "SELECT id, user, token_prefix, created_at, revoked_at,
+      self
+         .call(move |conn| {
+            let mut stmt = conn.prepare(
+               "SELECT id, user, token_prefix, created_at, revoked_at,
                     request_limit, token_limit, window_seconds, slowdown_ms, prefer_trusted,
                     pinned_account, allowed_providers
              FROM api_tokens ORDER BY id",
-      )?;
-      let rows = stmt.query_map([], |row| {
-         Ok(ApiToken {
-            id: row.get(0)?,
-            user: row.get(1)?,
-            token_prefix: row.get(2)?,
-            created_at: row.get(3)?,
-            revoked_at: row.get(4)?,
-            limits: TokenLimits {
-               requests: row.get(5)?,
-               tokens: row.get(6)?,
-               window_seconds: row.get(7)?,
-               slowdown_ms: row.get(8)?,
-               prefer_trusted: row.get(9)?,
-               pinned_account: row.get(10)?,
-               providers: TokenLimits::decode(&row.get::<_, String>(11)?),
-            },
+            )?;
+            let rows = stmt.query_map([], |row| {
+               Ok(ApiToken {
+                  id: row.get(0)?,
+                  user: row.get(1)?,
+                  token_prefix: row.get(2)?,
+                  created_at: row.get(3)?,
+                  revoked_at: row.get(4)?,
+                  limits: TokenLimits {
+                     requests: row.get(5)?,
+                     tokens: row.get(6)?,
+                     window_seconds: row.get(7)?,
+                     slowdown_ms: row.get(8)?,
+                     prefer_trusted: row.get(9)?,
+                     pinned_account: row.get(10)?,
+                     providers: TokenLimits::decode(&row.get::<_, String>(11)?),
+                  },
+               })
+            })?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
          })
-      })?;
-      Ok(rows.collect::<rusqlite::Result<_>>()?)
+         .await
    }
 
    pub async fn revoke_token(&self, key: &str) -> Result<usize> {
-      let conn = self.0.lock().await;
-      let id = key.parse::<i64>().unwrap_or(-1);
-      Ok(conn.execute(
-         "UPDATE api_tokens SET revoked_at = unixepoch()
+      let key = key.to_owned();
+      self
+         .call(move |conn| {
+            let id = key.parse::<i64>().unwrap_or(-1);
+            Ok(conn.execute(
+               "UPDATE api_tokens SET revoked_at = unixepoch()
              WHERE revoked_at IS NULL AND (id = ?1 OR token_prefix = ?2)",
-         params![id, key],
-      )?)
+               params![id, key],
+            )?)
+         })
+         .await
    }
 
    pub async fn set_token_limits(&self, key: &str, limits: &TokenLimits) -> Result<usize> {
-      let conn = self.0.lock().await;
-      let id = key.parse::<i64>().unwrap_or(-1);
-      Ok(conn.execute(
-         "UPDATE api_tokens
+      let key = key.to_owned();
+      let limits = limits.clone();
+      self
+         .call(move |conn| {
+            let id = key.parse::<i64>().unwrap_or(-1);
+            Ok(conn.execute(
+               "UPDATE api_tokens
              SET request_limit = ?3, token_limit = ?4, window_seconds = ?5, slowdown_ms = ?6,
                  prefer_trusted = ?7, pinned_account = ?8, allowed_providers = ?9
              WHERE id = ?1 OR token_prefix = ?2",
-         params![
-            id,
-            key,
-            limits.requests,
-            limits.tokens,
-            limits.window_seconds,
-            limits.slowdown_ms,
-            limits.prefer_trusted,
-            limits.pinned_account,
-            limits.encode(),
-         ],
-      )?)
+               params![
+                  id,
+                  key,
+                  limits.requests,
+                  limits.tokens,
+                  limits.window_seconds,
+                  limits.slowdown_ms,
+                  limits.prefer_trusted,
+                  limits.pinned_account,
+                  limits.encode(),
+               ],
+            )?)
+         })
+         .await
    }
 
    pub async fn auth_token(&self, raw: &str) -> Result<Option<AuthenticatedToken>> {
-      let conn = self.0.lock().await;
-      let mut stmt = conn.prepare(
-         "SELECT id, user, request_limit, token_limit, window_seconds, slowdown_ms,
+      let token_hash = hash(raw);
+      self
+         .call(move |conn| {
+            let mut stmt = conn.prepare(
+               "SELECT id, user, request_limit, token_limit, window_seconds, slowdown_ms,
                     prefer_trusted, pinned_account, allowed_providers
              FROM api_tokens WHERE token_hash = ?1 AND revoked_at IS NULL",
-      )?;
-      let mut rows = stmt.query_map(params![hash(raw)], |row| {
-         Ok(AuthenticatedToken {
-            id: row.get(0)?,
-            user: row.get(1)?,
-            limits: TokenLimits {
-               requests: row.get(2)?,
-               tokens: row.get(3)?,
-               window_seconds: row.get(4)?,
-               slowdown_ms: row.get(5)?,
-               prefer_trusted: row.get(6)?,
-               pinned_account: row.get(7)?,
-               providers: TokenLimits::decode(&row.get::<_, String>(8)?),
-            },
+            )?;
+            let mut rows = stmt.query_map(params![token_hash], |row| {
+               Ok(AuthenticatedToken {
+                  id: row.get(0)?,
+                  user: row.get(1)?,
+                  limits: TokenLimits {
+                     requests: row.get(2)?,
+                     tokens: row.get(3)?,
+                     window_seconds: row.get(4)?,
+                     slowdown_ms: row.get(5)?,
+                     prefer_trusted: row.get(6)?,
+                     pinned_account: row.get(7)?,
+                     providers: TokenLimits::decode(&row.get::<_, String>(8)?),
+                  },
+               })
+            })?;
+            Ok(rows.next().transpose()?)
          })
-      })?;
-      Ok(rows.next().transpose()?)
+         .await
    }
 }
 

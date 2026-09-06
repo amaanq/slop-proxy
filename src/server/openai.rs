@@ -46,7 +46,7 @@ pub async fn chat_completions(
    body: Bytes,
 ) -> Response {
    let started = Instant::now();
-   let req = match serde_json::from_slice::<ChatRequest>(&body) {
+   let mut req = match serde_json::from_slice::<ChatRequest>(&body) {
       Ok(req) => req,
       Err(err) => {
          log_rejected(&state, &auth, "chat", "unknown");
@@ -54,7 +54,8 @@ pub async fn chat_completions(
       },
    };
    let facts = super::facts::RequestFacts::from_chat(&req, &headers);
-   let provider = state.cfg.models.route(&req.model);
+   let resolved = model_map::resolve(&state.cfg.models, &req.model);
+   let provider = state.cfg.models.route(&resolved.model);
    if !auth.may_use(provider) {
       log_rejected(&state, &auth, "chat", &req.model);
       return super::error::out_of_scope(DIALECT, provider);
@@ -69,6 +70,8 @@ pub async fn chat_completions(
       },
       Provider::Gemini => {
          let model = req.model.clone();
+         req.model = resolved.model;
+         req.reasoning_effort = req.reasoning_effort.or(resolved.effort);
          return super::gemini::chat_completions(state, auth, req, model, facts).await;
       },
       Provider::Glm => {
@@ -103,7 +106,7 @@ pub async fn chat_completions(
    let session_key = upstream_req.prompt_cache_key.clone().unwrap_or_default();
    let route = Route {
       session_key: &session_key,
-      model: &req.model,
+      model: &upstream_req.model,
       user: &auth.user,
       pinned_account: auth.limits.pinned_account,
       prefer_trusted: auth.limits.prefer_trusted,
@@ -524,7 +527,12 @@ pub async fn responses_passthrough(
       return super::error::out_of_scope(DIALECT, provider);
    }
    req.model = Some(resolved.model.clone());
-   if let Some(effort) = model_map::suffix_effort(&requested_model) {
+   if req
+      .reasoning
+      .as_ref()
+      .is_none_or(|reasoning| reasoning.effort.is_none())
+      && let Some(effort) = resolved.effort
+   {
       req.reasoning.get_or_insert_default().effort =
          Some(model_map::clamp_effort(&resolved.model, &effort));
    }
@@ -587,7 +595,7 @@ pub async fn responses_passthrough(
    record.session_key = session_key.clone();
    let route = Route {
       session_key: &session_key,
-      model: &record.requested_model,
+      model: &record.upstream_model,
       user: &auth.user,
       pinned_account: auth.limits.pinned_account,
       prefer_trusted: auth.limits.prefer_trusted,

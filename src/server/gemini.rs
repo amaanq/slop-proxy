@@ -56,10 +56,11 @@ pub async fn chat_completions(
       "chat",
       Provider::Gemini,
       model.clone(),
-      model.clone(),
+      body.model.clone(),
       facts,
    );
    record.session_key = session_key(&auth.user, &body);
+   record.effort = body.reasoning_effort.clone().unwrap_or_default();
 
    let session_key = record.session_key.clone();
    let (account_id, upstream) = match state
@@ -68,7 +69,7 @@ pub async fn chat_completions(
       .execute(
          Route {
             session_key: &session_key,
-            model: &model,
+            model: &record.upstream_model,
             user: &auth.user,
             pinned_account: auth.limits.pinned_account,
             prefer_trusted: false,
@@ -295,7 +296,7 @@ pub async fn native(
    headers: HeaderMap,
    body: Bytes,
 ) -> Response {
-   let Some((model, action)) = spec.split_once(':') else {
+   let Some((raw_model, action)) = spec.rsplit_once(':') else {
       return error_response(
          DIALECT,
          404,
@@ -311,7 +312,8 @@ pub async fn native(
          "unsupported action on the native surface",
       );
    }
-   if state.cfg.models.route(model) != Provider::Gemini {
+   let resolved = crate::translate::model_map::resolve(&state.cfg.models, raw_model);
+   if state.cfg.models.route(&resolved.model) != Provider::Gemini {
       return error_response(
          DIALECT,
          400,
@@ -343,13 +345,13 @@ pub async fn native(
       &auth,
       "native",
       Provider::Gemini,
-      model.to_owned(),
-      model.to_owned(),
+      raw_model.to_owned(),
+      resolved.model.clone(),
       facts,
    );
    record.session_key = key.clone();
    let call = Call::Native {
-      model: model.to_owned(),
+      model: resolved.model.clone(),
       action: action.to_owned(),
       query,
       body,
@@ -360,7 +362,7 @@ pub async fn native(
       .execute(
          Route {
             session_key: &key,
-            model,
+            model: &resolved.model,
             user: &auth.user,
             pinned_account: auth.limits.pinned_account,
             prefer_trusted: false,

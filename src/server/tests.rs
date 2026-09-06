@@ -602,3 +602,43 @@ async fn a_rejected_gemini_request_keeps_googles_reason() {
       .unwrap();
    assert_eq!(logged as usize, GEMINI_REJECTION.len());
 }
+
+#[tokio::test]
+async fn aliases_are_resolved_before_provider_scope_on_every_endpoint() {
+   let mut models = ModelsConfig::default();
+   models.aliases.insert(
+      "shortcut".into(),
+      crate::config::ModelAlias {
+         model: "gemini-test".into(),
+         effort: Some("low".into()),
+      },
+   );
+   let (base, db) = spawn_proxy_with(models, None).await;
+   db.set_token_limits(
+      "sp-test",
+      &TokenLimits {
+         providers: vec![Provider::OpenAi],
+         ..TokenLimits::default()
+      },
+   )
+   .await
+   .unwrap();
+   for endpoint in [
+      "chat/completions",
+      "messages",
+      "messages/count_tokens",
+      "responses",
+   ] {
+      let response = reqwest::Client::new()
+         .post(format!("{base}/v1/{endpoint}"))
+         .bearer_auth("sp-test")
+         .json(
+            &serde_json::json!({"model":"shortcut:high","input":[],"messages":[],"max_tokens":1}),
+         )
+         .timeout(std::time::Duration::from_secs(2))
+         .send()
+         .await
+         .unwrap();
+      assert_eq!(response.status(), 403, "{endpoint}");
+   }
+}

@@ -25,6 +25,7 @@ const DIALECT: Dialect = Dialect::Anthropic;
 /// verbatim regardless.
 pub struct Peek {
    pub model: String,
+   pub upstream_model: String,
    pub effort: String,
    user_id: Option<String>,
    system: Option<Box<RawValue>>,
@@ -54,15 +55,19 @@ struct MetadataPeek {
 }
 
 impl Peek {
-   pub fn from_slice(body: &[u8]) -> Self {
+   pub fn from_slice(body: &[u8], cfg: &crate::config::ModelsConfig) -> Self {
       let peek: PeekBody = serde_json::from_slice(body).unwrap_or_default();
+      let model = peek.model.unwrap_or_default();
+      let resolved = crate::translate::model_map::resolve(cfg, &model);
       Self {
-         model: peek.model.unwrap_or_default(),
+         model,
+         upstream_model: resolved.model,
          // Claude Code sends `effort` only when it is choosing the level
          // itself; with adaptive thinking on, `thinking.type` is what
          // carries the same signal.
          effort: peek
             .effort
+            .or(resolved.effort)
             .or_else(|| peek.thinking?.kind)
             .unwrap_or_default(),
          user_id: peek.metadata.and_then(|meta| meta.user_id),
@@ -207,6 +212,21 @@ fn anthropic_facts(body: &[u8], headers: &HeaderMap) -> super::facts::RequestFac
    )
 }
 
+fn normalized_body(body: &Bytes, peek: &Peek) -> Bytes {
+   if peek.model == peek.upstream_model {
+      return body.clone();
+   }
+   let Ok(mut value) = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(body)
+   else {
+      return body.clone();
+   };
+   value.insert(
+      "model".into(),
+      serde_json::Value::String(peek.upstream_model.clone()),
+   );
+   Bytes::from(serde_json::to_vec(&value).expect("request serializes"))
+}
+
 pub async fn messages(
    state: AppState,
    auth: AuthInfo,
@@ -222,7 +242,7 @@ pub async fn messages(
       "messages",
       Provider::Anthropic,
       peek.model.clone(),
-      peek.model.clone(),
+      peek.upstream_model.clone(),
       facts,
    );
    record.effort = peek.effort.clone();
@@ -240,14 +260,14 @@ pub async fn messages(
       .execute(
          Route {
             session_key: &key,
-            model: &peek.model,
+            model: &peek.upstream_model,
             user: &auth.user,
             pinned_account: auth.limits.pinned_account,
             prefer_trusted: false,
          },
          AnthropicRelay {
             path: "/v1/messages",
-            body: body.clone(),
+            body: normalized_body(&body, &peek),
             hdrs: hdrs.clone(),
          },
       )
@@ -325,7 +345,7 @@ pub async fn glm(
       "messages",
       Provider::Glm,
       peek.model.clone(),
-      peek.model.clone(),
+      peek.upstream_model.clone(),
       facts,
    );
    record.effort = peek.effort.clone();
@@ -337,14 +357,14 @@ pub async fn glm(
       .execute(
          Route {
             session_key: &key,
-            model: &peek.model,
+            model: &peek.upstream_model,
             user: &auth.user,
             pinned_account: auth.limits.pinned_account,
             prefer_trusted: false,
          },
          GlmRelay {
             path: "/v1/messages",
-            body: body.clone(),
+            body: normalized_body(&body, &peek),
          },
       )
       .await
@@ -419,14 +439,14 @@ pub async fn count_tokens(
       .execute(
          Route {
             session_key: &key,
-            model: &peek.model,
+            model: &peek.upstream_model,
             user: &auth.user,
             pinned_account: auth.limits.pinned_account,
             prefer_trusted: false,
          },
          AnthropicRelay {
             path: "/v1/messages/count_tokens",
-            body: body.clone(),
+            body: normalized_body(&body, &peek),
             hdrs: hdrs.clone(),
          },
       )

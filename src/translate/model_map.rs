@@ -15,10 +15,6 @@ fn split_suffix(requested: &str) -> (&str, Option<String>) {
    }
 }
 
-pub fn suffix_effort(requested: &str) -> Option<String> {
-   split_suffix(requested).1
-}
-
 /// The requested model is passed through to the backend as-is.
 pub fn resolve(cfg: &ModelsConfig, requested: &str) -> ResolvedModel {
    let (name, suffix_effort) = split_suffix(requested);

@@ -10,7 +10,7 @@ use axum::{Extension, Json};
 use super::auth::AuthInfo;
 use super::error::{Dialect, translation_error};
 use super::pipeline::{self, apply_snapshot, dispatch_failed, translated};
-use super::{AppState, LogGuard, cache_key, log_error, log_rejected, log_usage};
+use super::{AppState, LogGuard, cache_key, log_rejected};
 use crate::pool::Route;
 use crate::pool::pools::Dispatched;
 use crate::provider::Provider;
@@ -112,17 +112,21 @@ pub async fn messages(
    } else {
       let agg = aggregate(events, &capture).await;
       let snap = capture.snapshot();
-      apply_snapshot(&mut record, &snap);
+      apply_snapshot(&mut record, &snap, started);
       if agg.stop == StopKind::Error {
          let msg = agg
             .error_message
             .unwrap_or_else(|| "upstream failure".into());
-         log_error(&state, record, 502, "upstream_failed");
+         record.status = 502;
+         super::log_usage(&state, record);
          return super::error::error_response(DIALECT, 502, "api_error", &msg);
       }
       record.error_kind = snap.error_kind;
-      log_usage(&state, record);
-      Json(render_aggregated(&agg, &req.model, emit_thinking)).into_response()
+      pipeline::logged_json(
+         &state,
+         record,
+         render_aggregated(&agg, &req.model, emit_thinking),
+      )
    }
 }
 

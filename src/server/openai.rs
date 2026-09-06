@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::convert::Infallible;
 
 use std::pin::Pin;
@@ -22,7 +22,7 @@ use super::pipeline::{self, apply_snapshot, dispatch_failed, translated};
 use super::{AppState, LogGuard, cache_key, log_error, log_rejected, log_usage};
 use crate::clock::unix_now;
 use crate::codex::models::with_zen_entries;
-use crate::codex::types::{OutputItem, ResponsesEvent, ResponsesRequest, Usage};
+use crate::codex::types::{OutputItem, ResponsesEvent, ResponsesRequest};
 use crate::db::usage::UsageRecord;
 use crate::pool::pools::{Dispatched, Upstream};
 use crate::pool::{PoolError, Route, UsageWindow, window_seconds};
@@ -145,17 +145,17 @@ pub async fn chat_completions(
    } else {
       let agg = aggregate(events, &capture).await;
       let snap = capture.snapshot();
-      apply_snapshot(&mut record, &snap);
+      apply_snapshot(&mut record, &snap, started);
       if agg.stop == StopKind::Error {
          let msg = agg
             .error_message
             .unwrap_or_else(|| "upstream failure".into());
-         log_error(&state, record, 502, "upstream_failed");
+         record.status = 502;
+         log_usage(&state, record);
          return super::error::error_response(DIALECT, 502, "api_error", &msg);
       }
       record.error_kind = snap.error_kind;
-      log_usage(&state, record);
-      Json(render_aggregated(&agg, &req.model)).into_response()
+      pipeline::logged_json(&state, record, render_aggregated(&agg, &req.model))
    }
 }
 
@@ -641,7 +641,7 @@ pub async fn responses_passthrough(
       );
    }
 
-   raw_response(state, record, resp, capture).await
+   raw_response(state, record, resp, capture, started).await
 }
 
 async fn raw_response(
@@ -649,6 +649,7 @@ async fn raw_response(
    mut record: UsageRecord,
    resp: reqwest::Response,
    capture: UsageCapture,
+   started: Instant,
 ) -> Response {
    // Upstream only streams; recover the final response object from the
    // terminal event for non-streaming clients.
@@ -656,6 +657,9 @@ async fn raw_response(
    let mut final_response = Option::<Box<RawValue>>::None;
    while let Some(event) = raw_events.next().await {
       let Ok(event) = event else { break };
+      if let Ok(parsed) = serde_json::from_str::<ResponsesEvent>(&event.data) {
+         capture.observe(&parsed);
+      }
       let Ok(TerminalEvent {
          kind,
          response: Some(response),
@@ -666,34 +670,30 @@ async fn raw_response(
       if !TerminalEvent::is_terminal(&kind) {
          continue;
       }
-      if let Ok(env) = serde_json::from_str::<UsageEnvelope>(&event.data)
-         && let Some(usage) = env.response.usage
-      {
-         capture.record(&usage);
-      }
       final_response = Some(response);
    }
    let snap = capture.snapshot();
-   apply_snapshot(&mut record, &snap);
+   apply_snapshot(&mut record, &snap, started);
+   record.response_bytes = final_response
+      .as_ref()
+      .map_or(0, |value| value.get().len() as i64);
+   let Some(value) = final_response else {
+      log_error(&state, record, 502, "upstream_eof");
+      return super::error::error_response(
+         DIALECT,
+         502,
+         "api_error",
+         "upstream stream ended unexpectedly",
+      );
+   };
    log_usage(&state, record);
-   final_response.map_or_else(
-      || {
-         super::error::error_response(
-            DIALECT,
-            502,
-            "api_error",
-            "upstream stream ended unexpectedly",
-         )
-      },
-      |value| {
-         (
-            [("content-type", "application/json")],
-            value.get().to_owned(),
-         )
-            .into_response()
-      },
+   (
+      [("content-type", "application/json")],
+      value.get().to_owned(),
    )
+      .into_response()
 }
+
 /// The bridge's frames are relayed rather than the events they parse into.
 async fn bridged_responses(
    state: AppState,
@@ -710,15 +710,7 @@ async fn bridged_responses(
       let guard = LogGuard::new(state.clone(), capture.clone(), record, started);
       let stream = events.map(move |event| {
          let _ = &guard;
-         if let ResponsesEvent::Completed { ref response }
-         | ResponsesEvent::Incomplete { ref response }
-         | ResponsesEvent::Failed { ref response } = event
-         {
-            if let Some(usage) = response.usage.as_ref() {
-               capture.record(usage);
-            }
-            capture.note_stop_reason(response.status.as_deref().unwrap_or("completed"));
-         }
+         capture.observe(&event);
          let data = serde_json::to_string(&event).unwrap_or_default();
          capture.note_bytes(data.len());
          Ok::<_, Infallible>(Event::default().event(event.kind()).data(data))
@@ -728,55 +720,50 @@ async fn bridged_responses(
          .into_response();
    }
 
-   let mut output = Vec::new();
+   let mut output = BTreeMap::new();
+   let mut terminal = None;
    while let Some(event) = events.next().await {
-      match event {
-         ResponsesEvent::Completed { response }
-         | ResponsesEvent::Incomplete { response }
-         | ResponsesEvent::Failed { response } => {
-            if let Some(usage) = response.usage {
-               capture.record(&usage);
-            }
-            capture.note_stop_reason(response.status.as_deref().unwrap_or("completed"));
-         },
-         ResponsesEvent::OutputItemDone { item, .. } => output.push(item),
-         ResponsesEvent::Created { .. }
-         | ResponsesEvent::InProgress
-         | ResponsesEvent::OutputItemAdded { .. }
-         | ResponsesEvent::ContentPartAdded { .. }
-         | ResponsesEvent::ContentPartDone
-         | ResponsesEvent::OutputTextDelta { .. }
-         | ResponsesEvent::OutputTextDone { .. }
-         | ResponsesEvent::ReasoningSummaryPartAdded { .. }
-         | ResponsesEvent::ReasoningSummaryPartDone
-         | ResponsesEvent::ReasoningSummaryTextDelta { .. }
-         | ResponsesEvent::ReasoningSummaryTextDone
-         | ResponsesEvent::ReasoningTextDelta { .. }
-         | ResponsesEvent::ReasoningTextDone
-         | ResponsesEvent::FunctionCallArgumentsDelta { .. }
-         | ResponsesEvent::FunctionCallArgumentsDone { .. }
-         | ResponsesEvent::CustomToolCallInputDone { .. }
-         | ResponsesEvent::Other => {},
+      capture.observe(&event);
+      if let Some((kind, response)) = event.terminal() {
+         let mut response = response.clone();
+         response.status = Some(kind.as_str().into());
+         terminal = Some(response);
+      }
+      if let ResponsesEvent::OutputItemDone { output_index, item } = event {
+         output.insert(output_index, item);
       }
    }
    let snap = capture.snapshot();
-   apply_snapshot(&mut record, &snap);
-   log_usage(&state, record);
-   Json(NonStreamResponse {
-      id: format!("resp_{}", uuid::Uuid::new_v4().simple()),
-      object: "response",
-      status: "completed",
-      model,
-      output,
-   })
-   .into_response()
+   apply_snapshot(&mut record, &snap, started);
+   let Some(mut response) = terminal else {
+      log_error(&state, record, 502, "upstream_eof");
+      return super::error::error_response(
+         DIALECT,
+         502,
+         "api_error",
+         "upstream stream ended unexpectedly",
+      );
+   };
+   response
+      .id
+      .get_or_insert_with(|| format!("resp_{}", uuid::Uuid::new_v4().simple()));
+   pipeline::logged_json(
+      &state,
+      record,
+      NonStreamResponse {
+         response,
+         object: "response",
+         model,
+         output: output.into_values().collect(),
+      },
+   )
 }
 
 #[derive(serde::Serialize)]
 struct NonStreamResponse {
-   id: String,
+   #[serde(flatten)]
+   response: crate::codex::types::ResponseObj,
    object: &'static str,
-   status: &'static str,
    model: String,
    output: Vec<OutputItem>,
 }
@@ -798,39 +785,6 @@ impl TerminalEvent {
          "response.completed" | "response.incomplete" | "response.failed"
       )
    }
-}
-
-#[derive(serde::Deserialize)]
-struct UsageEnvelope {
-   response: ResponseUsage,
-}
-
-#[derive(serde::Deserialize)]
-struct ResponseUsage {
-   #[serde(default)]
-   usage: Option<Usage>,
-   #[serde(default)]
-   status: Option<String>,
-   #[serde(default)]
-   incomplete_details: Option<IncompleteDetails>,
-}
-
-#[derive(serde::Deserialize)]
-struct IncompleteDetails {
-   reason: Option<String>,
-}
-
-/// `response.output_item.done` names the tool it emitted. Its `arguments`
-/// field is the caller's own content and is never read.
-#[derive(serde::Deserialize)]
-struct OutputItemDone {
-   item: ToolName,
-}
-
-#[derive(serde::Deserialize)]
-struct ToolName {
-   #[serde(default)]
-   name: Option<String>,
 }
 
 /// What codex reads for `/status`.
@@ -889,27 +843,8 @@ fn relay_stream(
                   capture.note_event(&event.event);
                }
                capture.note_bytes(event.data.len());
-               if (event.event == "response.completed"
-                  || event.data.contains("\"response.completed\""))
-                  && let Ok(env) = serde_json::from_str::<UsageEnvelope>(&event.data)
-               {
-                  if let Some(usage) = env.response.usage {
-                     capture.record(&usage);
-                  }
-                  let reason = env
-                     .response
-                     .incomplete_details
-                     .and_then(|detail| detail.reason)
-                     .or(env.response.status);
-                  if let Some(reason) = reason {
-                     capture.note_stop_reason(&reason);
-                  }
-               }
-               if event.event == "response.output_item.done"
-                  && let Ok(done) = serde_json::from_str::<OutputItemDone>(&event.data)
-                  && let Some(name) = done.item.name
-               {
-                  capture.note_tool_call(&name);
+               if let Ok(parsed) = serde_json::from_str::<ResponsesEvent>(&event.data) {
+                  capture.observe(&parsed);
                }
                let mut out = Event::default().data(event.data);
                if !event.event.is_empty() && event.event != "message" {
@@ -942,218 +877,4 @@ fn relay_stream(
 }
 
 #[cfg(test)]
-mod passthrough_tests {
-   use super::*;
-
-   #[test]
-   fn the_service_tier_is_read_and_forwarded_unchanged() {
-      let body = serde_json::json!({
-          "model": "gpt-5.6-sol",
-          "service_tier": "priority",
-          "input": [],
-      });
-      let req: PassthroughRequest = serde_json::from_value(body).unwrap();
-      assert_eq!(req.service_tier.as_deref(), Some("priority"));
-      let out = serde_json::to_value(&req).unwrap();
-      assert_eq!(out["service_tier"], "priority");
-   }
-
-   /// The typed request would serialise an item it does not know as
-   /// `{"type":"Other"}` and drop a custom tool's grammar.
-   #[test]
-   fn what_the_proxy_has_no_opinion_on_goes_upstream_as_written() {
-      let body = serde_json::json!({
-          "model": "gpt-5.6-sol",
-          "input": [{"type": "apply_patch_call", "call_id": "c1", "status": "completed"}],
-          "tools": [{"type": "custom", "name": "apply_patch", "format": {"type": "grammar", "syntax": "lark"}}],
-          "reasoning": {"summary": "auto"},
-      });
-      let req: PassthroughRequest = serde_json::from_value(body.clone()).unwrap();
-      let out = serde_json::to_value(&req).unwrap();
-      assert_eq!(out["input"], body["input"]);
-      assert_eq!(out["tools"], body["tools"]);
-      assert_eq!(out["reasoning"], body["reasoning"]);
-   }
-
-   fn cap(value: serde_json::Value) -> serde_json::Map<String, Value> {
-      let mut rest = serde_json::Map::new();
-      rest.insert("max_output_tokens".into(), value);
-      rest
-   }
-
-   #[test]
-   fn a_cap_below_the_upstream_floor_is_stripped_from_a_relayed_body() {
-      let stripped = &mut cap(serde_json::json!(8_i64));
-      drop_unusable_max_output_tokens(stripped, "u1");
-      assert!(!stripped.contains_key("max_output_tokens"));
-
-      let kept = &mut cap(serde_json::json!(4096_i64));
-      drop_unusable_max_output_tokens(kept, "u1");
-      assert_eq!(kept["max_output_tokens"], 4096_i64);
-
-      let unparsed = &mut cap(serde_json::json!("auto"));
-      drop_unusable_max_output_tokens(unparsed, "u1");
-      assert_eq!(unparsed["max_output_tokens"], "auto");
-   }
-}
-
-#[cfg(test)]
-mod unpaired_tool_tests {
-   use super::*;
-
-   fn input(items: serde_json::Value) -> serde_json::Map<String, Value> {
-      let mut rest = serde_json::Map::new();
-      rest.insert("input".into(), items);
-      rest
-   }
-
-   #[test]
-   fn a_call_without_its_output_and_an_output_without_its_call_both_go() {
-      let mut rest = input(serde_json::json!([
-          {"type": "message", "role": "user", "content": "hi"},
-          {"type": "function_call", "call_id": "kept", "name": "ls", "arguments": "{}"},
-          {"type": "function_call_output", "call_id": "kept", "output": "ok"},
-          {"type": "function_call", "call_id": "orphan-call", "name": "ls", "arguments": "{}"},
-          {"type": "custom_tool_call_output", "call_id": "orphan-output", "output": "late"},
-          {"type": "reasoning", "summary": []},
-      ]));
-      assert_eq!(drop_unpaired_tool_items(&mut rest), 2);
-      let kinds: Vec<_> = rest["input"]
-         .as_array()
-         .unwrap()
-         .iter()
-         .map(|item| item["type"].as_str().unwrap())
-         .collect();
-      assert_eq!(
-         kinds,
-         [
-            "message",
-            "function_call",
-            "function_call_output",
-            "reasoning"
-         ]
-      );
-   }
-
-   #[test]
-   fn codex_only_items_are_hoisted_rewritten_or_dropped() {
-      let mut rest = input(serde_json::json!([
-          {"type": "additional_tools", "role": "developer", "tools": [{"type": "function", "name": "spawn_agent"}, {"type": "function", "name": "wait_agent"}]},
-          {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "go"}]},
-          {"type": "agent_message", "author": "main", "recipient": "worker", "content": [{"type": "input_text", "text": "check "}, {"type": "encrypted_content", "encrypted_content": "x"}, {"type": "input_text", "text": "the tree"}]},
-          {"type": "local_shell_call", "call_id": "sh1", "action": {"type": "exec", "command": ["ls"]}},
-          {"type": "function_call_output", "call_id": "sh1", "output": "files"},
-          {"type": "context_compaction", "summary": "earlier"},
-      ]));
-      rest.insert(
-         "tools".into(),
-         serde_json::json!([{"type": "function", "name": "shell"}]),
-      );
-      let fixes = zen_input_fixups(&mut rest);
-      assert_eq!(
-         (
-            fixes.hoisted,
-            fixes.rewritten,
-            fixes.dropped,
-            fixes.unpaired
-         ),
-         (2, 1, 3, 1)
-      );
-      let names: Vec<_> = rest["tools"]
-         .as_array()
-         .unwrap()
-         .iter()
-         .map(|tool| tool["name"].as_str().unwrap())
-         .collect();
-      assert_eq!(names, ["shell", "spawn_agent", "wait_agent"]);
-      assert_eq!(
-         rest["input"],
-         serde_json::json!([
-             {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "go"}]},
-             {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "check the tree"}]},
-         ])
-      );
-   }
-
-   #[test]
-   fn the_rejected_index_is_read_from_zens_body() {
-      let body = r#"{"error":{"param":"input[4]","type":"invalid_request_error"}}"#;
-      assert_eq!(rejected_index(body), Some(4));
-      assert_eq!(rejected_index(r#"{"error":{"param":"call_id"}}"#), None);
-   }
-
-   #[test]
-   fn a_paired_history_is_untouched() {
-      let items = serde_json::json!([
-          {"type": "apply_patch_call", "call_id": "p1", "status": "completed"},
-          {"type": "apply_patch_call_output", "call_id": "p1", "output": "done"},
-      ]);
-      let mut rest = input(items.clone());
-      assert_eq!(drop_unpaired_tool_items(&mut rest), 0);
-      assert_eq!(rest["input"], items);
-   }
-}
-
-#[cfg(test)]
-mod terminal_event_tests {
-   use super::TerminalEvent;
-
-   /// Parsed from the wire, not from a Value, because the bug this pins only
-   /// shows on the streaming deserializer.
-   #[test]
-   fn the_final_response_survives_the_terminal_frame() {
-      let frame = r#"{"type":"response.completed","sequence_number":9,"response":{"id":"resp_1","usage":{"input_tokens":1}}}"#;
-      let event: TerminalEvent = serde_json::from_str(frame).unwrap();
-      assert!(TerminalEvent::is_terminal(&event.kind));
-      assert_eq!(
-         event.response.unwrap().get(),
-         r#"{"id":"resp_1","usage":{"input_tokens":1}}"#
-      );
-   }
-}
-
-#[cfg(test)]
-mod rate_limit_header_tests {
-   use super::*;
-   use crate::pool::UsageWindow;
-
-   fn window(name: &str, utilization: f64, resets_at: Option<i64>) -> UsageWindow {
-      UsageWindow {
-         name: name.into(),
-         utilization,
-         resets_at,
-      }
-   }
-
-   #[test]
-   fn the_shorter_window_is_primary() {
-      let out = rate_limit_headers(&[
-         window("7d", 0.42, Some(1000)),
-         window("5h", 0.11, Some(500)),
-      ]);
-      let get = |key: &str| {
-         out.iter()
-            .find(|&&(ref name, _)| name == key)
-            .map(|&(_, ref value)| value.as_str())
-            .unwrap()
-      };
-      assert_eq!(get("x-codex-primary-window-minutes"), "300");
-      assert_eq!(get("x-codex-primary-used-percent"), "11");
-      assert_eq!(get("x-codex-secondary-window-minutes"), "10080");
-      assert_eq!(get("x-codex-secondary-used-percent"), "42");
-   }
-
-   #[test]
-   fn a_window_without_a_reset_still_reports() {
-      let out = rate_limit_headers(&[window("7d", 0.8, None)]);
-      assert!(
-         out.iter()
-            .any(|&(ref name, ref value)| name == "x-codex-primary-used-percent" && value == "80")
-      );
-      assert!(
-         !out
-            .iter()
-            .any(|&(ref name, _)| name == "x-codex-primary-reset-at")
-      );
-   }
-}
+mod tests;

@@ -12,13 +12,16 @@ use super::error::{Dialect, error_response, pool_error_response};
 use super::pipeline::{dispatch_failed, read_body, relayed};
 use super::{AppState, LogGuard, log_error, log_usage};
 use crate::anthropic::client::RelayHeaders;
+use crate::config::ModelsConfig;
+use crate::db::usage::UsageRecord;
 use crate::pool::anthropic::Relay as AnthropicRelay;
 use crate::pool::experiential::Relay as ExperientialRelay;
 use crate::pool::glm::Relay as GlmRelay;
-use crate::pool::{Route, UsageWindow};
+use crate::pool::{PoolError, Route, UsageWindow};
 use crate::provider::Provider;
 use crate::translate::UsageCapture;
 use crate::translate::anthropic_req::AnthropicRequest;
+use crate::translate::model_map::resolve;
 
 const DIALECT: Dialect = Dialect::Anthropic;
 
@@ -56,10 +59,10 @@ struct MetadataPeek {
 }
 
 impl Peek {
-   pub fn from_slice(body: &[u8], cfg: &crate::config::ModelsConfig) -> Self {
+   pub fn from_slice(body: &[u8], cfg: &ModelsConfig) -> Self {
       let peek: PeekBody = serde_json::from_slice(body).unwrap_or_default();
       let model = peek.model.unwrap_or_default();
-      let resolved = crate::translate::model_map::resolve(cfg, &model);
+      let resolved = resolve(cfg, &model);
       Self {
          model,
          upstream_model: resolved.model,
@@ -310,7 +313,11 @@ pub async fn messages(
             )
             .await
       },
-      _ => unreachable!(),
+      Provider::OpenAi | Provider::Gemini | Provider::Zen => Err(PoolError::BadRequest {
+         provider,
+         model: peek.upstream_model.clone(),
+         body: "not served over the messages api".into(),
+      }),
    };
    let (account_id, resp) = match result {
       Ok(result) => result,
@@ -329,7 +336,7 @@ pub async fn messages(
 
 async fn relay_response(
    state: AppState,
-   mut record: crate::db::usage::UsageRecord,
+   mut record: UsageRecord,
    resp: reqwest::Response,
    builder: Builder,
    started: Instant,

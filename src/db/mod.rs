@@ -35,10 +35,13 @@ impl Worker {
       Ok(Self(sender))
    }
 
-   async fn call<T: Send + 'static>(
+   async fn call<T>(
       &self,
       query: impl FnOnce(&mut Connection) -> Result<T> + Send + 'static,
-   ) -> Result<T> {
+   ) -> Result<T>
+   where
+      T: Send + 'static,
+   {
       let (sender, receiver) = oneshot::channel();
       self
          .0
@@ -80,10 +83,13 @@ impl Db {
       })
    }
 
-   pub(crate) async fn call<T: Send + 'static>(
+   pub(crate) async fn call<T>(
       &self,
       query: impl FnOnce(&mut Connection) -> Result<T> + Send + 'static,
-   ) -> Result<T> {
+   ) -> Result<T>
+   where
+      T: Send + 'static,
+   {
       self.writer.call(query).await
    }
 
@@ -144,10 +150,12 @@ fn add_column(conn: &Connection, table: &str, column: &str, ddl: &str) -> Result
 mod tests {
    use super::*;
    use crate::db::usage::UsageRecord;
+   use std::env;
    use std::time::Duration;
+   use tokio::time::timeout;
 
    fn database() -> Db {
-      Db::open(&std::env::temp_dir().join(format!("slop-db-{}.db", uuid::Uuid::new_v4()))).unwrap()
+      Db::open(&env::temp_dir().join(format!("slop-db-{}.db", uuid::Uuid::new_v4()))).unwrap()
    }
 
    #[tokio::test]
@@ -167,7 +175,7 @@ mod tests {
             .await
       });
       ready.await.unwrap();
-      let auth = tokio::time::timeout(Duration::from_secs(1), db.auth_token("secret")).await;
+      let auth = timeout(Duration::from_secs(1), db.auth_token("secret")).await;
       release.send(()).unwrap();
       report.await.unwrap().unwrap();
       assert_eq!(auth.unwrap().unwrap().unwrap().user, "alice");

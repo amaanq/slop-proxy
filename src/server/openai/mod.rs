@@ -22,7 +22,7 @@ use super::pipeline::{self, apply_snapshot, dispatch_failed, translated};
 use super::{AppState, LogGuard, cache_key, log_error, log_rejected, log_usage};
 use crate::clock::unix_now;
 use crate::codex::models::with_zen_entries;
-use crate::codex::types::{OutputItem, ResponsesEvent, ResponsesRequest};
+use crate::codex::types::{OutputItem, ResponseObj, ResponsesEvent, ResponsesRequest};
 use crate::db::usage::UsageRecord;
 use crate::pool::pools::{Dispatched, Upstream};
 use crate::pool::{PoolError, Route, UsageWindow, window_seconds};
@@ -762,7 +762,7 @@ async fn bridged_responses(
 #[derive(serde::Serialize)]
 struct NonStreamResponse {
    #[serde(flatten)]
-   response: crate::codex::types::ResponseObj,
+   response: ResponseObj,
    object: &'static str,
    model: String,
    output: Vec<OutputItem>,

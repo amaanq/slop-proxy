@@ -1,4 +1,5 @@
 use super::*;
+use std::time::Duration;
 
 async fn spawn_proxy_with_codex_status(status: StatusCode) -> (String, Db) {
    let app = Router::new().route(
@@ -7,12 +8,12 @@ async fn spawn_proxy_with_codex_status(status: StatusCode) -> (String, Db) {
          move || async move { (status, [("retry-after", "7")], "quota exhausted").into_response() },
       ),
    );
-   let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-   let addr = listener.local_addr().unwrap();
+   let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+   let upstream_addr = upstream_listener.local_addr().unwrap();
    tokio::spawn(async move {
-      axum::serve(listener, app).await.unwrap();
+      axum::serve(upstream_listener, app).await.unwrap();
    });
-   let base_url = format!("http://{addr}");
+   let base_url = format!("http://{upstream_addr}");
    let db_path = env::temp_dir().join(format!("slop-test-{}.db", uuid::Uuid::new_v4()));
    let db = Db::open(&db_path).unwrap();
    db.create_token("alice", "sp-test", "sp-test")
@@ -57,12 +58,12 @@ async fn spawn_proxy_with_codex_status(status: StatusCode) -> (String, Db) {
       models: super::super::ModelCache::new(),
       pools,
    }));
-   let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-   let addr = listener.local_addr().unwrap();
+   let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+   let proxy_addr = proxy_listener.local_addr().unwrap();
    tokio::spawn(async move {
-      axum::serve(listener, router(state)).await.unwrap();
+      axum::serve(proxy_listener, router(state)).await.unwrap();
    });
-   (format!("http://{addr}"), db)
+   (format!("http://{proxy_addr}"), db)
 }
 
 #[tokio::test]
@@ -142,7 +143,7 @@ async fn retry_after_on_request_limit_for_both_dialects() {
       .await
       .unwrap();
    assert_eq!(third.status(), 429);
-   let retry = third
+   let retry_third = third
       .headers()
       .get("retry-after")
       .unwrap()
@@ -150,10 +151,10 @@ async fn retry_after_on_request_limit_for_both_dialects() {
       .unwrap()
       .parse::<i64>()
       .unwrap();
-   assert!(retry >= 1);
-   let value: serde_json::Value = third.json().await.unwrap();
-   assert_eq!(value["type"], "error");
-   assert_eq!(value["error"]["type"], "rate_limit_error");
+   assert!(retry_third >= 1);
+   let third_value: serde_json::Value = third.json().await.unwrap();
+   assert_eq!(third_value["type"], "error");
+   assert_eq!(third_value["error"]["type"], "rate_limit_error");
 }
 
 #[tokio::test]
@@ -223,7 +224,7 @@ async fn retry_after_on_codex_upstream_rate_limit() {
          "model": "gpt-5-codex",
          "messages": [{"role": "user", "content": "hi"}]
       }))
-      .timeout(std::time::Duration::from_secs(5))
+      .timeout(Duration::from_secs(5))
       .send()
       .await
       .unwrap();
@@ -270,7 +271,7 @@ async fn retry_after_on_anthropic_upstream_rate_limit() {
          "max_tokens": 10_u64,
          "messages": [{"role": "user", "content": "hi"}]
       }))
-      .timeout(std::time::Duration::from_secs(5))
+      .timeout(Duration::from_secs(5))
       .send()
       .await
       .unwrap();

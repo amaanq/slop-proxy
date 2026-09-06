@@ -353,7 +353,7 @@ mod tests {
          input: 1_000_000,
          ..Tokens::default()
       };
-      assert!((table.cost("gpt-daybreak-blue-latest", tokens) - 1.25).abs() < 1e-9);
+      assert!((table.cost("gpt-daybreak-blue-latest", tokens) - 1.25).abs() < 1e-9_f64);
    }
 
    #[test]

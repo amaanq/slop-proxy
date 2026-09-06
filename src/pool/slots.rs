@@ -145,7 +145,7 @@ pub enum Band {
    Spent,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum Status {
    Active,
    Cooldown { until: i64 },
@@ -416,23 +416,21 @@ impl Slots {
          if state.status == Status::Disabled {
             None
          } else {
-            let extend = match &state.status {
-               Status::Cooldown { until: current } => *current < until,
+            let extend = match state.status {
+               Status::Cooldown { until: current } => current < until,
                Status::Active => true,
                Status::Disabled => false,
             };
             state.consecutive_fails += 1;
-            if extend {
+            extend.then(|| {
                state.status = Status::Cooldown { until };
-               Some(until)
-            } else {
-               None
-            }
+               until
+            })
          }
       };
       tracing::warn!("account {} cooling down {secs}s ({why})", slot.display);
-      if let Some(until) = persist {
-         let _ = self.db.cas_account_cooldown(slot.id, until).await;
+      if let Some(cooldown_until) = persist {
+         let _ = self.db.cas_account_cooldown(slot.id, cooldown_until).await;
       }
    }
 
@@ -463,7 +461,8 @@ impl Slots {
    /// Seconds until this one slot is claimable, 0 when it already is.
    pub async fn cooldown_left(&self, slot: &Slot) -> i64 {
       let now = clock::unix_now();
-      match slot.state.lock().await.status {
+      let status = slot.state.lock().await.status;
+      match status {
          Status::Cooldown { until } if until > now => until - now,
          Status::Active | Status::Disabled | Status::Cooldown { .. } => 0,
       }
@@ -719,12 +718,13 @@ mod concurrency_tests {
    use super::*;
    use crate::db::accounts::NewAccount;
    use crate::oauth::TokenSet;
+   use std::env;
    use std::time::Duration;
+   use tokio::time::timeout;
 
    async fn slots() -> (Db, Slots) {
-      let db =
-         Db::open(&std::env::temp_dir().join(format!("slop-slots-{}.db", uuid::Uuid::new_v4())))
-            .unwrap();
+      let db = Db::open(&env::temp_dir().join(format!("slop-slots-{}.db", uuid::Uuid::new_v4())))
+         .unwrap();
       db.upsert_account(NewAccount {
          provider: Provider::OpenAi,
          id: "one",
@@ -750,7 +750,7 @@ mod concurrency_tests {
       let (_, slots) = slots().await;
       let slot = slots.list().await.remove(0);
       let refreshing = slot.credentials.lock().await;
-      let result = tokio::time::timeout(Duration::from_secs(1), async {
+      let result = timeout(Duration::from_secs(1), async {
          assert!(slots.try_claim(&slot).await);
          assert_eq!(slots.band(&slot, 0.9).await, Band::Steady);
          assert_eq!(slots.snapshot().await.len(), 1);

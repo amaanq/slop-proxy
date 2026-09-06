@@ -362,11 +362,28 @@ pub enum ResponsesEvent {
 
 impl ResponsesEvent {
    pub const fn terminal(&self) -> Option<(TerminalKind, &ResponseObj)> {
-      match self {
-         Self::Completed { response } => Some((TerminalKind::Completed, response)),
-         Self::Incomplete { response } => Some((TerminalKind::Incomplete, response)),
-         Self::Failed { response } => Some((TerminalKind::Failed, response)),
-         _ => None,
+      match *self {
+         Self::Completed { ref response } => Some((TerminalKind::Completed, response)),
+         Self::Incomplete { ref response } => Some((TerminalKind::Incomplete, response)),
+         Self::Failed { ref response } => Some((TerminalKind::Failed, response)),
+         Self::Created { .. }
+         | Self::InProgress
+         | Self::OutputItemAdded { .. }
+         | Self::OutputItemDone { .. }
+         | Self::ContentPartAdded { .. }
+         | Self::ContentPartDone
+         | Self::OutputTextDelta { .. }
+         | Self::OutputTextDone { .. }
+         | Self::ReasoningSummaryPartAdded { .. }
+         | Self::ReasoningSummaryPartDone
+         | Self::ReasoningSummaryTextDelta { .. }
+         | Self::ReasoningSummaryTextDone
+         | Self::ReasoningTextDelta { .. }
+         | Self::ReasoningTextDone
+         | Self::FunctionCallArgumentsDelta { .. }
+         | Self::FunctionCallArgumentsDone { .. }
+         | Self::CustomToolCallInputDone { .. }
+         | Self::Other => None,
       }
    }
 

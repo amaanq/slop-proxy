@@ -137,9 +137,6 @@ fn render_usage(out: &mut String, rows: &[MetricsRow]) {
    counter(out, "slop_tokens_total", "Tokens by kind");
    for (kind, get) in TOKEN_KINDS {
       for row in rows {
-         // Every column the query groups by has to appear here. Two rows that
-         // differ only in a dropped one expose the same label set twice in a
-         // scrape, and Prometheus keeps whichever came first.
          let mut labels = usage_labels(row).to_vec();
          labels.push(("kind", kind));
          sample(out, "slop_tokens_total", &labels, get(row));
@@ -422,7 +419,7 @@ const fn bool_label(value: bool) -> &'static str {
 /// is single-frame, so the merge it depends on then silently does nothing and
 /// the table renders raw `Value #A` columns.
 fn label(text: &str) -> String {
-   let text = if text.is_empty() { "none" } else { text };
+   let text = if text.is_empty() { "unset" } else { text };
    format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
 }
 

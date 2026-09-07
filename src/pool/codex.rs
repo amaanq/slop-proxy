@@ -22,7 +22,9 @@ impl Backend for CodexClient {
    const ON_AUTH: AuthPolicy = AuthPolicy::RefreshOnce;
    const TIERED: bool = true;
    const SESSION_AFFINITY: bool = true;
-   const BOUND_WAIT_SECS: i64 = 90;
+   /// A capacity refusal cools the account for 60s and the same model
+   /// refuses again after the wait, so a bound session moves on instead.
+   const BOUND_WAIT_SECS: i64 = 0;
    type Request = Bytes;
    type Response = reqwest::Response;
 

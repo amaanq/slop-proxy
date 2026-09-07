@@ -76,10 +76,10 @@ pub trait Backend: Send + Sync + 'static {
    const TIERED: bool = false;
    /// A session waits this long for its own account's cooldown rather than losing the prompt cache.
    const STICKY_WAIT_SECS: i64 = 0;
-   /// Replayed history is encrypted to the account that issued it, so a
-   /// session that moves carries ciphertext its new account cannot read and
-   /// is unresumable from then on. Binds a session to its first account and
-   /// fails instead of migrating.
+   /// A session goes back to the account that answered it first, for the
+   /// prompt cache that lives there, and moves only when that account cannot
+   /// serve it. Ciphertext in a replayed history decrypts on any account,
+   /// probed both ways on 2026-09-07, so moving is safe.
    const SESSION_AFFINITY: bool = false;
    /// How long a bound session sleeps through its own account's cooldown.
    /// Rate-limit cooldowns here are 60s, and the alternative is failing the
@@ -276,22 +276,21 @@ impl<B: Backend> Pool<B> {
          .filter(|id| slots.iter().any(|slot| slot.id == *id));
       let mut scored = Vec::new();
       for slot in slots {
-         if pinned.is_some_and(|id| slot.id != id)
-            || bound.is_some_and(|id| slot.id != id)
-            || !slot.serves(route.user)
-         {
+         if pinned.is_some_and(|id| slot.id != id) || !slot.serves(route.user) {
             continue;
          }
          let band = self.slots.band(&slot, self.backend.soft_limit()).await;
          scored.push((
+            bound.is_some_and(|id| slot.id != id),
             band,
             B::TIERED && slot.trusted != route.prefer_trusted,
             Reverse(rendezvous_score(route.session_key, slot.id)),
             slot,
          ));
       }
-      scored.sort_by_key(|&(band, mismatch, score, _)| (band, mismatch, score));
-      scored.into_iter().map(|(_, _, _, slot)| slot).collect()
+      scored
+         .sort_by_key(|&(elsewhere, band, mismatch, score, _)| (elsewhere, band, mismatch, score));
+      scored.into_iter().map(|(_, _, _, _, slot)| slot).collect()
    }
 
    async fn served(&self, slot: &Slot, resp: B::Response) -> B::Response {
@@ -539,10 +538,8 @@ mod retry_tests {
       );
    }
 
-   /// Replayed history is encrypted to the account that issued it, so a
-   /// session that migrates becomes permanently unresumable.
    #[tokio::test]
-   async fn a_bound_session_never_migrates_to_another_account() {
+   async fn a_bound_session_goes_home_first_and_can_still_leave() {
       let db_path = env::temp_dir().join(format!("slop-bind-{}.db", Uuid::new_v4()));
       let db = Db::open(&db_path).unwrap();
       let pool = Pool {
@@ -559,7 +556,13 @@ mod retry_tests {
       assert_eq!(ids(pool.ranked(route()).await).len(), 3);
 
       pool.bind_session("s", 3).await;
-      assert_eq!(ids(pool.ranked(route()).await), vec![3]);
+      let ranked = ids(pool.ranked(route()).await);
+      assert_eq!(ranked[0], 3);
+      assert_eq!(
+         ranked.len(),
+         3,
+         "the rest of the pool stays behind the bound account"
+      );
 
       let other = Route {
          session_key: "other",

@@ -281,15 +281,15 @@ impl<B: Backend> Pool<B> {
          }
          let band = self.slots.band(&slot, self.backend.soft_limit()).await;
          scored.push((
-            bound.is_some_and(|id| slot.id != id),
             band,
+            bound.is_some_and(|id| slot.id != id),
             B::TIERED && slot.trusted != route.prefer_trusted,
             Reverse(rendezvous_score(route.session_key, slot.id)),
             slot,
          ));
       }
       scored
-         .sort_by_key(|&(elsewhere, band, mismatch, score, _)| (elsewhere, band, mismatch, score));
+         .sort_by_key(|&(band, elsewhere, mismatch, score, _)| (band, elsewhere, mismatch, score));
       scored.into_iter().map(|(_, _, _, _, slot)| slot).collect()
    }
 

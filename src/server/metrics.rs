@@ -137,16 +137,11 @@ fn render_usage(out: &mut String, rows: &[MetricsRow]) {
    counter(out, "slop_tokens_total", "Tokens by kind");
    for (kind, get) in TOKEN_KINDS {
       for row in rows {
-         let labels = [
-            ("user", row.user.as_str()),
-            ("account", &row.account),
-            ("provider", &row.provider),
-            ("requested_model", &row.requested_model),
-            ("model", &row.model),
-            ("effort", &row.effort),
-            ("dialect", &row.dialect),
-            ("kind", kind),
-         ];
+         // Every column the query groups by has to appear here. Two rows that
+         // differ only in a dropped one expose the same label set twice in a
+         // scrape, and Prometheus keeps whichever came first.
+         let mut labels = usage_labels(row).to_vec();
+         labels.push(("kind", kind));
          sample(out, "slop_tokens_total", &labels, get(row));
       }
    }

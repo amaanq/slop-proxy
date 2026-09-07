@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use axum::Extension;
+use axum::body::Bytes;
 use axum::body::to_bytes;
 use axum::extract::ws::rejection::WebSocketUpgradeRejection;
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
@@ -10,7 +11,7 @@ use axum::http::HeaderMap;
 use axum::response::Response;
 use futures_util::{SinkExt as _, StreamExt as _};
 use serde_json::{Value, json};
-use tokio::time::{sleep, timeout};
+use tokio::time::{MissedTickBehavior, interval, sleep, timeout};
 use tokio_tungstenite::tungstenite::Message as UpstreamMessage;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame as UpstreamCloseFrame;
 
@@ -27,6 +28,7 @@ use crate::server::{AppState, LogGuard, pipeline};
 use crate::translate::{UsageCapture, model_map};
 
 const SEND_TIMEOUT: Duration = Duration::from_secs(30);
+const PING_INTERVAL: Duration = Duration::from_secs(25);
 
 pub async fn responses(
    State(state): State<AppState>,
@@ -271,8 +273,23 @@ impl Relay {
    }
 
    async fn run(mut self, mut client: WebSocket, mut upstream: Socket) {
+      let mut keepalive = interval(PING_INTERVAL);
+      keepalive.set_missed_tick_behavior(MissedTickBehavior::Delay);
+      keepalive.tick().await;
       loop {
          tokio::select! {
+            _ = keepalive.tick() => {
+               if !matches!(
+                  timeout(SEND_TIMEOUT, upstream.send(UpstreamMessage::Ping(Bytes::default()))).await,
+                  Ok(Ok(()))
+               ) {
+                  self.upstream_closed();
+                  break;
+               }
+               if !send_client(&mut client, Message::Ping(Bytes::default())).await {
+                  break;
+               }
+            },
             message = client.recv() => {
                let Some(Ok(message)) = message else { break };
                let message = match message {

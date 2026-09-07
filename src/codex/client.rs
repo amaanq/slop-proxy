@@ -179,8 +179,6 @@ async fn refuse_early(resp: reqwest::Response) -> Result<reqwest::Response, Send
          Opening::Serve => break,
          Opening::Undecryptable => return Err(SendError::BadRequest(UNDECRYPTABLE.into())),
          Opening::Refused(body) => {
-            // A spent allowance is not a busy minute. Coming back after the
-            // short cooldown just burns the next turn on the same wall.
             let spent = ["usage_limit_reached", "usage_not_included", "insufficient_quota"]
                .iter()
                .any(|code| body.contains(code));

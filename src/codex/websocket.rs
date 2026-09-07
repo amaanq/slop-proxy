@@ -20,16 +20,12 @@ pub struct Connection {
    pub headers: HeaderMap,
 }
 
-/// What an error frame says about the account that produced it, which is a
-/// different question from whether the request may be retried.
+/// What an error frame says about the account, which is a different question
+/// from whether the request may be retried.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Fault {
-   /// The request itself, so every other account would refuse it too.
    Caller,
-   /// This account has spent its allowance and stays spent until the window
-   /// rolls over.
    Exhausted,
-   /// Upstream weather. Worth another account now and worth coming back to.
    Transient,
 }
 
@@ -39,8 +35,8 @@ pub struct ResponseError {
 }
 
 impl ResponseError {
-   /// Whether to hide the upstream code behind `upstream_unavailable`. Only a
-   /// 5xx earns that: a 429 names a real condition the client should read.
+   /// A 429 names a condition the client should read, so only a 5xx is hidden
+   /// behind `upstream_unavailable`.
    pub const fn transient(&self) -> bool {
       matches!(self.fault, Fault::Transient) && self.status >= 500
    }
@@ -118,8 +114,6 @@ pub fn response_error(event: &Value) -> Option<ResponseError> {
       .and_then(Value::as_u64)
       .or_else(|| event.get("status_code").and_then(Value::as_u64))
       .unwrap_or(fallback);
-   // A 5xx is the only status worth calling weather. Anything else that
-   // claimed to be transient was guessing from a code it did not recognise.
    let fault = match fault {
       Fault::Transient if status < 500 && status != 429 => Fault::Caller,
       Fault::Caller => Fault::Caller,

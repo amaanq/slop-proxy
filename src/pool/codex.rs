@@ -19,9 +19,7 @@ use crate::upstream::SendError;
 /// Session-sticky pool over codex accounts, owning the backend client.
 pub type CodexPool = Pool<CodexClient>;
 
-/// Floor for an exhausted account when the backend names no reset. Long
-/// enough that the pool stops picking it, short enough that a limit lifted
-/// early is noticed the same hour.
+/// Floor for an exhausted account when the backend names no reset.
 const EXHAUSTED_COOLDOWN: i64 = 15 * 60;
 
 #[derive(Clone)]
@@ -122,11 +120,8 @@ impl Pool<CodexClient> {
       }
    }
 
-   /// Holds an account out until the allowance it just exhausted rolls over,
-   /// using its own reported reset when it names one. The ordinary refusal
-   /// cooldown is 60s, which walks straight back into the same wall and keeps
-   /// the account ranked first, since `ranked` bands on a quota figure the
-   /// backend has already stopped honouring.
+   /// The 60s refusal cooldown walks back into the same wall, and `ranked`
+   /// keeps the account first off a quota figure the backend stopped honouring.
    pub async fn websocket_exhausted(&self, account_id: Option<i64>) {
       let Some(id) = account_id else { return };
       let Some(slot) = self.slots.by_id(id).await else {
@@ -308,9 +303,8 @@ impl Pool<CodexClient> {
    /// first, since gated models are absent from an untrusted account's
    /// catalog. Cooldowns are ignored, a listing spends no quota and a fleet
    /// that is entirely cooling after a restart must still serve one. A
-   /// disabled account is not: `ranked` bands on quota, which an idle account
-   /// has none of, so a banned one sorts ahead of the whole working fleet and
-   /// its cached token stays unexpired long after it was revoked.
+   /// disabled account is not: it is idle, so `ranked` bands it on no quota
+   /// at all and sorts it ahead of the working fleet.
    async fn listing_slots(&self) -> Vec<Arc<Slot>> {
       let ranked = self
          .ranked(Route {
@@ -359,8 +353,6 @@ impl Pool<CodexClient> {
    }
 
    /// The catalog body untouched, for relaying to a codex client verbatim.
-   /// One account's revoked token would otherwise cost every client the
-   /// catalog, since the result is cached only on success.
    pub async fn models_raw(&self) -> Result<String, PoolError> {
       let mut last = None;
       for slot in self.listing_slots().await {

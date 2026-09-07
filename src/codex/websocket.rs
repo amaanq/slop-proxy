@@ -20,9 +20,30 @@ pub struct Connection {
    pub headers: HeaderMap,
 }
 
+/// What an error frame says about the account that produced it, which is a
+/// different question from whether the request may be retried.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Fault {
+   /// The request itself, so every other account would refuse it too.
+   Caller,
+   /// This account has spent its allowance and stays spent until the window
+   /// rolls over.
+   Exhausted,
+   /// Upstream weather. Worth another account now and worth coming back to.
+   Transient,
+}
+
 pub struct ResponseError {
    pub status: u16,
-   pub transient: bool,
+   pub fault: Fault,
+}
+
+impl ResponseError {
+   /// Whether to hide the upstream code behind `upstream_unavailable`. Only a
+   /// 5xx earns that: a 429 names a real condition the client should read.
+   pub const fn transient(&self) -> bool {
+      matches!(self.fault, Fault::Transient) && self.status >= 500
+   }
 }
 
 impl ResponseError {
@@ -41,7 +62,7 @@ impl ResponseError {
             .get_mut("response")
             .and_then(|response| response.get_mut("error"))
       };
-      if self.transient
+      if self.transient()
          && let Some(error) = error
          && matches!(
             error.get("code").and_then(Value::as_str),
@@ -68,29 +89,28 @@ pub fn response_error(event: &Value) -> Option<ResponseError> {
       .get("type")
       .and_then(Value::as_str)
       .unwrap_or_default();
-   let (fallback, transient) = match code {
+   let (fallback, fault) = match code {
       "cyber_policy"
       | "invalid_prompt"
       | "context_length_exceeded"
       | "invalid_encrypted_content"
-      | "previous_response_not_found" => (400, false),
-      "insufficient_quota"
-      | "usage_limit_reached"
-      | "usage_not_included"
-      | "rate_limit_exceeded" => (429, false),
-      "server_is_overloaded" | "slow_down" | "model_at_capacity" => (503, true),
+      | "previous_response_not_found" => (400, Fault::Caller),
+      "insufficient_quota" | "usage_limit_reached" | "usage_not_included" => {
+         (429, Fault::Exhausted)
+      },
+      "rate_limit_exceeded" => (429, Fault::Transient),
+      "server_is_overloaded" | "slow_down" | "model_at_capacity" => (503, Fault::Transient),
       _ => match kind {
-         "invalid_request_error" => (400, false),
-         "authentication_error" => (401, false),
-         "permission_error" => (403, false),
-         "rate_limit_error"
-         | "rate_limit_exceeded"
-         | "usage_limit_reached"
-         | "usage_not_included"
-         | "insufficient_quota" => (429, false),
-         "server_error" | "api_error" | "internal_server_error" => (500, true),
-         _ if code == "server_error" => (500, true),
-         _ => (0, true),
+         "invalid_request_error" => (400, Fault::Caller),
+         "authentication_error" => (401, Fault::Caller),
+         "permission_error" => (403, Fault::Caller),
+         "usage_limit_reached" | "usage_not_included" | "insufficient_quota" => {
+            (429, Fault::Exhausted)
+         },
+         "rate_limit_error" | "rate_limit_exceeded" => (429, Fault::Transient),
+         "server_error" | "api_error" | "internal_server_error" => (500, Fault::Transient),
+         _ if code == "server_error" => (500, Fault::Transient),
+         _ => (0, Fault::Transient),
       },
    };
    let status = event
@@ -98,10 +118,17 @@ pub fn response_error(event: &Value) -> Option<ResponseError> {
       .and_then(Value::as_u64)
       .or_else(|| event.get("status_code").and_then(Value::as_u64))
       .unwrap_or(fallback);
-   (400..600).contains(&status).then_some(ResponseError {
-      status: status as u16,
-      transient: transient && status >= 500,
-   })
+   // A 5xx is the only status worth calling weather. Anything else that
+   // claimed to be transient was guessing from a code it did not recognise.
+   let fault = match fault {
+      Fault::Transient if status < 500 && status != 429 => Fault::Caller,
+      Fault::Caller => Fault::Caller,
+      Fault::Exhausted => Fault::Exhausted,
+      Fault::Transient => Fault::Transient,
+   };
+   (400..600)
+      .contains(&status)
+      .then_some(ResponseError { status: status as u16, fault })
 }
 
 impl CodexClient {

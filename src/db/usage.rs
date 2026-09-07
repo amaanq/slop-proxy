@@ -348,16 +348,37 @@ pub enum UsageDim {
    Model,
 }
 
+/// Every column `usage_metrics` groups by, against the label the exporter
+/// files it under. Two groups differing only in a column absent from here
+/// would expose one label set twice in a scrape, and Prometheus keeps
+/// whichever came first.
+pub const USAGE_DIMENSIONS: [(&str, &str); 8] = [
+   ("user", "u.user"),
+   (
+      "account",
+      "COALESCE((SELECT COALESCE(a.label, a.email, 'account#' || a.id)
+                 FROM accounts a WHERE a.id = u.account_id),
+                CASE WHEN u.provider <> '' AND NOT EXISTS
+                       (SELECT 1 FROM accounts a2 WHERE a2.provider = u.provider)
+                     THEN u.provider END,
+                'none')",
+   ),
+   (
+      "provider",
+      "COALESCE(NULLIF(u.provider, ''),
+                (SELECT a.provider FROM accounts a WHERE a.id = u.account_id),
+                'none')",
+   ),
+   ("requested_model", "u.requested_model"),
+   ("model", "u.upstream_model"),
+   ("effort", "u.effort"),
+   ("service_tier", "u.service_tier"),
+   ("dialect", "u.dialect"),
+];
+
 #[derive(Debug)]
 pub struct MetricsRow {
-   pub user: String,
-   pub account: String,
-   pub provider: String,
-   pub requested_model: String,
-   pub model: String,
-   pub effort: String,
-   pub service_tier: String,
-   pub dialect: String,
+   pub dimensions: [String; USAGE_DIMENSIONS.len()],
    pub requests: i64,
    pub errors: i64,
    pub input_tokens: i64,
@@ -371,22 +392,22 @@ pub struct MetricsRow {
 }
 
 impl Db {
-   /// Whole-table sums per (user, model, dialect). The log is append-only,
-   /// so these are monotonic and safe to expose as Prometheus counters.
+   /// Whole-table sums per [`USAGE_DIMENSIONS`]. The log is append-only, so
+   /// these are monotonic and safe to expose as Prometheus counters.
    pub async fn usage_metrics(&self) -> Result<Vec<MetricsRow>> {
       self.reports.call(move |conn| {
-      let mut stmt = conn.prepare(
-            "SELECT u.user,
-                    COALESCE((SELECT COALESCE(a.label, a.email, 'account#' || a.id)
-                              FROM accounts a WHERE a.id = u.account_id),
-                             CASE WHEN u.provider <> '' AND NOT EXISTS
-                                    (SELECT 1 FROM accounts a2 WHERE a2.provider = u.provider)
-                                  THEN u.provider END,
-                             'none') AS account,
-                    COALESCE(NULLIF(u.provider, ''),
-                             (SELECT a.provider FROM accounts a WHERE a.id = u.account_id),
-                             'none') AS provider,
-                    u.requested_model, u.upstream_model, u.effort, u.service_tier, u.dialect, COUNT(*),
+      let selected = USAGE_DIMENSIONS
+         .into_iter()
+         .map(|(label, expr)| format!("{expr} AS {label}"))
+         .collect::<Vec<_>>()
+         .join(", ");
+      let grouped = USAGE_DIMENSIONS
+         .into_iter()
+         .map(|(label, _)| label)
+         .collect::<Vec<_>>()
+         .join(", ");
+      let mut stmt = conn.prepare(&format!(
+            "SELECT {selected}, COUNT(*),
                     SUM(u.status >= 400 OR u.error_kind IS NOT NULL),
                     COALESCE(SUM(u.input_tokens),0), COALESCE(SUM(u.output_tokens),0),
                     COALESCE(SUM(u.cache_read_tokens),0), COALESCE(SUM(u.cache_write_tokens),0),
@@ -394,29 +415,26 @@ impl Db {
                     COALESCE(SUM(u.list_cost_usd),0),
                     COALESCE(SUM(u.duration_ms),0)
              FROM usage_log u
-             GROUP BY u.user, account, provider, u.requested_model, u.upstream_model,
-                      u.effort, u.service_tier, u.dialect",
-        )?;
+             GROUP BY {grouped}",
+        ))?;
+      let after = USAGE_DIMENSIONS.len();
       let rows = stmt.query_map([], |row| {
+         let mut dimensions = USAGE_DIMENSIONS.map(|_| String::new());
+         for (index, value) in dimensions.iter_mut().enumerate() {
+            *value = row.get(index)?;
+         }
          Ok(MetricsRow {
-            user: row.get(0)?,
-            account: row.get(1)?,
-            provider: row.get(2)?,
-            requested_model: row.get(3)?,
-            model: row.get(4)?,
-            effort: row.get(5)?,
-            service_tier: row.get(6)?,
-            dialect: row.get(7)?,
-            requests: row.get(8)?,
-            errors: row.get::<_, Option<i64>>(9)?.unwrap_or(0),
-            input_tokens: row.get(10)?,
-            output_tokens: row.get(11)?,
-            cache_read_tokens: row.get(12)?,
-            cache_write_tokens: row.get(13)?,
-            reasoning_tokens: row.get(14)?,
-            cost_usd: row.get(15)?,
-            list_cost_usd: row.get(16)?,
-            duration_ms: row.get(17)?,
+            dimensions,
+            requests: row.get(after)?,
+            errors: row.get::<_, Option<i64>>(after + 1)?.unwrap_or(0),
+            input_tokens: row.get(after + 2)?,
+            output_tokens: row.get(after + 3)?,
+            cache_read_tokens: row.get(after + 4)?,
+            cache_write_tokens: row.get(after + 5)?,
+            reasoning_tokens: row.get(after + 6)?,
+            cost_usd: row.get(after + 7)?,
+            list_cost_usd: row.get(after + 8)?,
+            duration_ms: row.get(after + 9)?,
          })
       })?;
       Ok(rows.collect::<rusqlite::Result<_>>()?)

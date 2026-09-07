@@ -267,6 +267,25 @@ impl Pool<CodexClient> {
                if windows.is_empty() {
                   continue;
                }
+               let healthy = !usage.rate_limit.limit_reached
+                  && windows.iter().all(|window| window.utilization < 1.0_f64);
+               let now = unix_now();
+               match self
+                  .slots
+                  .clear_cooldown_if(&slot, |until| healthy && until - now > EXHAUSTED_COOLDOWN)
+                  .await
+               {
+                  Ok(true) => tracing::info!(
+                     account = %slot.display,
+                     "cleared a cooldown the account's own quota no longer justifies"
+                  ),
+                  Ok(false) => {},
+                  Err(err) => tracing::warn!(
+                     account = %slot.display,
+                     error = %err,
+                     "failed to clear an obsolete codex cooldown"
+                  ),
+               }
                self
                   .slots
                   .note_usage(

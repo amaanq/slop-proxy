@@ -293,8 +293,13 @@ impl<B: Backend> Pool<B> {
          if pinned.is_some_and(|id| slot.id != id) || !slot.serves(route.user) {
             continue;
          }
+         // A gated model is absent from an untrusted account's catalog and the
+         // backend 400s it rather than substituting.
+         let missing = !route.model.is_empty()
+            && !self.slots.serves_model(&slot, route.model).await;
          let band = self.slots.band(&slot, self.backend.soft_limit()).await;
          scored.push((
+            missing,
             band,
             bound.is_some_and(|id| slot.id != id),
             B::TIERED && slot.trusted != route.prefer_trusted,
@@ -302,9 +307,13 @@ impl<B: Backend> Pool<B> {
             slot,
          ));
       }
+      scored.sort_by_key(|&(missing, band, elsewhere, mismatch, score, _)| {
+         (missing, band, elsewhere, mismatch, score)
+      });
       scored
-         .sort_by_key(|&(band, elsewhere, mismatch, score, _)| (band, elsewhere, mismatch, score));
-      scored.into_iter().map(|(_, _, _, _, slot)| slot).collect()
+         .into_iter()
+         .map(|(_, _, _, _, _, slot)| slot)
+         .collect()
    }
 
    async fn served(&self, slot: &Slot, resp: B::Response) -> B::Response {

@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use axum::body::Bytes;
+use axum::http::Response;
 use reqwest::header::CONTENT_TYPE;
 
 use crate::translate::chat::ChatRequest;
@@ -17,6 +18,28 @@ const RULES: Classify = Classify {
    auth: &[401, 403],
    reset_headers: &["x-ratelimit-reset-requests", "x-ratelimit-reset-tokens"],
 };
+
+async fn cool_a_dead_key(resp: reqwest::Response) -> Result<reqwest::Response, SendError> {
+   if resp.status() != 400 {
+      return Ok(resp);
+   }
+   let mut rebuilt = Response::builder().status(resp.status());
+   if let Some(headers) = rebuilt.headers_mut() {
+      headers.clone_from(resp.headers());
+   }
+   let body = resp
+      .bytes()
+      .await
+      .map_err(|err| SendError::Network(err.to_string()))?;
+   let text = String::from_utf8_lossy(&body);
+   if text.contains("API key not valid") {
+      return Err(SendError::Auth(text.into_owned()));
+   }
+   rebuilt
+      .body(body)
+      .map(Into::into)
+      .map_err(|err| SendError::Network(err.to_string()))
+}
 
 pub struct GeminiClient {
    http: reqwest::Client,
@@ -110,7 +133,7 @@ impl GeminiClient {
          .send()
          .await
          .map_err(|err| SendError::Network(err.to_string()))?;
-      let response = classify(resp, RULES).await?;
+      let response = cool_a_dead_key(classify(resp, RULES).await?).await?;
       Ok(GeminiResponse { response, protocol })
    }
 
@@ -155,7 +178,7 @@ impl GeminiClient {
          .send()
          .await
          .map_err(|err| SendError::Network(err.to_string()))?;
-      classify(resp, RULES).await
+      cool_a_dead_key(classify(resp, RULES).await?).await
    }
 
    /// The catalog carries no per-key state, so a restricted key can read it

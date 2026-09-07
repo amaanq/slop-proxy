@@ -306,15 +306,8 @@ impl Relay {
             .websocket_completed(self.account_id)
             .await;
       }
-      if kind == "error"
-         && let Some(error) = error
-         && (value.get("status").and_then(Value::as_u64).is_none()
-            || value.get("status_code").is_some())
-      {
-         value["status"] = json!(error.status);
-         if let Some(value) = value.as_object_mut() {
-            value.remove("status_code");
-         }
+      if let Some(error) = error {
+         error.normalize(&mut value);
          return value.to_string();
       }
       text

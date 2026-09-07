@@ -1,3 +1,4 @@
+use std::array::from_fn;
 use std::fmt::Display;
 use std::fmt::Write as _;
 
@@ -8,7 +9,9 @@ use axum::response::Response;
 
 use super::AppState;
 use crate::clock;
-use crate::db::usage::{ErrorRow, InsightRow, MetricsRow, SessionRow, ToolRow};
+use crate::db::usage::{
+   ErrorRow, InsightRow, MetricsRow, SessionRow, ToolRow, USAGE_DIMENSIONS,
+};
 use crate::pool::{AccountSnapshot, UsageWindow};
 use crate::provider::Provider;
 
@@ -144,17 +147,8 @@ fn render_usage(out: &mut String, rows: &[MetricsRow]) {
    }
 }
 
-fn usage_labels(row: &MetricsRow) -> [(&'static str, &str); 8] {
-   [
-      ("user", &row.user),
-      ("account", &row.account),
-      ("provider", &row.provider),
-      ("requested_model", &row.requested_model),
-      ("model", &row.model),
-      ("effort", &row.effort),
-      ("service_tier", &row.service_tier),
-      ("dialect", &row.dialect),
-   ]
+fn usage_labels(row: &MetricsRow) -> [(&'static str, &str); USAGE_DIMENSIONS.len()] {
+   from_fn(|index| (USAGE_DIMENSIONS[index].0, row.dimensions[index].as_str()))
 }
 
 fn render_errors(out: &mut String, rows: &[ErrorRow]) {

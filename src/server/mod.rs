@@ -65,7 +65,7 @@ impl AppState {
          },
          Err(err) => {
             tracing::warn!("fetching models from codex backend: {err}");
-            None
+            self.models.stale()
          },
       }
    }
@@ -100,6 +100,18 @@ impl ModelCache {
       guard
          .as_ref()
          .filter(|&&(ref tick, _)| tick.elapsed() < self.ttl)
+         .map(|&(_, ref model)| model.clone())
+   }
+
+   /// The last body regardless of age, for when every account is cooling
+   /// and a fresh fetch is refused. A client that gets a 503 here falls back
+   /// to metadata without the zen entries and declares tools zen rejects.
+   pub fn stale(&self) -> Option<String> {
+      self
+         .inner
+         .lock()
+         .unwrap()
+         .as_ref()
          .map(|&(_, ref model)| model.clone())
    }
 

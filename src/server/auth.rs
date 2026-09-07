@@ -107,12 +107,19 @@ pub async fn require_token(
          }
          response
       },
-      Ok(None) => error_response(
-         dialect,
-         401,
-         "authentication_error",
-         "invalid or revoked API token",
-      ),
+      Ok(None) => {
+         tracing::warn!(
+            prefix = %raw.chars().take(12).collect::<String>(),
+            path = %req.uri().path(),
+            "rejected an unknown API token"
+         );
+         error_response(
+            dialect,
+            401,
+            "authentication_error",
+            "invalid or revoked API token",
+         )
+      },
       Err(err) => {
          tracing::error!("token lookup failed: {err}");
          error_response(dialect, 500, "api_error", "internal error")

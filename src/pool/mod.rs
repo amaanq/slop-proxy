@@ -7,15 +7,17 @@ pub mod pools;
 pub mod slots;
 pub mod zen;
 
+use crate::clock;
 use crate::db::Db;
 use crate::provider::Provider;
 use crate::upstream::SendError;
 use std::cmp::Reverse;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 use thiserror::Error;
+use tokio::sync::Mutex;
 use tokio::time;
 
 pub use pools::Pools;
@@ -74,6 +76,11 @@ pub trait Backend: Send + Sync + 'static {
    const TIERED: bool = false;
    /// A session waits this long for its own account's cooldown rather than losing the prompt cache.
    const STICKY_WAIT_SECS: i64 = 0;
+   /// Replayed history is encrypted to the account that issued it, so a
+   /// session that moves carries ciphertext its new account cannot read and
+   /// is unresumable from then on. Binds a session to its first account and
+   /// fails instead of migrating.
+   const SESSION_AFFINITY: bool = false;
    /// The backend serves without an account, zen's free tier.
    const ANONYMOUS: bool = false;
 
@@ -126,7 +133,19 @@ pub trait Backend: Send + Sync + 'static {
 pub struct Pool<B: Backend> {
    slots: Slots,
    backend: B,
+   bound: Mutex<HashMap<String, Bound>>,
 }
+
+#[derive(Clone, Copy)]
+struct Bound {
+   account_id: i64,
+   seen: i64,
+}
+
+/// Long enough to outlive a pause in a conversation, short enough that the
+/// map does not grow without bound across a long uptime.
+const BINDING_TTL_SECS: i64 = 12 * 3600;
+const MAX_BINDINGS: usize = 50_000;
 
 impl<B: Backend> Pool<B> {
    /// Averaged across accounts, so a caller's figures do not jump when
@@ -161,7 +180,37 @@ impl<B: Backend> Pool<B> {
       Ok(Self {
          slots: Slots::load(db, B::PROVIDER).await?,
          backend,
+         bound: Mutex::new(HashMap::new()),
       })
+   }
+
+   /// The account this session is already committed to, if it still exists in
+   /// the pool and the binding has not aged out.
+   async fn bound_account(&self, session_key: &str) -> Option<i64> {
+      if !B::SESSION_AFFINITY || session_key.is_empty() {
+         return None;
+      }
+      let bound = self.bound.lock().await;
+      let entry = bound.get(session_key)?;
+      (clock::unix_now() - entry.seen < BINDING_TTL_SECS).then_some(entry.account_id)
+   }
+
+   async fn bind_session(&self, session_key: &str, account_id: i64) {
+      if !B::SESSION_AFFINITY || session_key.is_empty() {
+         return;
+      }
+      let now = clock::unix_now();
+      let mut bound = self.bound.lock().await;
+      if bound.len() >= MAX_BINDINGS {
+         bound.retain(|_, entry| now - entry.seen < BINDING_TTL_SECS);
+      }
+      bound.insert(
+         session_key.to_owned(),
+         Bound {
+            account_id,
+            seen: now,
+         },
+      );
    }
 
    pub const fn backend(&self) -> &B {
@@ -195,9 +244,16 @@ impl<B: Backend> Pool<B> {
       let pinned = route
          .pinned_account
          .filter(|id| slots.iter().any(|slot| slot.id == *id));
+      let bound = self
+         .bound_account(route.session_key)
+         .await
+         .filter(|id| slots.iter().any(|slot| slot.id == *id));
       let mut scored = Vec::new();
       for slot in slots {
-         if pinned.is_some_and(|id| slot.id != id) || !slot.serves(route.user) {
+         if pinned.is_some_and(|id| slot.id != id)
+            || bound.is_some_and(|id| slot.id != id)
+            || !slot.serves(route.user)
+         {
             continue;
          }
          let band = self.slots.band(&slot, self.backend.soft_limit()).await;
@@ -301,7 +357,10 @@ impl<B: Backend> Pool<B> {
             continue;
          };
          match self.backend.send(&token, &slot, route, req).await {
-            Ok(resp) => return Ok((Some(slot.id), self.served(&slot, resp).await)),
+            Ok(resp) => {
+               self.bind_session(route.session_key, slot.id).await;
+               return Ok((Some(slot.id), self.served(&slot, resp).await));
+            },
             Err(SendError::Auth(text)) => match B::ON_AUTH {
                AuthPolicy::CoolKey(secs) => {
                   self.slots.cool(&slot, secs, "key rejected").await;
@@ -312,6 +371,7 @@ impl<B: Backend> Pool<B> {
                   if let Ok(fresh) = self.slots.fresh_token(&slot, true).await {
                      match self.backend.send(&fresh, &slot, route, req).await {
                         Ok(resp) => {
+                           self.bind_session(route.session_key, slot.id).await;
                            return Ok((Some(slot.id), self.served(&slot, resp).await));
                         },
                         Err(err) => {
@@ -383,6 +443,7 @@ mod retry_tests {
       const PROVIDER: Provider = Provider::Gemini;
       const RATE_LIMIT: Cooldown = Cooldown { max: 1, base: 1 };
       const ON_AUTH: AuthPolicy = AuthPolicy::CoolKey(60);
+      const SESSION_AFFINITY: bool = true;
       type Request = ();
       type Response = usize;
 
@@ -413,6 +474,7 @@ mod retry_tests {
       let db = Db::open(&db_path).unwrap();
       Pool {
          slots: test_slots(db, Provider::Gemini, &[(1, false)]),
+         bound: Mutex::new(HashMap::new()),
          backend: Flaky {
             calls: AtomicUsize::new(0),
             frees_after,
@@ -437,6 +499,7 @@ mod retry_tests {
       let db = Db::open(&db_path).unwrap();
       let pool = Pool {
          slots: test_slots(db, Provider::Gemini, &[(1, false), (2, false), (3, false)]),
+         bound: Mutex::new(HashMap::new()),
          backend: Flaky {
             calls: AtomicUsize::new(0),
             frees_after: 0,
@@ -459,6 +522,50 @@ mod retry_tests {
          ids(pool.ranked(elsewhere).await).len(),
          3,
          "a pin naming another provider's account must not empty this pool"
+      );
+   }
+
+   /// Replayed history is encrypted to the account that issued it, so a
+   /// session that migrates becomes permanently unresumable.
+   #[tokio::test]
+   async fn a_bound_session_never_migrates_to_another_account() {
+      let db_path = env::temp_dir().join(format!("slop-bind-{}.db", Uuid::new_v4()));
+      let db = Db::open(&db_path).unwrap();
+      let pool = Pool {
+         slots: test_slots(db, Provider::Gemini, &[(1, false), (2, false), (3, false)]),
+         bound: Mutex::new(HashMap::new()),
+         backend: Flaky {
+            calls: AtomicUsize::new(0),
+            frees_after: 0,
+            budget: Duration::ZERO,
+         },
+      };
+
+      let ids = |ranked: Vec<Arc<Slot>>| ranked.iter().map(|slot| slot.id).collect::<Vec<_>>();
+      assert_eq!(ids(pool.ranked(route()).await).len(), 3);
+
+      pool.bind_session("s", 3).await;
+      assert_eq!(ids(pool.ranked(route()).await), vec![3]);
+
+      let other = Route {
+         session_key: "other",
+         ..route()
+      };
+      assert_eq!(
+         ids(pool.ranked(other).await).len(),
+         3,
+         "one bound session must not constrain the rest of the pool"
+      );
+
+      pool.bind_session("gone", 99).await;
+      let stale = Route {
+         session_key: "gone",
+         ..route()
+      };
+      assert_eq!(
+         ids(pool.ranked(stale).await).len(),
+         3,
+         "a binding to a removed account must not empty the pool"
       );
    }
 

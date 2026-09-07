@@ -131,10 +131,11 @@ impl Pool<AnthropicClient> {
 #[cfg(test)]
 mod tests {
    use axum::routing::get;
-   use std::collections::HashSet;
+   use std::collections::{HashMap, HashSet};
    use std::env;
    use std::sync::Arc;
    use tokio::net::TcpListener;
+   use tokio::sync::Mutex;
 
    use super::*;
    use crate::clock;
@@ -151,6 +152,7 @@ mod tests {
       AnthropicPool {
          slots: super::super::test_slots(db, Provider::Anthropic, ids),
          backend: AnthropicClient::new(AnthropicConfig::default()),
+         bound: Mutex::new(HashMap::new()),
       }
    }
 

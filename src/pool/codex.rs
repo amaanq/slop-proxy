@@ -21,6 +21,7 @@ impl Backend for CodexClient {
    };
    const ON_AUTH: AuthPolicy = AuthPolicy::RefreshOnce;
    const TIERED: bool = true;
+   const SESSION_AFFINITY: bool = true;
    type Request = Bytes;
    type Response = reqwest::Response;
 

@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 
 use axum::Extension;
 use axum::body::to_bytes;
+use axum::extract::ws::rejection::WebSocketUpgradeRejection;
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{OriginalUri, State};
 use axum::http::HeaderMap;
@@ -32,7 +33,7 @@ pub async fn responses(
    Extension(auth): Extension<AuthInfo>,
    OriginalUri(uri): OriginalUri,
    headers: HeaderMap,
-   upgrade: WebSocketUpgrade,
+   upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Response {
    let requested = headers
       .get("x-codex-routing-hint")
@@ -51,6 +52,13 @@ pub async fn responses(
    if provider != Provider::OpenAi {
       return super::responses_upgrade_required();
    }
+   let upgrade = match upgrade {
+      Ok(upgrade) => upgrade,
+      Err(reason) => {
+         tracing::warn!(%reason, "WebSocket upgrade unavailable, falling back to HTTP");
+         return super::responses_upgrade_required();
+      },
+   };
    let session_key = ["session-id", "session_id", "thread-id", "thread_id"]
       .into_iter()
       .find_map(|name| headers.get(name)?.to_str().ok())

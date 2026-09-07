@@ -50,13 +50,7 @@ pub async fn require_token(
 
    match state.db.auth_token(&raw).await {
       Ok(Some(token)) => {
-         if req.method() == Method::GET
-            && req.uri().path() == "/v1/responses"
-            && req
-               .headers()
-               .get("upgrade")
-               .is_some_and(|value| value.as_bytes().eq_ignore_ascii_case(b"websocket"))
-         {
+         if req.method() == Method::GET && req.uri().path() == "/v1/responses" {
             req.extensions_mut().insert(AuthInfo {
                token_id: token.id,
                user: token.user,

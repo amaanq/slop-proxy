@@ -275,6 +275,53 @@ async fn websocket_upgrade_rejects_bad_auth_and_preserves_http_fallback() {
 }
 
 #[tokio::test]
+async fn websocket_missing_upgrade_headers_falls_back_without_spending_admission() {
+   let (base, db, _, seen) = mock().await;
+   db.set_token_limits(
+      "sp-test",
+      &TokenLimits {
+         requests: Some(1),
+         window_seconds: 3600,
+         ..TokenLimits::default()
+      },
+   )
+   .await
+   .unwrap();
+   let client = reqwest::Client::new();
+   for model in ["gpt-6-astra", "gemini-test"] {
+      for (connection, upgrade) in [(false, false), (true, false), (false, true)] {
+         let mut headers = upgrade_request(&base).headers().clone();
+         headers.insert(
+            "x-codex-routing-hint",
+            format!("model={model}").parse().unwrap(),
+         );
+         if !connection {
+            headers.remove("connection");
+         }
+         if !upgrade {
+            headers.remove("upgrade");
+         }
+         let response = client
+            .get(format!("{base}/v1/responses"))
+            .headers(headers)
+            .send()
+            .await
+            .unwrap();
+         assert_eq!(
+            response.status(),
+            426,
+            "{model} connection={connection} upgrade={upgrade}"
+         );
+      }
+   }
+   assert!(seen.lock().unwrap().is_empty());
+   assert_eq!(
+      db.token_meter("sp-test").await.unwrap().unwrap().requests,
+      0
+   );
+}
+
+#[tokio::test]
 async fn http_responses_forward_the_same_client_metadata() {
    let seen = Arc::new(Mutex::new(HeaderMap::new()));
    let capture = Arc::clone(&seen);

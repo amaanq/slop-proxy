@@ -7,6 +7,7 @@ use futures_util::stream;
 use reqwest::header;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tokio::time::{sleep, timeout};
 
 use crate::config::CodexConfig;
 use crate::upstream::{Classify, SendError, classify};
@@ -68,6 +69,7 @@ struct Retry {
 
 const EARLY_REFUSAL_COOLDOWN: i64 = 60;
 
+const RESPONSE_HEADERS_TIMEOUT: Duration = Duration::from_secs(30);
 const VERDICT_DEADLINE: Duration = Duration::from_secs(35);
 
 enum Opening {
@@ -169,6 +171,8 @@ async fn refuse_early(resp: reqwest::Response) -> Result<reqwest::Response, Send
    let mut stream = resp.bytes_stream();
    let mut head = Vec::new();
    let waited = Instant::now();
+   let deadline = sleep(VERDICT_DEADLINE);
+   tokio::pin!(deadline);
    loop {
       match opening(&head) {
          Opening::Serve => break,
@@ -180,18 +184,21 @@ async fn refuse_early(resp: reqwest::Response) -> Result<reqwest::Response, Send
                body,
             });
          },
-         Opening::Pending if waited.elapsed() > VERDICT_DEADLINE => {
-            tracing::warn!(
-               waited_ms = waited.elapsed().as_millis(),
-               "no opening verdict in time, serving the queued stream"
-            );
-            break;
-         },
          Opening::Pending if head.len() > 256 * 1024 => break,
-         Opening::Pending => match stream.next().await {
-            Some(Ok(chunk)) => head.extend_from_slice(&chunk),
-            Some(Err(err)) => return Err(SendError::Network(err.to_string())),
-            None => break,
+         Opening::Pending => tokio::select! {
+            biased;
+            () = &mut deadline => {
+               tracing::warn!(
+                  waited_ms = waited.elapsed().as_millis(),
+                  "no opening verdict in time, serving the queued stream"
+               );
+               break;
+            },
+            chunk = stream.next() => match chunk {
+               Some(Ok(chunk)) => head.extend_from_slice(&chunk),
+               Some(Err(err)) => return Err(SendError::Network(err.to_string())),
+               None => break,
+            },
          },
       }
    }
@@ -389,7 +396,7 @@ impl CodexClient {
       model: &str,
       headers: &header::HeaderMap,
    ) -> Result<reqwest::Response, SendError> {
-      let resp = self
+      let request = self
          .http
          .post(self.responses_url())
          .headers(self.responses_headers(
@@ -402,8 +409,10 @@ impl CodexClient {
          .header("Accept", "text/event-stream")
          .header(header::CONTENT_TYPE, "application/json")
          .body(req.clone())
-         .send()
+         .send();
+      let resp = timeout(RESPONSE_HEADERS_TIMEOUT, request)
          .await
+         .map_err(|_| SendError::Network("timed out waiting for responses headers".into()))?
          .map_err(|err| SendError::Network(err.to_string()))?;
       let resp = classify(resp, RULES).await?;
       refuse_early(resp).await

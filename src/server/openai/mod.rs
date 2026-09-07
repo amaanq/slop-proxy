@@ -32,6 +32,8 @@ use crate::translate::openai_req;
 use crate::translate::openai_stream::{OpenAiStream, render_aggregated};
 use crate::translate::{StopKind, UsageCapture, aggregate, model_map, usable_cap};
 
+pub mod websocket;
+
 const DIALECT: Dialect = Dialect::OpenAi;
 
 #[derive(serde::Deserialize)]
@@ -161,10 +163,10 @@ pub async fn chat_completions(
 
 /// Codex opens a WebSocket to this path before falling back to HTTP, and only
 /// 426 short-circuits that.
-pub async fn responses_upgrade_required() -> Response {
+pub fn responses_upgrade_required() -> Response {
    (
       StatusCode::UPGRADE_REQUIRED,
-      "this proxy serves the responses API over HTTP only",
+      "this model is served over HTTP",
    )
       .into_response()
 }
@@ -317,7 +319,9 @@ struct PassthroughRequest {
    /// Codex sets this to `priority` for `/fast`.
    #[serde(skip_serializing_if = "Option::is_none")]
    service_tier: Option<String>,
+   #[serde(skip_serializing_if = "Option::is_none")]
    store: Option<bool>,
+   #[serde(skip_serializing_if = "Option::is_none")]
    stream: Option<bool>,
    #[serde(skip_serializing_if = "Option::is_none")]
    instructions: Option<String>,
@@ -700,18 +704,11 @@ fn note_rejected_item(body: &str, rest: &serde_json::Map<String, Value>) {
    tracing::warn!(index, kind, ?keys, "zen rejected an input item");
 }
 
-pub async fn responses_passthrough(
-   State(state): State<AppState>,
-   Extension(auth): Extension<AuthInfo>,
-   headers: HeaderMap,
-   body: Bytes,
-) -> Response {
-   let started = Instant::now();
-   let mut req = match serde_json::from_slice::<PassthroughRequest>(&body) {
-      Ok(req) => req,
-      Err(err) => return translation_error(DIALECT, &format!("invalid request: {err}")),
-   };
-
+fn prepare_request(
+   state: &AppState,
+   auth: &AuthInfo,
+   mut req: PassthroughRequest,
+) -> Result<(PassthroughRequest, String, Provider), Box<Response>> {
    let requested_model = req
       .model
       .unwrap_or_else(|| state.cfg.models.default.clone());
@@ -723,10 +720,13 @@ pub async fn responses_passthrough(
       provider,
       Provider::OpenAi | Provider::Zen | Provider::Gemini
    ) {
-      return translation_error(DIALECT, "this model is not served over the responses api");
+      return Err(Box::new(translation_error(
+         DIALECT,
+         "this model is not served over the responses api",
+      )));
    }
    if !auth.may_use(provider) {
-      return super::error::out_of_scope(DIALECT, provider);
+      return Err(Box::new(super::error::out_of_scope(DIALECT, provider)));
    }
    req.model = Some(resolved.model.clone());
    if req
@@ -772,12 +772,30 @@ pub async fn responses_passthrough(
       }
    }
 
-   let client_streams = req.stream.unwrap_or(false);
    req.store = Some(false);
-   req.stream = Some(true);
    if req.instructions.is_none() && provider == Provider::OpenAi {
       req.instructions = Some(state.cfg.codex.instructions());
    }
+   Ok((req, requested_model, provider))
+}
+
+pub async fn responses_passthrough(
+   State(state): State<AppState>,
+   Extension(auth): Extension<AuthInfo>,
+   headers: HeaderMap,
+   body: Bytes,
+) -> Response {
+   let started = Instant::now();
+   let req = match serde_json::from_slice::<PassthroughRequest>(&body) {
+      Ok(req) => req,
+      Err(err) => return translation_error(DIALECT, &format!("invalid request: {err}")),
+   };
+   let (mut req, requested_model, provider) = match prepare_request(&state, &auth, req) {
+      Ok(prepared) => prepared,
+      Err(response) => return *response,
+   };
+   let client_streams = req.stream.unwrap_or(false);
+   req.stream = Some(true);
    let encoded = match serde_json::to_vec(&req) {
       Ok(value) => Bytes::from(value),
       Err(err) => return translation_error(DIALECT, &format!("serializing request: {err}")),
@@ -803,7 +821,7 @@ pub async fn responses_passthrough(
       "responses",
       provider,
       requested_model,
-      resolved.model,
+      req.model.clone().unwrap_or_default(),
       facts,
    );
    record.effort = req
@@ -825,7 +843,7 @@ pub async fn responses_passthrough(
       upstream,
    } = match state
       .pools
-      .responses_raw(provider, route, encoded, typed.as_ref())
+      .responses_raw(provider, route, encoded, typed.as_ref(), &headers)
       .await
    {
       Ok(dispatched) => dispatched,

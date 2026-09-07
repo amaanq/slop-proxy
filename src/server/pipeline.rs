@@ -34,7 +34,7 @@ pub fn record(
    facts: RequestFacts,
 ) -> UsageRecord {
    UsageRecord {
-      meter_id: Some(auth.meter_id),
+      meter_id: auth.meter_id,
       token_id: Some(auth.token_id),
       user: auth.user.clone(),
       provider: Some(provider),

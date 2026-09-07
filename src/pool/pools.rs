@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
 use axum::body::Bytes;
+use reqwest::header::HeaderMap;
 
 use super::anthropic::AnthropicPool;
 use super::codex::CodexPool;
@@ -138,7 +139,9 @@ impl Pools {
       let body = serde_json::to_vec(req)
          .map(Bytes::from)
          .map_err(|err| PoolError::Upstream(format!("serializing request: {err}")))?;
-      self.responses_raw(provider, route, body, Some(req)).await
+      self
+         .responses_raw(provider, route, body, Some(req), &HeaderMap::new())
+         .await
    }
 
    /// A caller already speaking Responses is forwarded byte for byte, since
@@ -151,13 +154,14 @@ impl Pools {
       route: Route<'_>,
       body: Bytes,
       typed: Option<&ResponsesRequest>,
+      headers: &HeaderMap,
    ) -> Result<Dispatched, PoolError> {
       let raw = |(account_id, response)| Dispatched {
          account_id,
          upstream: Upstream::Responses(response),
       };
       match provider {
-         Provider::OpenAi => self.codex.execute(route, body).await.map(raw),
+         Provider::OpenAi => self.codex.post(route, body, headers.clone()).await.map(raw),
          Provider::Zen => self.zen.execute(route, body).await.map(raw),
          Provider::Gemini => {
             let Some(req) = typed else {

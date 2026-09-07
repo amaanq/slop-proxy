@@ -94,6 +94,14 @@ async fn spawn_proxy_with_response(
    sse: String,
 ) -> (String, Db) {
    let base_url = spawn_mock_upstream(sse).await;
+   spawn_proxy_at(models, anthropic_base, base_url).await
+}
+
+async fn spawn_proxy_at(
+   models: ModelsConfig,
+   anthropic_base: Option<String>,
+   base_url: String,
+) -> (String, Db) {
    let db_path = env::temp_dir().join(format!("slop-test-{}.db", uuid::Uuid::new_v4()));
    let db = Db::open(&db_path).unwrap();
    db.create_token("alice", "sp-test", "sp-test")
@@ -783,3 +791,4 @@ async fn bridged_responses_preserve_status_usage_and_output_order() {
 
 mod experiential;
 mod rate_limits;
+mod websocket;

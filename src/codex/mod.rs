@@ -2,10 +2,12 @@ pub mod client;
 pub mod models;
 pub mod sse;
 pub mod types;
+pub mod websocket;
 
 use axum::body::Bytes;
 use eyre::{Result, bail, eyre};
 use futures_util::StreamExt as _;
+use reqwest::header::HeaderMap;
 
 use crate::clock;
 use crate::config::Config;
@@ -94,6 +96,7 @@ pub async fn debug_ping(
          &req,
          &uuid::Uuid::new_v4().to_string(),
          &model,
+         &HeaderMap::new(),
       )
       .await
    {

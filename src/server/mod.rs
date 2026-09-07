@@ -231,7 +231,7 @@ pub fn router(state: AppState) -> Router {
       .route("/config/codex/config.toml", get(clientcfg::codex_config))
       .route(
          "/v1/responses",
-         post(openai::responses_passthrough).get(openai::responses_upgrade_required),
+         post(openai::responses_passthrough).get(openai::websocket::responses),
       )
       .layer(middleware::from_fn(decompress::zstd_requests))
       .layer(DefaultBodyLimit::max(decompress::MAX_BODY))
@@ -317,7 +317,7 @@ pub fn log_rejected(state: &AppState, auth: &auth::AuthInfo, dialect: &'static s
    log_error(
       state,
       UsageRecord {
-         meter_id: Some(auth.meter_id),
+         meter_id: auth.meter_id,
          token_id: Some(auth.token_id),
          user: auth.user.clone(),
          dialect,

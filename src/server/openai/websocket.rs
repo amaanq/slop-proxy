@@ -272,6 +272,7 @@ impl Relay {
       }
    }
 
+   #[tracing::instrument(skip_all, fields(account_id = ?self.account_id, session = %self.session_key))]
    async fn run(mut self, mut client: WebSocket, mut upstream: Socket) {
       let mut keepalive = interval(PING_INTERVAL);
       keepalive.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -279,10 +280,7 @@ impl Relay {
       loop {
          tokio::select! {
             _ = keepalive.tick() => {
-               if !matches!(
-                  timeout(SEND_TIMEOUT, upstream.send(UpstreamMessage::Ping(Bytes::default()))).await,
-                  Ok(Ok(()))
-               ) {
+               if !send_upstream(&mut upstream, UpstreamMessage::Ping(Bytes::default())).await {
                   self.upstream_closed();
                   break;
                }
@@ -291,7 +289,17 @@ impl Relay {
                }
             },
             message = client.recv() => {
-               let Some(Ok(message)) = message else { break };
+               let message = match message {
+                  Some(Ok(message)) => message,
+                  Some(Err(error)) => {
+                     tracing::warn!(%error, "WebSocket client receive failed");
+                     break;
+                  },
+                  None => {
+                     tracing::info!("WebSocket client stream ended");
+                     break;
+                  },
+               };
                let message = match message {
                   Message::Text(text) => match self.request(&text).await {
                      Ok(text) => UpstreamMessage::Text(text.into()),
@@ -306,26 +314,44 @@ impl Relay {
                      let _ = send_client(&mut client, Message::Close(Some(CloseFrame {
                         code: 1003, reason: "Responses requests must be text messages".into(),
                      }))).await;
-                     break;
+                     let _ = send_upstream(&mut upstream, UpstreamMessage::Close(None)).await;
+                     return;
                   },
                   Message::Ping(_) | Message::Pong(_) => continue,
                   Message::Close(frame) => {
+                     tracing::info!(
+                        code = ?frame.as_ref().map(|frame| frame.code),
+                        reason = ?frame.as_ref().map(|frame| frame.reason.as_str()),
+                        "WebSocket client closed"
+                     );
                      let frame = frame.map(|frame| UpstreamCloseFrame {
                         code: frame.code.into(), reason: frame.reason.as_str().to_owned().into(),
                      });
-                     let _ = timeout(SEND_TIMEOUT, upstream.close(frame)).await;
-                     break;
+                     let _ = tokio::join!(
+                        timeout(SEND_TIMEOUT, client.flush()),
+                        send_upstream(&mut upstream, UpstreamMessage::Close(frame)),
+                     );
+                     return;
                   },
                };
-               if !matches!(timeout(SEND_TIMEOUT, upstream.send(message)).await, Ok(Ok(()))) {
+               if !send_upstream(&mut upstream, message).await {
                   self.upstream_closed();
                   break;
                }
             },
             message = upstream.next() => {
-               let Some(Ok(message)) = message else {
-                  self.upstream_closed();
-                  break;
+               let message = match message {
+                  Some(Ok(message)) => message,
+                  Some(Err(error)) => {
+                     tracing::warn!(%error, "WebSocket upstream receive failed");
+                     self.upstream_closed();
+                     break;
+                  },
+                  None => {
+                     tracing::warn!("WebSocket upstream stream ended");
+                     self.upstream_closed();
+                     break;
+                  },
                };
                let message = match message {
                   UpstreamMessage::Text(text) => {
@@ -335,11 +361,19 @@ impl Relay {
                   UpstreamMessage::Binary(bytes) => Message::Binary(bytes),
                   UpstreamMessage::Ping(_) | UpstreamMessage::Pong(_) | UpstreamMessage::Frame(_) => continue,
                   UpstreamMessage::Close(frame) => {
+                     tracing::info!(
+                        code = ?frame.as_ref().map(|frame| u16::from(frame.code)),
+                        reason = ?frame.as_ref().map(|frame| frame.reason.as_str()),
+                        "WebSocket upstream closed"
+                     );
                      self.upstream_closed();
                      let frame = frame.map(|frame| CloseFrame {
                         code: frame.code.into(), reason: frame.reason.as_str().to_owned().into(),
                      });
-                     let _ = send_client(&mut client, Message::Close(frame)).await;
+                     let _ = tokio::join!(
+                        timeout(SEND_TIMEOUT, upstream.flush()),
+                        send_client(&mut client, Message::Close(frame)),
+                     );
                      return;
                   },
                };
@@ -355,7 +389,7 @@ impl Relay {
          })),
       )
       .await;
-      let _ = timeout(SEND_TIMEOUT, upstream.close(None)).await;
+      let _ = send_upstream(&mut upstream, UpstreamMessage::Close(None)).await;
    }
 }
 
@@ -367,10 +401,31 @@ fn stream_id(value: &Value) -> &str {
 }
 
 async fn send_client(client: &mut WebSocket, message: Message) -> bool {
-   matches!(
-      timeout(SEND_TIMEOUT, client.send(message)).await,
-      Ok(Ok(()))
-   )
+   match timeout(SEND_TIMEOUT, client.send(message)).await {
+      Ok(Ok(())) => true,
+      Ok(Err(error)) => {
+         tracing::warn!(%error, "WebSocket client send failed");
+         false
+      },
+      Err(_) => {
+         tracing::warn!("WebSocket client send timed out");
+         false
+      },
+   }
+}
+
+async fn send_upstream(upstream: &mut Socket, message: UpstreamMessage) -> bool {
+   match timeout(SEND_TIMEOUT, upstream.send(message)).await {
+      Ok(Ok(())) => true,
+      Ok(Err(error)) => {
+         tracing::warn!(%error, "WebSocket upstream send failed");
+         false
+      },
+      Err(_) => {
+         tracing::warn!("WebSocket upstream send timed out");
+         false
+      },
+   }
 }
 
 async fn response_error(response: Response, stream: Option<Value>) -> Message {

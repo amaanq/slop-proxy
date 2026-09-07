@@ -1,8 +1,12 @@
 use std::time::Duration;
 
 use axum::body::Bytes;
+use axum::http::Response;
+use futures_util::StreamExt as _;
+use futures_util::stream;
 use reqwest::header;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::config::CodexConfig;
 use crate::upstream::{Classify, SendError, classify};
@@ -62,6 +66,94 @@ struct Retry {
    rest: serde_json::Map<String, serde_json::Value>,
 }
 
+const EARLY_REFUSAL_COOLDOWN: i64 = 60;
+
+enum Opening {
+   Pending,
+   Serve,
+   Refused(String),
+}
+
+/// `response.created` always arrives first, even when the next event is
+/// `error` with "Selected model is at capacity", so a status code never
+/// shows the refusal and the verdict is read from the first event after the
+/// lifecycle ones. The backend queues a busy model behind `keepalive`
+/// frames for about thirty seconds before refusing, so those wait too. A
+/// `response.failed` is left alone, since it arrives with usage to bill and
+/// is relayed as the terminal status.
+fn opening(head: &[u8]) -> Opening {
+   let text = String::from_utf8_lossy(head);
+   let Some((frames, _)) = text.rsplit_once("\n\n") else {
+      return Opening::Pending;
+   };
+   for frame in frames.split("\n\n") {
+      let data = frame
+         .lines()
+         .filter_map(|line| line.strip_prefix("data:"))
+         .map(str::trim_start)
+         .collect::<Vec<_>>()
+         .join("\n");
+      if data.is_empty() {
+         continue;
+      }
+      let Ok(event) = serde_json::from_str::<Value>(&data) else {
+         return Opening::Serve;
+      };
+      let error = match event
+         .get("type")
+         .and_then(Value::as_str)
+         .unwrap_or_default()
+      {
+         "response.created" | "response.in_progress" | "keepalive" => continue,
+         "error" => event.get("error"),
+         _ => return Opening::Serve,
+      };
+      let field = |name: &str| {
+         error
+            .and_then(|error| error.get(name))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+      };
+      return if field("type") == "invalid_request_error" {
+         Opening::Serve
+      } else {
+         Opening::Refused(data)
+      };
+   }
+   Opening::Pending
+}
+
+async fn refuse_early(resp: reqwest::Response) -> Result<reqwest::Response, SendError> {
+   let status = resp.status();
+   let headers = resp.headers().clone();
+   let mut stream = resp.bytes_stream();
+   let mut head = Vec::new();
+   loop {
+      match opening(&head) {
+         Opening::Serve => break,
+         Opening::Refused(body) => {
+            tracing::warn!(%body, "backend refused inside a 200, trying another account");
+            return Err(SendError::RateLimited {
+               retry_after: Some(EARLY_REFUSAL_COOLDOWN),
+               body,
+            });
+         },
+         Opening::Pending if head.len() > 256 * 1024 => break,
+         Opening::Pending => match stream.next().await {
+            Some(Ok(chunk)) => head.extend_from_slice(&chunk),
+            Some(Err(err)) => return Err(SendError::Network(err.to_string())),
+            None => break,
+         },
+      }
+   }
+   let replay =
+      stream::once(async move { Ok::<Bytes, reqwest::Error>(Bytes::from(head)) }).chain(stream);
+   let mut rebuilt = Response::new(reqwest::Body::wrap_stream(replay));
+   *rebuilt.status_mut() = status;
+   *rebuilt.headers_mut() = headers;
+   Ok(reqwest::Response::from(rebuilt))
+}
+
 impl CodexClient {
    pub fn new(cfg: CodexConfig) -> Self {
       let http = reqwest::Client::builder()
@@ -80,9 +172,10 @@ impl CodexClient {
       chatgpt_account_id: &str,
       req: &Bytes,
       session_id: &str,
+      model: &str,
    ) -> Result<reqwest::Response, SendError> {
       match self
-         .send_once(access_token, chatgpt_account_id, req, session_id)
+         .send_once(access_token, chatgpt_account_id, req, session_id, model)
          .await
       {
          Err(SendError::BadRequest(body))
@@ -98,6 +191,7 @@ impl CodexClient {
                   chatgpt_account_id,
                   &Bytes::from(retry),
                   session_id,
+                  model,
                )
                .await
          },
@@ -105,7 +199,7 @@ impl CodexClient {
          // jar picks up clearance on the first response, so retry once.
          Err(SendError::Upstream { status: 403, .. }) => {
             self
-               .send_once(access_token, chatgpt_account_id, req, session_id)
+               .send_once(access_token, chatgpt_account_id, req, session_id, model)
                .await
          },
          other => other,
@@ -208,6 +302,7 @@ impl CodexClient {
       chatgpt_account_id: &str,
       req: &Bytes,
       session_id: &str,
+      model: &str,
    ) -> Result<reqwest::Response, SendError> {
       let resp = self
          .http
@@ -219,14 +314,67 @@ impl CodexClient {
          .header("chatgpt-account-id", chatgpt_account_id)
          .header("OpenAI-Beta", "responses=experimental")
          .header("originator", self.cfg.originator.clone())
+         .header("version", self.cfg.version.clone())
          .header("session_id", session_id)
          .header("session-id", session_id)
+         .header("thread_id", session_id)
+         .header("thread-id", session_id)
+         .header("x-codex-routing-hint", format!("model={model}"))
          .header("Accept", "text/event-stream")
          .header(header::CONTENT_TYPE, "application/json")
          .body(req.clone())
          .send()
          .await
          .map_err(|err| SendError::Network(err.to_string()))?;
-      classify(resp, RULES).await
+      let resp = classify(resp, RULES).await?;
+      refuse_early(resp).await
+   }
+}
+
+#[cfg(test)]
+mod tests {
+   use super::*;
+
+   fn head(events: &[&str]) -> Vec<u8> {
+      events
+         .iter()
+         .fold(String::new(), |mut out, data| {
+            out.push_str("event: x\ndata: ");
+            out.push_str(data);
+            out.push_str("\n\n");
+            out
+         })
+         .into_bytes()
+   }
+
+   #[test]
+   fn a_refusal_after_the_lifecycle_events_is_read_as_one() {
+      let created = r#"{"type":"response.created","response":{}}"#;
+      let capacity = r#"{"type":"error","error":{"type":"server_error","code":"model_at_capacity","message":"Selected model is at capacity."}}"#;
+      let bad = r#"{"type":"error","error":{"type":"invalid_request_error","code":"invalid_encrypted_content","message":"x"}}"#;
+      let failed =
+         r#"{"type":"response.failed","response":{"status":"failed","usage":{"output_tokens":5}}}"#;
+      let output = r#"{"type":"response.output_item.added","item":{}}"#;
+      let keepalive = r#"{"type":"keepalive"}"#;
+      assert!(matches!(opening(&head(&[created])), Opening::Pending));
+      assert!(matches!(
+         opening(&head(&[created, keepalive, keepalive])),
+         Opening::Pending
+      ));
+      assert!(matches!(
+         opening(&head(&[created, keepalive, capacity])),
+         Opening::Refused(_)
+      ));
+      assert!(matches!(
+         opening(&head(&[created, capacity])),
+         Opening::Refused(_)
+      ));
+      assert!(matches!(opening(&head(&[created, bad])), Opening::Serve));
+      assert!(matches!(opening(&head(&[created, failed])), Opening::Serve));
+      assert!(matches!(opening(&head(&[created, output])), Opening::Serve));
+      assert!(matches!(
+         opening(b"event: x\ndata: {\"type\":\"resp"),
+         Opening::Pending
+      ));
    }
 }

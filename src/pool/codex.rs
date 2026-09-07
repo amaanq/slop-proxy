@@ -45,6 +45,7 @@ impl Backend for CodexClient {
          &slot.provider_account_id,
          req,
          &session_uuid(route.session_key),
+         route.model,
       )
       .await
    }

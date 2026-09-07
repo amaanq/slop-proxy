@@ -166,7 +166,7 @@ pub async fn chat_completions(
 pub fn responses_upgrade_required() -> Response {
    (
       StatusCode::UPGRADE_REQUIRED,
-      "this model is served over HTTP",
+      "WebSocket unavailable for this request, use HTTP POST",
    )
       .into_response()
 }

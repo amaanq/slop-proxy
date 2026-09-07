@@ -949,6 +949,12 @@ fn relay_stream(
                if let Ok(parsed) = serde_json::from_str::<ResponsesEvent>(&event.data) {
                   capture.observe(&parsed);
                }
+               if event.data.starts_with(r#"{"type":"error""#)
+                  || event.data.starts_with(r#"{"type":"response.failed""#)
+               {
+                  let head: String = event.data.chars().take(600).collect();
+                  tracing::warn!(frame = %head, "upstream failed inside a 200");
+               }
                let mut out = Event::default().data(event.data);
                if !event.event.is_empty() && event.event != "message" {
                   out = out.event(event.event);

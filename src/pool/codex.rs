@@ -112,7 +112,8 @@ impl Pool<CodexClient> {
 
    /// Fresh (`access_token`, `account_id`) for the models listing. Trusted
    /// first, since gated models are absent from an untrusted account's
-   /// catalog.
+   /// catalog. Cooldowns are ignored, a listing spends no quota and a fleet
+   /// that is entirely cooling after a restart must still serve one.
    pub async fn any_active_credentials(&self) -> Option<(String, String)> {
       for slot in self
          .ranked(Route {
@@ -124,9 +125,6 @@ impl Pool<CodexClient> {
          })
          .await
       {
-         if !self.slots.try_claim(&slot).await {
-            continue;
-         }
          let Ok(access) = self.slots.fresh_token(&slot, false).await else {
             continue;
          };

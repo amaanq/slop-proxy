@@ -3,7 +3,7 @@
 
 use std::collections::VecDeque;
 use std::convert::Infallible;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::body::HttpBody as _;
 use axum::body::{Body, Bytes};
@@ -13,6 +13,7 @@ use axum::response::Response;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures_util::StreamExt as _;
 use futures_util::stream;
+use tokio::time::timeout;
 
 use super::auth::AuthInfo;
 use super::error::{Dialect, error_response, pool_error_response, pool_error_status};
@@ -143,8 +144,42 @@ where
          Ok(bytes)
       }));
    builder
-      .body(Body::from_stream(stream))
+      .body(Body::from_stream(kept_alive(stream)))
       .unwrap_or_else(|err| error_response(dialect, 502, "api_error", &err.to_string()))
+}
+
+/// Cloudflare returns a 524 after 100s without a byte from the origin, and a
+/// stalled upstream outlives that: one muse turn sent its first byte in 3.7s
+/// then went quiet for 322s before closing empty. The comment frame is inert
+/// per the SSE grammar, so it costs a relayed body nothing. `translated`
+/// gets this from `Sse::keep_alive`; a passthrough parses nothing and has to
+/// inject its own. opencode's own event stream does the same at 15s.
+fn kept_alive<S, E>(stream: S) -> impl stream::Stream<Item = Result<Bytes, E>> + Send
+where
+   S: stream::Stream<Item = Result<Bytes, E>> + Send + 'static,
+{
+   const EVERY: Duration = Duration::from_secs(15);
+   // Upstream chunks split anywhere, so a heartbeat sent mid-frame would land
+   // inside a half-written `data:` line and corrupt it.
+   stream::unfold((Box::pin(stream), true), |(mut upstream, boundary)| async move {
+      loop {
+         match timeout(EVERY, upstream.next()).await {
+            Ok(item) => {
+               let ended = item.as_ref().is_some_and(|item| {
+                  item.as_ref().is_ok_and(|bytes: &Bytes| {
+                     bytes.ends_with(b"\n\n") || bytes.ends_with(b"\r\n\r\n")
+                  })
+               });
+               return item.map(|item| (item, (upstream, ended)));
+            },
+            Err(_) if boundary => {
+               let beat = Bytes::from_static(b": heartbeat\n\n");
+               return Some((Ok(beat), (upstream, true)));
+            },
+            Err(_) => {},
+         }
+      }
+   })
 }
 
 /// Responses events rendered as another dialect's SSE. `step` gets `None`

@@ -25,6 +25,35 @@ pub struct ResponseError {
    pub transient: bool,
 }
 
+impl ResponseError {
+   pub fn normalize(self, event: &mut Value) {
+      let bare = event.get("type").and_then(Value::as_str) == Some("error");
+      if bare {
+         event["status"] = Value::from(self.status);
+         if let Some(event) = event.as_object_mut() {
+            event.remove("status_code");
+         }
+      }
+      let error = if bare {
+         event.get_mut("error")
+      } else {
+         event
+            .get_mut("response")
+            .and_then(|response| response.get_mut("error"))
+      };
+      if self.transient
+         && let Some(error) = error
+         && matches!(
+            error.get("code").and_then(Value::as_str),
+            Some("server_is_overloaded" | "slow_down")
+         )
+      {
+         error["upstream_code"] = error["code"].take();
+         error["code"] = Value::from("upstream_unavailable");
+      }
+   }
+}
+
 pub fn response_error(event: &Value) -> Option<ResponseError> {
    let error = match event.get("type")?.as_str()? {
       "error" => event.get("error"),

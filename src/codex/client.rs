@@ -74,6 +74,42 @@ enum Opening {
    Pending,
    Serve,
    Refused(String),
+   Undecryptable,
+}
+
+const UNDECRYPTABLE: &str = "encrypted inter-agent payload the backend cannot decrypt";
+const DROPPED_PAYLOAD_NOTE: &str =
+   "[a message encrypted for another agent could not be decrypted by the backend and was dropped]";
+
+/// A forked worker carries messages that were encrypted for its parent, and
+/// the backend refuses the whole request over them. Dropping the parts it
+/// cannot read is the only way the thread continues.
+fn drop_undecryptable_payloads(req: &Bytes) -> Option<Bytes> {
+   let mut body: Value = serde_json::from_slice(req).ok()?;
+   let items = body.get_mut("input")?.as_array_mut()?;
+   let mut dropped = 0_usize;
+   for item in items.iter_mut() {
+      if item.get("type").and_then(Value::as_str) != Some("agent_message") {
+         continue;
+      }
+      let Some(parts) = item.get_mut("content").and_then(Value::as_array_mut) else {
+         continue;
+      };
+      for part in parts.iter_mut() {
+         if part.get("encrypted_content").is_some() {
+            *part = serde_json::json!({"type": "input_text", "text": DROPPED_PAYLOAD_NOTE});
+            dropped += 1;
+         }
+      }
+   }
+   if dropped == 0 {
+      return None;
+   }
+   tracing::warn!(
+      dropped,
+      "retrying without the payloads the backend cannot decrypt"
+   );
+   serde_json::to_vec(&body).ok().map(Bytes::from)
 }
 
 /// `response.created` always arrives first, even when the next event is
@@ -116,7 +152,9 @@ fn opening(head: &[u8]) -> Opening {
             .and_then(Value::as_str)
             .unwrap_or_default()
       };
-      return if field("type") == "invalid_request_error" {
+      return if field("code") == "invalid_encrypted_content" {
+         Opening::Undecryptable
+      } else if field("type") == "invalid_request_error" {
          Opening::Serve
       } else {
          Opening::Refused(data)
@@ -134,6 +172,7 @@ async fn refuse_early(resp: reqwest::Response) -> Result<reqwest::Response, Send
    loop {
       match opening(&head) {
          Opening::Serve => break,
+         Opening::Undecryptable => return Err(SendError::BadRequest(UNDECRYPTABLE.into())),
          Opening::Refused(body) => {
             tracing::warn!(%body, "backend refused inside a 200, trying another account");
             return Err(SendError::RateLimited {
@@ -203,6 +242,14 @@ impl CodexClient {
                   session_id,
                   model,
                )
+               .await
+         },
+         Err(SendError::BadRequest(body))
+            if body == UNDECRYPTABLE
+               && let Some(retry) = drop_undecryptable_payloads(req) =>
+         {
+            self
+               .send_once(access_token, chatgpt_account_id, &retry, session_id, model)
                .await
          },
          // Cloudflare occasionally 403s fresh headless clients; the cookie
@@ -361,10 +408,27 @@ mod tests {
    fn a_refusal_after_the_lifecycle_events_is_read_as_one() {
       let created = r#"{"type":"response.created","response":{}}"#;
       let capacity = r#"{"type":"error","error":{"type":"server_error","code":"model_at_capacity","message":"Selected model is at capacity."}}"#;
-      let bad = r#"{"type":"error","error":{"type":"invalid_request_error","code":"invalid_encrypted_content","message":"x"}}"#;
+      let bad = r#"{"type":"error","error":{"type":"invalid_request_error","code":"invalid_prompt","message":"x"}}"#;
       let failed =
          r#"{"type":"response.failed","response":{"status":"failed","usage":{"output_tokens":5}}}"#;
       let output = r#"{"type":"response.output_item.added","item":{}}"#;
+      let undecryptable = r#"{"type":"error","error":{"type":"invalid_request_error","code":"invalid_encrypted_content","message":"x"}}"#;
+      assert!(matches!(
+         opening(&head(&[created, undecryptable])),
+         Opening::Undecryptable
+      ));
+      let req = Bytes::from(
+         r#"{"input":[{"type":"agent_message","author":"/root/a","recipient":"/root","content":[{"type":"input_text","text":"Payload:\n"},{"type":"encrypted_content","encrypted_content":"gAAAAx"}]},{"type":"message","role":"user","content":"hi"}]}"#,
+      );
+      let retry: Value =
+         serde_json::from_slice(&drop_undecryptable_payloads(&req).unwrap()).unwrap();
+      assert_eq!(retry["input"][0]["content"][1]["type"], "input_text");
+      assert!(
+         drop_undecryptable_payloads(&Bytes::from(
+            r#"{"input":[{"type":"message","role":"user","content":"hi"}]}"#
+         ))
+         .is_none()
+      );
       let keepalive = r#"{"type":"keepalive"}"#;
       assert!(matches!(opening(&head(&[created])), Opening::Pending));
       assert!(matches!(

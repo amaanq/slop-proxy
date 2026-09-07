@@ -466,6 +466,7 @@ pub fn chat_usage(usage: &UsageMetadata) -> ChatUsage {
          .unwrap_or(prompt + completion + thoughts),
       prompt_tokens_details: PromptTokensDetails {
          cached_tokens: usage.cached_content_token_count,
+         cache_write_tokens: 0,
       },
       completion_tokens_details: CompletionTokensDetails {
          reasoning_tokens: thoughts,

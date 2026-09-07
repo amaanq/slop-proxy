@@ -1,8 +1,10 @@
 use serde::Serialize;
 use serde_json::value::RawValue;
 
-use super::{Aggregated, Block, BlockEvent, Step, StopKind, UsageCapture, Walker};
 use crate::codex::types::{ResponsesEvent, Usage};
+use crate::translate::{
+   Aggregated, Block, BlockEvent, Step, StopKind, UsageCapture, Walker, input_token_partition,
+};
 
 pub struct AnthropicStream {
    model: String,
@@ -131,12 +133,12 @@ pub struct AnthUsage {
 }
 
 fn anthropic_usage(usage: &Usage) -> AnthUsage {
-   let cached = usage.input_tokens_details.cached_tokens;
+   let (input_tokens, cached, written) = input_token_partition(usage);
    AnthUsage {
-      input_tokens: (usage.input_tokens - cached).max(0),
+      input_tokens,
       output_tokens: usage.output_tokens,
       cache_read_input_tokens: cached,
-      cache_creation_input_tokens: 0,
+      cache_creation_input_tokens: written,
    }
 }
 

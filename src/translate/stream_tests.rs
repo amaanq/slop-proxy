@@ -134,6 +134,50 @@ fn every_terminal_event_records_usage_and_status() {
 }
 
 #[test]
+fn terminal_cache_writes_leave_only_fresh_input() {
+   let capture = UsageCapture::default();
+   let event = serde_json::from_value(json!({
+      "type": "response.completed",
+      "response": {"usage": {
+         "input_tokens": 150_i32,
+         "output_tokens": 5_i32,
+         "input_tokens_details": {"cached_tokens": 120_i32, "cache_write_tokens": 20_i32},
+      }}
+   }))
+   .unwrap();
+   capture.observe(&event);
+   let snapshot = capture.snapshot();
+   assert_eq!(snapshot.input_tokens, 10);
+   assert_eq!(snapshot.cache_read_tokens, 120);
+   assert_eq!(snapshot.cache_write_tokens, 20);
+}
+
+#[test]
+fn malformed_token_details_cannot_make_usage_negative() {
+   for (input, cached, written, expected_cached, expected_written) in [
+      (-1_i64, -2_i64, -3_i64, 0_i64, 0_i64),
+      (10, 20, 5, 20, 5),
+      (10, 5, 20, 5, 20),
+      (0, i64::MAX, i64::MAX, i64::MAX, i64::MAX),
+   ] {
+      let capture = UsageCapture::default();
+      let event = serde_json::from_value(json!({
+         "type": "response.completed",
+         "response": {"usage": {
+            "input_tokens": input,
+            "input_tokens_details": {"cached_tokens": cached, "cache_write_tokens": written},
+         }}
+      }))
+      .unwrap();
+      capture.observe(&event);
+      let snapshot = capture.snapshot();
+      assert_eq!(snapshot.input_tokens, 0);
+      assert_eq!(snapshot.cache_read_tokens, expected_cached);
+      assert_eq!(snapshot.cache_write_tokens, expected_written);
+   }
+}
+
+#[test]
 fn bridge_distinguishes_incomplete_responses_and_missing_terminals() {
    for (reason, expected) in [
       ("stop", "response.completed"),

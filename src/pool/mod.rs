@@ -81,6 +81,10 @@ pub trait Backend: Send + Sync + 'static {
    /// is unresumable from then on. Binds a session to its first account and
    /// fails instead of migrating.
    const SESSION_AFFINITY: bool = false;
+   /// How long a bound session sleeps through its own account's cooldown.
+   /// Rate-limit cooldowns here are 60s, and the alternative is failing the
+   /// turn, since the session cannot be served anywhere else.
+   const BOUND_WAIT_SECS: i64 = 0;
    /// The backend serves without an account, zen's free tier.
    const ANONYMOUS: bool = false;
 
@@ -193,6 +197,28 @@ impl<B: Backend> Pool<B> {
       let bound = self.bound.lock().await;
       let entry = bound.get(session_key)?;
       (clock::unix_now() - entry.seen < BINDING_TTL_SECS).then_some(entry.account_id)
+   }
+
+   /// A bound session has nowhere else to go, so a short cooldown on its own
+   /// account is worth sleeping through rather than failing the turn.
+   async fn wait_out_own_cooldown(&self, route: Route<'_>, preferred: Option<&Arc<Slot>>) {
+      let wait = if self.bound_account(route.session_key).await.is_some() {
+         B::BOUND_WAIT_SECS
+      } else {
+         B::STICKY_WAIT_SECS
+      };
+      let Some(preferred) = preferred.filter(|_| wait > 0) else {
+         return;
+      };
+      let left = self.slots.cooldown_left(preferred).await;
+      if (1..=wait).contains(&left) {
+         tracing::debug!(
+             account = %preferred.display,
+             left,
+             "waiting for this session's own account rather than moving it"
+         );
+         time::sleep(Duration::from_secs(left as u64 + 1)).await;
+      }
    }
 
    async fn bind_session(&self, session_key: &str, account_id: i64) {
@@ -330,19 +356,7 @@ impl<B: Backend> Pool<B> {
          }
          return Err(PoolError::NoAccounts(B::PROVIDER));
       }
-      if B::STICKY_WAIT_SECS > 0
-         && let Some(preferred) = ranked.first()
-      {
-         let left = self.slots.cooldown_left(preferred).await;
-         if (1..=B::STICKY_WAIT_SECS).contains(&left) {
-            tracing::debug!(
-                account = %preferred.display,
-                left,
-                "waiting for the sticky gemini key rather than losing its cache"
-            );
-            time::sleep(Duration::from_secs(left as u64 + 1)).await;
-         }
-      }
+      self.wait_out_own_cooldown(route, ranked.first()).await;
       let mut last_err = Option::<SendError>::None;
       let mut attempts = 0;
       for slot in ranked {

@@ -93,6 +93,7 @@ pub async fn debug_ping(
          &account.provider_account_id,
          &req,
          &uuid::Uuid::new_v4().to_string(),
+         &model,
       )
       .await
    {

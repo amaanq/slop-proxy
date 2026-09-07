@@ -132,6 +132,11 @@ pub trait Backend: Send + Sync + 'static {
       let _ = resp;
       None
    }
+
+   fn is_handshake(&self, resp: &Self::Response) -> bool {
+      let _ = resp;
+      false
+   }
 }
 
 pub struct Pool<B: Backend> {
@@ -154,17 +159,26 @@ const MAX_BINDINGS: usize = 50_000;
 impl<B: Backend> Pool<B> {
    /// Averaged across accounts, so a caller's figures do not jump when
    /// routing moves it.
-   pub async fn pool_windows(&self) -> Vec<UsageWindow> {
+   pub async fn pool_windows(
+      &self,
+      user: &str,
+      pinned_account: Option<i64>,
+      limit: Option<&str>,
+   ) -> Vec<UsageWindow> {
+      let slots = self.slots.list().await;
+      let pinned_account = pinned_account.filter(|id| slots.iter().any(|slot| slot.id == *id));
       let mut by_name: BTreeMap<String, (f64, usize, Option<i64>)> = BTreeMap::default();
-      for account in self.slots.snapshot().await {
-         let Some(usage) = account.usage else { continue };
-         for window in usage.windows {
-            let slot = by_name
+      for slot in &slots {
+         if !slot.serves(user) || pinned_account.is_some_and(|id| id != slot.id) {
+            continue;
+         }
+         for window in self.slots.limit_windows(slot, limit).await {
+            let aggregate = by_name
                .entry(window.name.clone())
                .or_insert((0.0_f64, 0_usize, None));
-            slot.0 += window.utilization;
-            slot.1 += 1;
-            slot.2 = match (slot.2, window.resets_at) {
+            aggregate.0 += window.utilization;
+            aggregate.1 += 1;
+            aggregate.2 = match (aggregate.2, window.resets_at) {
                (Some(left), Some(right)) => Some(left.min(right)),
                (left, right) => left.or(right),
             };
@@ -294,7 +308,9 @@ impl<B: Backend> Pool<B> {
    }
 
    async fn served(&self, slot: &Slot, resp: B::Response) -> B::Response {
-      self.slots.mark_ok(slot).await;
+      if !self.backend.is_handshake(&resp) {
+         self.slots.mark_ok(slot).await;
+      }
       if let Some(usage) = self.backend.usage_from(&resp) {
          self.slots.note_usage(slot, usage).await;
       }

@@ -17,7 +17,7 @@ use tokio_tungstenite::tungstenite::protocol::CloseFrame as UpstreamCloseFrame;
 
 use super::{DIALECT, PassthroughRequest, prepare_request, restore_reserved_namespace};
 use crate::codex::types::{ResponsesEvent, ResponsesRequest};
-use crate::codex::websocket::{MAX_MESSAGE_SIZE, Socket};
+use crate::codex::websocket::{MAX_MESSAGE_SIZE, Socket, response_error as upstream_error};
 use crate::db::usage::AdmissionError;
 use crate::pool::Route;
 use crate::provider::Provider;
@@ -81,9 +81,11 @@ pub async fn responses(
       state,
       token: bearer_token(&headers, uri.query()).unwrap_or_default(),
       headers,
+      auth,
       account_id,
       session_key,
       pending: BTreeMap::new(),
+      upstream_failed: false,
    };
    let mut response = upgrade
       .max_message_size(MAX_MESSAGE_SIZE)
@@ -106,15 +108,18 @@ pub async fn responses(
 struct Pending {
    capture: UsageCapture,
    _guard: LogGuard,
+   generated: bool,
 }
 
 struct Relay {
    state: AppState,
    token: String,
    headers: HeaderMap,
+   auth: AuthInfo,
    account_id: Option<i64>,
    session_key: String,
    pending: BTreeMap<String, VecDeque<Pending>>,
+   upstream_failed: bool,
 }
 
 impl Relay {
@@ -230,50 +235,109 @@ impl Relay {
       self.pending.entry(stream).or_default().push_back(Pending {
          capture,
          _guard: guard,
+         generated: req.rest.get("generate").and_then(Value::as_bool) != Some(false),
       });
+      self.auth = auth;
       Ok(encoded)
    }
 
-   fn observe(&mut self, text: &str) {
-      let Ok(value) = serde_json::from_str::<Value>(text) else {
-         return;
+   async fn observe(&mut self, text: String) -> String {
+      let Ok(mut value) = serde_json::from_str::<Value>(&text) else {
+         return text;
       };
+      if value.get("type").and_then(Value::as_str) == Some("codex.rate_limits") {
+         self
+            .state
+            .pools
+            .codex
+            .rewrite_rate_limits(
+               self.account_id,
+               &self.auth.user,
+               self.auth.limits.pinned_account,
+               &mut value,
+            )
+            .await;
+         return value.to_string();
+      }
       let stream = stream_id(&value);
       let kind = value
          .get("type")
          .and_then(Value::as_str)
          .unwrap_or_default();
-      let Some(queue) = self.pending.get_mut(stream) else {
-         return;
-      };
-      let Some(pending) = queue.front() else { return };
-      pending.capture.note_bytes(text.len());
-      if let Ok(event) = serde_json::from_value::<ResponsesEvent>(value.clone()) {
-         pending.capture.observe(&event);
+      let error = upstream_error(&value);
+      if error.as_ref().is_some_and(|error| error.transient) {
+         self.fail_upstream().await;
       }
-      if kind == "error" {
+      if matches!(kind, "error" | "response.failed") {
          tracing::warn!(
             account = ?self.account_id,
             frame = %text.chars().take(600).collect::<String>(),
             "upstream error frame on websocket"
          );
-         pending.capture.fail("upstream_rejected");
-         pending.capture.note_stop_reason("error");
       }
-      if matches!(
-         kind,
-         "response.completed" | "response.failed" | "response.incomplete" | "error"
-      ) {
-         queue.pop_front();
-         if queue.is_empty() {
-            self.pending.remove(stream);
+      let mut completed = false;
+      if let Some(queue) = self.pending.get_mut(stream) {
+         if let Some(pending) = queue.front() {
+            pending.capture.note_bytes(text.len());
+            if let Ok(event) = serde_json::from_value::<ResponsesEvent>(value.clone()) {
+               pending.capture.observe(&event);
+            }
+            if kind == "error" {
+               pending.capture.fail("upstream_rejected");
+               pending.capture.note_stop_reason("error");
+            }
+            completed = kind == "response.completed" && pending.generated;
          }
+         if matches!(
+            kind,
+            "response.completed" | "response.failed" | "response.incomplete" | "error"
+         ) {
+            queue.pop_front();
+            if queue.is_empty() {
+               self.pending.remove(stream);
+            }
+         }
+      }
+      if completed && !self.upstream_failed {
+         self
+            .state
+            .pools
+            .codex
+            .websocket_completed(self.account_id)
+            .await;
+      }
+      if kind == "error"
+         && let Some(error) = error
+         && (value.get("status").and_then(Value::as_u64).is_none()
+            || value.get("status_code").is_some())
+      {
+         value["status"] = json!(error.status);
+         if let Some(value) = value.as_object_mut() {
+            value.remove("status_code");
+         }
+         return value.to_string();
+      }
+      text
+   }
+
+   async fn fail_upstream(&mut self) {
+      if !self.upstream_failed {
+         self.upstream_failed = true;
+         self
+            .state
+            .pools
+            .codex
+            .websocket_failed(self.account_id)
+            .await;
       }
    }
 
-   fn upstream_closed(&self) {
+   async fn upstream_closed(&mut self) {
       for pending in self.pending.values().flatten() {
          pending.capture.note_upstream_eof();
+      }
+      if !self.pending.is_empty() {
+         self.fail_upstream().await;
       }
    }
 
@@ -286,7 +350,7 @@ impl Relay {
          tokio::select! {
             _ = keepalive.tick() => {
                if !send_upstream(&mut upstream, UpstreamMessage::Ping(Bytes::default())).await {
-                  self.upstream_closed();
+                  self.upstream_closed().await;
                   break;
                }
                if !send_client(&mut client, Message::Ping(Bytes::default())).await {
@@ -340,7 +404,7 @@ impl Relay {
                   },
                };
                if !send_upstream(&mut upstream, message).await {
-                  self.upstream_closed();
+                  self.upstream_closed().await;
                   break;
                }
             },
@@ -349,19 +413,19 @@ impl Relay {
                   Some(Ok(message)) => message,
                   Some(Err(error)) => {
                      tracing::warn!(%error, "WebSocket upstream receive failed");
-                     self.upstream_closed();
+                     self.upstream_closed().await;
                      break;
                   },
                   None => {
                      tracing::warn!("WebSocket upstream stream ended");
-                     self.upstream_closed();
+                     self.upstream_closed().await;
                      break;
                   },
                };
                let message = match message {
                   UpstreamMessage::Text(text) => {
-                     self.observe(&text);
-                     Message::Text(restore_reserved_namespace(text.to_string()).into())
+                     let text = self.observe(text.to_string()).await;
+                     Message::Text(restore_reserved_namespace(text).into())
                   },
                   UpstreamMessage::Binary(bytes) => Message::Binary(bytes),
                   UpstreamMessage::Ping(_) | UpstreamMessage::Pong(_) | UpstreamMessage::Frame(_) => continue,
@@ -371,7 +435,7 @@ impl Relay {
                         reason = ?frame.as_ref().map(|frame| frame.reason.as_str()),
                         "WebSocket upstream closed"
                      );
-                     self.upstream_closed();
+                     self.upstream_closed().await;
                      let frame = frame.map(|frame| CloseFrame {
                         code: frame.code.into(), reason: frame.reason.as_str().to_owned().into(),
                      });

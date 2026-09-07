@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use axum::http::Response;
 use reqwest::header::{HeaderMap, HeaderValue};
+use serde_json::Value;
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
@@ -17,6 +18,61 @@ pub type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 pub struct Connection {
    pub socket: Socket,
    pub headers: HeaderMap,
+}
+
+pub struct ResponseError {
+   pub status: u16,
+   pub transient: bool,
+}
+
+pub fn response_error(event: &Value) -> Option<ResponseError> {
+   let error = match event.get("type")?.as_str()? {
+      "error" => event.get("error"),
+      "response.failed" => event.get("response")?.get("error"),
+      _ => None,
+   }?;
+   let code = error
+      .get("code")
+      .and_then(Value::as_str)
+      .unwrap_or_default();
+   let kind = error
+      .get("type")
+      .and_then(Value::as_str)
+      .unwrap_or_default();
+   let (fallback, transient) = match code {
+      "cyber_policy"
+      | "invalid_prompt"
+      | "context_length_exceeded"
+      | "invalid_encrypted_content"
+      | "previous_response_not_found" => (400, false),
+      "insufficient_quota"
+      | "usage_limit_reached"
+      | "usage_not_included"
+      | "rate_limit_exceeded" => (429, false),
+      "server_is_overloaded" | "slow_down" | "model_at_capacity" => (503, true),
+      _ => match kind {
+         "invalid_request_error" => (400, false),
+         "authentication_error" => (401, false),
+         "permission_error" => (403, false),
+         "rate_limit_error"
+         | "rate_limit_exceeded"
+         | "usage_limit_reached"
+         | "usage_not_included"
+         | "insufficient_quota" => (429, false),
+         "server_error" | "api_error" | "internal_server_error" => (500, true),
+         _ if code == "server_error" => (500, true),
+         _ => (0, true),
+      },
+   };
+   let status = event
+      .get("status")
+      .and_then(Value::as_u64)
+      .or_else(|| event.get("status_code").and_then(Value::as_u64))
+      .unwrap_or(fallback);
+   (400..600).contains(&status).then_some(ResponseError {
+      status: status as u16,
+      transient: transient && status >= 500,
+   })
 }
 
 impl CodexClient {

@@ -5,6 +5,7 @@ use crate::oauth::anthropic;
 use crate::oauth::refresh;
 use crate::oauth::refresh::RefreshError;
 use crate::provider::{AuthMode, Provider};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
@@ -39,6 +40,7 @@ struct SlotState {
    status: Status,
    consecutive_fails: u32,
    usage: Option<AccountUsage>,
+   limit_windows: BTreeMap<String, Vec<UsageWindow>>,
 }
 
 /// Provider-reported consumption of an account's rolling limit windows.
@@ -302,6 +304,50 @@ impl Slots {
       slot.state.lock().await.usage = Some(usage);
    }
 
+   pub async fn note_limit_windows(
+      &self,
+      slot: &Slot,
+      limit: Option<&str>,
+      windows: Vec<UsageWindow>,
+   ) {
+      if windows.is_empty() {
+         return;
+      }
+      let mut state = slot.state.lock().await;
+      let stored = if let Some(limit) = limit {
+         state.limit_windows.entry(limit.to_owned()).or_default()
+      } else {
+         &mut state.usage.get_or_insert_default().windows
+      };
+      for window in windows {
+         if let Some(previous) = stored.iter_mut().find(|item| item.name == window.name) {
+            *previous = window;
+         } else {
+            stored.push(window);
+         }
+      }
+      if limit.is_none()
+         && let Some(usage) = state.usage.as_mut()
+      {
+         usage.locked = usage.peak() >= 1.0_f64;
+         usage.observed_at = clock::unix_now();
+      }
+   }
+
+   pub async fn limit_windows(&self, slot: &Slot, limit: Option<&str>) -> Vec<UsageWindow> {
+      let state = slot.state.lock().await;
+      if state.status == Status::Disabled {
+         return Vec::new();
+      }
+      limit
+         .map_or_else(
+            || state.usage.as_ref().map(|usage| &usage.windows),
+            |limit| state.limit_windows.get(limit),
+         )
+         .cloned()
+         .unwrap_or_default()
+   }
+
    /// Where the account sits relative to a level burn of its windows.
    /// Accounts with no usage report yet are assumed healthy so a fresh
    /// account is not held back before it has served anything.
@@ -479,6 +525,16 @@ impl Slots {
       }
       if min == i64::MAX { 30 } else { min.max(1) }
    }
+
+   pub async fn by_id(&self, id: i64) -> Option<Arc<Slot>> {
+      self
+         .inner
+         .read()
+         .await
+         .iter()
+         .find(|slot| slot.id == id)
+         .cloned()
+   }
 }
 
 /// Rendezvous score for a session against a slot. Ordering by it keeps a
@@ -561,6 +617,7 @@ fn slot_from_account(account: Account) -> Slot {
          status,
          consecutive_fails: 0,
          usage: None,
+         limit_windows: BTreeMap::new(),
       })),
    }
 }
@@ -595,6 +652,7 @@ pub fn test_slots(db: Db, provider: Provider, ids: &[(i64, bool)]) -> Slots {
                      status: Status::Active,
                      consecutive_fails: 0,
                      usage: None,
+                     limit_windows: BTreeMap::new(),
                   })),
                })
             })
@@ -628,6 +686,7 @@ mod allowlist_tests {
             status: Status::Active,
             consecutive_fails: 0,
             usage: None,
+            limit_windows: BTreeMap::new(),
          })),
       }
    }

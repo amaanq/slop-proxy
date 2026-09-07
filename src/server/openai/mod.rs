@@ -870,7 +870,17 @@ pub async fn responses_passthrough(
    };
 
    if client_streams {
-      let limits = rate_limit_headers(&state.pools.codex.pool_windows().await);
+      let limits = if provider == Provider::OpenAi {
+         rate_limit_headers(
+            &state
+               .pools
+               .codex
+               .pool_windows(&auth.user, auth.limits.pinned_account, None)
+               .await,
+         )
+      } else {
+         Vec::new()
+      };
       return relay_stream(
          resp,
          LogGuard::new(state.clone(), capture.clone(), record, started),

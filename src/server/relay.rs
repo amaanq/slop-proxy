@@ -327,7 +327,13 @@ pub async fn messages(
    record.status = i64::from(resp.status().as_u16());
    let mut builder = forwarded_response(&resp);
    if provider == Provider::Anthropic {
-      for (name, value) in pool_rate_limit_headers(&state.pools.anthropic.pool_windows().await) {
+      for (name, value) in pool_rate_limit_headers(
+         &state
+            .pools
+            .anthropic
+            .pool_windows(&auth.user, auth.limits.pinned_account, None)
+            .await,
+      ) {
          builder = builder.header(name, value);
       }
    }

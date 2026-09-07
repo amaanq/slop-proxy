@@ -148,19 +148,13 @@ where
       .unwrap_or_else(|err| error_response(dialect, 502, "api_error", &err.to_string()))
 }
 
-/// Cloudflare returns a 524 after 100s without a byte from the origin, and a
-/// stalled upstream outlives that: one muse turn sent its first byte in 3.7s
-/// then went quiet for 322s before closing empty. The comment frame is inert
-/// per the SSE grammar, so it costs a relayed body nothing. `translated`
-/// gets this from `Sse::keep_alive`; a passthrough parses nothing and has to
-/// inject its own. opencode's own event stream does the same at 15s.
+/// Cloudflare 524s an origin silent for 100s. Upstream chunks split anywhere,
+/// so a beat only goes out after one ended on a blank line.
 fn kept_alive<S, E>(stream: S) -> impl stream::Stream<Item = Result<Bytes, E>> + Send
 where
    S: stream::Stream<Item = Result<Bytes, E>> + Send + 'static,
 {
    const EVERY: Duration = Duration::from_secs(15);
-   // Upstream chunks split anywhere, so a heartbeat sent mid-frame would land
-   // inside a half-written `data:` line and corrupt it.
    stream::unfold((Box::pin(stream), true), |(mut upstream, boundary)| async move {
       loop {
          match timeout(EVERY, upstream.next()).await {

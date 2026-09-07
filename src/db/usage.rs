@@ -348,10 +348,9 @@ pub enum UsageDim {
    Model,
 }
 
-/// Every column `usage_metrics` groups by, against the label the exporter
-/// files it under. Two groups differing only in a column absent from here
-/// would expose one label set twice in a scrape, and Prometheus keeps
-/// whichever came first.
+/// Every column `usage_metrics` groups by, against its exported label. A
+/// column missing here duplicates a label set, and Prometheus keeps whichever
+/// the scrape emitted first.
 pub const USAGE_DIMENSIONS: [(&str, &str); 8] = [
    ("user", "u.user"),
    (

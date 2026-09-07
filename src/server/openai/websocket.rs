@@ -317,8 +317,7 @@ impl Relay {
       text
    }
 
-   /// Separate from the failure counter: an exhausted account is not flaky,
-   /// it is spent, and coming back in a minute only spends the next turn.
+   /// Bypasses the failure counter: spent is not flaky.
    async fn exhaust_upstream(&mut self) {
       self.upstream_failed = true;
       self

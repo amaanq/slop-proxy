@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
 use axum::http::Response;
@@ -68,6 +68,8 @@ struct Retry {
 
 const EARLY_REFUSAL_COOLDOWN: i64 = 60;
 
+const VERDICT_DEADLINE: Duration = Duration::from_secs(35);
+
 enum Opening {
    Pending,
    Serve,
@@ -128,6 +130,7 @@ async fn refuse_early(resp: reqwest::Response) -> Result<reqwest::Response, Send
    let headers = resp.headers().clone();
    let mut stream = resp.bytes_stream();
    let mut head = Vec::new();
+   let waited = Instant::now();
    loop {
       match opening(&head) {
          Opening::Serve => break,
@@ -137,6 +140,13 @@ async fn refuse_early(resp: reqwest::Response) -> Result<reqwest::Response, Send
                retry_after: Some(EARLY_REFUSAL_COOLDOWN),
                body,
             });
+         },
+         Opening::Pending if waited.elapsed() > VERDICT_DEADLINE => {
+            tracing::warn!(
+               waited_ms = waited.elapsed().as_millis(),
+               "no opening verdict in time, serving the queued stream"
+            );
+            break;
          },
          Opening::Pending if head.len() > 256 * 1024 => break,
          Opening::Pending => match stream.next().await {

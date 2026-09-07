@@ -272,6 +272,10 @@ impl Slots {
       }
    }
 
+   pub async fn is_disabled(&self, slot: &Slot) -> bool {
+      slot.state.lock().await.status == Status::Disabled
+   }
+
    pub async fn mark_ok(&self, slot: &Slot) {
       slot.state.lock().await.consecutive_fails = 0;
    }

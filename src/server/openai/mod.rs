@@ -631,14 +631,14 @@ pub async fn responses_passthrough(
          Some(model_map::clamp_effort(&resolved.model, &effort));
    }
    drop_unusable_max_output_tokens(&mut req.rest, &auth.user);
-   // OpenAI reserves the collaboration.* functions and rejects a request whose
-   // schema it did not write, so the native pairing travels untouched.
-   if provider != Provider::OpenAi {
-      let flags = strip_encrypted_argument_flags(&mut req.rest);
-      let payloads = unwrap_plaintext_agent_payloads(&mut req.rest);
-      if flags + payloads > 0 {
-         tracing::debug!(flags, payloads, user = %auth.user, "kept inter-agent payloads readable");
-      }
+   // The parent that writes an inter-agent payload runs on OpenAI, so gating
+   // this by provider silences it exactly where it has to fire and the child
+   // on another backend receives ciphertext it cannot read. Reserved functions
+   // are skipped per tool in strip_encrypted_from_tools instead.
+   let flags = strip_encrypted_argument_flags(&mut req.rest);
+   let payloads = unwrap_plaintext_agent_payloads(&mut req.rest);
+   if flags + payloads > 0 {
+      tracing::debug!(flags, payloads, user = %auth.user, "kept inter-agent payloads readable");
    }
 
    if provider == Provider::Zen {

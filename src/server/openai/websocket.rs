@@ -17,7 +17,9 @@ use tokio_tungstenite::tungstenite::protocol::CloseFrame as UpstreamCloseFrame;
 
 use super::{DIALECT, PassthroughRequest, prepare_request, restore_reserved_namespace};
 use crate::codex::types::{ResponsesEvent, ResponsesRequest};
-use crate::codex::websocket::{MAX_MESSAGE_SIZE, Socket, response_error as upstream_error};
+use crate::codex::websocket::{
+   Fault, MAX_MESSAGE_SIZE, Socket, response_error as upstream_error,
+};
 use crate::db::usage::AdmissionError;
 use crate::pool::Route;
 use crate::provider::Provider;
@@ -265,8 +267,10 @@ impl Relay {
          .and_then(Value::as_str)
          .unwrap_or_default();
       let error = upstream_error(&value);
-      if error.as_ref().is_some_and(|error| error.transient) {
-         self.fail_upstream().await;
+      match error.as_ref().map(|error| error.fault) {
+         Some(Fault::Exhausted) => self.exhaust_upstream().await,
+         Some(Fault::Transient) => self.fail_upstream().await,
+         Some(Fault::Caller) | None => {},
       }
       if matches!(kind, "error" | "response.failed") {
          tracing::warn!(
@@ -311,6 +315,18 @@ impl Relay {
          return value.to_string();
       }
       text
+   }
+
+   /// Separate from the failure counter: an exhausted account is not flaky,
+   /// it is spent, and coming back in a minute only spends the next turn.
+   async fn exhaust_upstream(&mut self) {
+      self.upstream_failed = true;
+      self
+         .state
+         .pools
+         .codex
+         .websocket_exhausted(self.account_id)
+         .await;
    }
 
    async fn fail_upstream(&mut self) {

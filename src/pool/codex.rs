@@ -8,6 +8,7 @@ use super::{
    AccountUsage, AuthPolicy, Backend, Cooldown, Pool, PoolError, Route, Slot, UsageWindow,
    window_seconds,
 };
+use crate::clock::unix_now;
 use crate::codex::client::CodexClient;
 use crate::codex::models::ModelInfo;
 use crate::codex::types::ErrorEnvelope;
@@ -17,6 +18,11 @@ use crate::upstream::SendError;
 
 /// Session-sticky pool over codex accounts, owning the backend client.
 pub type CodexPool = Pool<CodexClient>;
+
+/// Floor for an exhausted account when the backend names no reset. Long
+/// enough that the pool stops picking it, short enough that a limit lifted
+/// early is noticed the same hour.
+const EXHAUSTED_COOLDOWN: i64 = 15 * 60;
 
 #[derive(Clone)]
 pub enum Call {
@@ -114,6 +120,30 @@ impl Pool<CodexClient> {
       {
          self.slots.cool_failure(&slot).await;
       }
+   }
+
+   /// Holds an account out until the allowance it just exhausted rolls over,
+   /// using its own reported reset when it names one. The ordinary refusal
+   /// cooldown is 60s, which walks straight back into the same wall and keeps
+   /// the account ranked first, since `ranked` bands on a quota figure the
+   /// backend has already stopped honouring.
+   pub async fn websocket_exhausted(&self, account_id: Option<i64>) {
+      let Some(id) = account_id else { return };
+      let Some(slot) = self.slots.by_id(id).await else {
+         return;
+      };
+      let now = unix_now();
+      let secs = self
+         .slots
+         .limit_windows(&slot, None)
+         .await
+         .iter()
+         .filter_map(|window| window.resets_at)
+         .filter(|reset| *reset > now)
+         .min()
+         .map_or(EXHAUSTED_COOLDOWN, |reset| reset - now)
+         .clamp(EXHAUSTED_COOLDOWN, CodexClient::RATE_LIMIT.max);
+      self.slots.cool(&slot, secs, "usage limit reached").await;
    }
 
    pub async fn websocket_completed(&self, account_id: Option<i64>) {

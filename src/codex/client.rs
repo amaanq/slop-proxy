@@ -68,6 +68,7 @@ struct Retry {
 }
 
 const EARLY_REFUSAL_COOLDOWN: i64 = 60;
+const EXHAUSTED_REFUSAL_COOLDOWN: i64 = 15 * 60;
 
 const RESPONSE_HEADERS_TIMEOUT: Duration = Duration::from_secs(30);
 const VERDICT_DEADLINE: Duration = Duration::from_secs(35);
@@ -178,9 +179,19 @@ async fn refuse_early(resp: reqwest::Response) -> Result<reqwest::Response, Send
          Opening::Serve => break,
          Opening::Undecryptable => return Err(SendError::BadRequest(UNDECRYPTABLE.into())),
          Opening::Refused(body) => {
-            tracing::warn!(%body, "backend refused inside a 200, trying another account");
+            // A spent allowance is not a busy minute. Coming back after the
+            // short cooldown just burns the next turn on the same wall.
+            let spent = ["usage_limit_reached", "usage_not_included", "insufficient_quota"]
+               .iter()
+               .any(|code| body.contains(code));
+            let retry_after = if spent {
+               EXHAUSTED_REFUSAL_COOLDOWN
+            } else {
+               EARLY_REFUSAL_COOLDOWN
+            };
+            tracing::warn!(%body, retry_after, "backend refused inside a 200, trying another account");
             return Err(SendError::RateLimited {
-               retry_after: Some(EARLY_REFUSAL_COOLDOWN),
+               retry_after: Some(retry_after),
                body,
             });
          },

@@ -252,6 +252,11 @@ impl Relay {
          pending.capture.observe(&event);
       }
       if kind == "error" {
+         tracing::warn!(
+            account = ?self.account_id,
+            frame = %text.chars().take(600).collect::<String>(),
+            "upstream error frame on websocket"
+         );
          pending.capture.fail("upstream_rejected");
          pending.capture.note_stop_reason("error");
       }

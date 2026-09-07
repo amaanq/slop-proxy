@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use axum::body::Bytes;
 use reqwest::header::HeaderMap;
 use serde_json::{Value, json};
@@ -253,12 +255,15 @@ impl Pool<CodexClient> {
       }
    }
 
-   /// Fresh (`access_token`, `account_id`) for the models listing. Trusted
+   /// Accounts worth asking for the models listing, best first. Trusted
    /// first, since gated models are absent from an untrusted account's
    /// catalog. Cooldowns are ignored, a listing spends no quota and a fleet
-   /// that is entirely cooling after a restart must still serve one.
-   pub async fn any_active_credentials(&self) -> Option<(String, String)> {
-      for slot in self
+   /// that is entirely cooling after a restart must still serve one. A
+   /// disabled account is not: `ranked` bands on quota, which an idle account
+   /// has none of, so a banned one sorts ahead of the whole working fleet and
+   /// its cached token stays unexpired long after it was revoked.
+   async fn listing_slots(&self) -> Vec<Arc<Slot>> {
+      let ranked = self
          .ranked(Route {
             session_key: "",
             model: "",
@@ -266,8 +271,18 @@ impl Pool<CodexClient> {
             pinned_account: None,
             prefer_trusted: true,
          })
-         .await
-      {
+         .await;
+      let mut usable = Vec::with_capacity(ranked.len());
+      for slot in ranked {
+         if !self.slots.is_disabled(&slot).await {
+            usable.push(slot);
+         }
+      }
+      usable
+   }
+
+   pub async fn any_active_credentials(&self) -> Option<(String, String)> {
+      for slot in self.listing_slots().await {
          let Ok(access) = self.slots.fresh_token(&slot, false).await else {
             continue;
          };
@@ -277,27 +292,48 @@ impl Pool<CodexClient> {
    }
 
    pub async fn list_models(&self) -> Result<Vec<ModelInfo>, PoolError> {
-      let (access, account_id) = self
-         .any_active_credentials()
-         .await
-         .ok_or(PoolError::NoAccounts(Provider::OpenAi))?;
-      Ok(self.backend.list_models(&access, &account_id).await?)
+      let mut last = None;
+      for slot in self.listing_slots().await {
+         let Ok(access) = self.slots.fresh_token(&slot, false).await else {
+            continue;
+         };
+         match self
+            .backend
+            .list_models(&access, &slot.provider_account_id)
+            .await
+         {
+            Ok(models) => return Ok(models),
+            Err(err) => last = Some(PoolError::from(err)),
+         }
+      }
+      Err(last.unwrap_or(PoolError::NoAccounts(Provider::OpenAi)))
    }
 
    /// The catalog body untouched, for relaying to a codex client verbatim.
+   /// One account's revoked token would otherwise cost every client the
+   /// catalog, since the result is cached only on success.
    pub async fn models_raw(&self) -> Result<String, PoolError> {
-      let (access, account_id) = self
-         .any_active_credentials()
-         .await
-         .ok_or(PoolError::NoAccounts(Provider::OpenAi))?;
-      let (status, body) = self.backend.models_raw(&access, &account_id).await?;
-      if !status.is_success() {
-         return Err(PoolError::Upstream(format!(
-            "{status}: {}",
-            body.chars().take(400).collect::<String>()
-         )));
+      let mut last = None;
+      for slot in self.listing_slots().await {
+         let Ok(access) = self.slots.fresh_token(&slot, false).await else {
+            continue;
+         };
+         match self
+            .backend
+            .models_raw(&access, &slot.provider_account_id)
+            .await
+         {
+            Ok((status, body)) if status.is_success() => return Ok(body),
+            Ok((status, body)) => {
+               last = Some(PoolError::Upstream(format!(
+                  "{status}: {}",
+                  body.chars().take(400).collect::<String>()
+               )));
+            },
+            Err(err) => last = Some(PoolError::from(err)),
+         }
       }
-      Ok(body)
+      Err(last.unwrap_or(PoolError::NoAccounts(Provider::OpenAi)))
    }
 }
 

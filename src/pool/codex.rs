@@ -22,6 +22,9 @@ pub type CodexPool = Pool<CodexClient>;
 /// Floor for an exhausted account when the backend names no reset.
 const EXHAUSTED_COOLDOWN: i64 = 15 * 60;
 
+/// A catalog only moves when a model ships or an account's access changes.
+const CATALOG_TTL: i64 = 3600;
+
 #[derive(Clone)]
 pub enum Call {
    Http { body: Bytes, headers: HeaderMap },
@@ -247,6 +250,15 @@ impl Pool<CodexClient> {
          let Ok(token) = self.slots.fresh_token(&slot, false).await else {
             continue;
          };
+         if self.slots.catalog_older_than(&slot, CATALOG_TTL).await
+            && let Ok(models) = self
+               .backend
+               .list_models(&token, &slot.provider_account_id)
+               .await
+         {
+            let ids = models.into_iter().map(|model| model.slug).collect();
+            self.slots.note_catalog(&slot, ids).await;
+         }
          match self.backend.usage(&token, &slot.provider_account_id).await {
             Ok(usage) => {
                let windows = usage

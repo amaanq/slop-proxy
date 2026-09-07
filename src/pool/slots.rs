@@ -5,7 +5,7 @@ use crate::oauth::anthropic;
 use crate::oauth::refresh;
 use crate::oauth::refresh::RefreshError;
 use crate::provider::{AuthMode, Provider};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
@@ -41,6 +41,9 @@ struct SlotState {
    consecutive_fails: u32,
    usage: Option<AccountUsage>,
    limit_windows: BTreeMap<String, Vec<UsageWindow>>,
+   /// Model ids this account's own catalog lists, `None` until one is read.
+   catalog: Option<HashSet<String>>,
+   catalog_at: i64,
 }
 
 /// Provider-reported consumption of an account's rolling limit windows.
@@ -274,6 +277,30 @@ impl Slots {
 
    pub async fn is_disabled(&self, slot: &Slot) -> bool {
       slot.state.lock().await.status == Status::Disabled
+   }
+
+   pub async fn note_catalog(&self, slot: &Slot, models: HashSet<String>) {
+      let mut state = slot.state.lock().await;
+      state.catalog = Some(models);
+      state.catalog_at = clock::unix_now();
+   }
+
+   pub async fn catalog_older_than(&self, slot: &Slot, secs: i64) -> bool {
+      let state = slot.state.lock().await;
+      state.catalog.is_none() || clock::unix_now() - state.catalog_at > secs
+   }
+
+   /// A gated model is absent from an untrusted account's catalog, and the
+   /// backend 400s it rather than falling back. Unknown catalogs serve
+   /// everything, so a provider that publishes none is unaffected.
+   pub async fn serves_model(&self, slot: &Slot, model: &str) -> bool {
+      slot
+         .state
+         .lock()
+         .await
+         .catalog
+         .as_ref()
+         .is_none_or(|catalog| catalog.is_empty() || catalog.contains(model))
    }
 
    pub async fn mark_ok(&self, slot: &Slot) {
@@ -622,6 +649,8 @@ fn slot_from_account(account: Account) -> Slot {
          consecutive_fails: 0,
          usage: None,
          limit_windows: BTreeMap::new(),
+         catalog: None,
+         catalog_at: 0,
       })),
    }
 }
@@ -657,6 +686,8 @@ pub fn test_slots(db: Db, provider: Provider, ids: &[(i64, bool)]) -> Slots {
                      consecutive_fails: 0,
                      usage: None,
                      limit_windows: BTreeMap::new(),
+                     catalog: None,
+                     catalog_at: 0,
                   })),
                })
             })
@@ -691,6 +722,8 @@ mod allowlist_tests {
             consecutive_fails: 0,
             usage: None,
             limit_windows: BTreeMap::new(),
+            catalog: None,
+            catalog_at: 0,
          })),
       }
    }

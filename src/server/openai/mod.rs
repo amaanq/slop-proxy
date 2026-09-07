@@ -348,6 +348,8 @@ struct ZenFixups {
    rewritten: usize,
    dropped: usize,
    unpaired: usize,
+   repaired: usize,
+   malformed: usize,
 }
 
 #[derive(serde::Serialize)]
@@ -642,8 +644,42 @@ fn zen_input_fixups(rest: &mut serde_json::Map<String, Value>) -> ZenFixups {
          },
       }
    }
+   (fixes.repaired, fixes.malformed) = repair_tool_arguments(rest);
    fixes.unpaired = drop_unpaired_tool_items(rest);
    fixes
+}
+
+/// Zen 400s `param: "arguments"` on a call whose arguments are not JSON, and
+/// an empty string is not.
+fn repair_tool_arguments(rest: &mut serde_json::Map<String, Value>) -> (usize, usize) {
+   let Some(&mut Value::Array(ref mut items)) = rest.get_mut("input") else {
+      return (0, 0);
+   };
+   let mut repaired = 0;
+   let mut malformed = 0;
+   for item in items.iter_mut() {
+      let call = item
+         .get("type")
+         .and_then(Value::as_str)
+         .is_some_and(|kind| kind.ends_with("_call"));
+      if !call {
+         continue;
+      }
+      let Some(arguments) = item.get("arguments").and_then(Value::as_str) else {
+         continue;
+      };
+      if arguments.trim().is_empty() {
+         if let Some(item) = item.as_object_mut() {
+            item.insert("arguments".into(), Value::String("{}".into()));
+            repaired += 1;
+         }
+      } else if serde_json::from_str::<Value>(arguments).is_err() {
+         *item = Value::Null;
+         malformed += 1;
+      }
+   }
+   items.retain(|item| !item.is_null());
+   (repaired, malformed)
 }
 
 /// An unpaired `*_call` or `*_call_output` is a 400 on zen.
@@ -760,12 +796,21 @@ fn prepare_request(
 
    if provider == Provider::Zen {
       let fixes = zen_input_fixups(&mut req.rest);
-      if fixes.hoisted + fixes.rewritten + fixes.dropped + fixes.unpaired > 0 {
+      if fixes.hoisted
+         + fixes.rewritten
+         + fixes.dropped
+         + fixes.unpaired
+         + fixes.repaired
+         + fixes.malformed
+         > 0
+      {
          tracing::warn!(
             fixes.hoisted,
             fixes.rewritten,
             fixes.dropped,
             fixes.unpaired,
+            fixes.repaired,
+            fixes.malformed,
             user = %auth.user,
             "reshaped codex-only input items for zen"
          );

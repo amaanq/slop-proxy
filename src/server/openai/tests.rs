@@ -163,6 +163,34 @@ mod unpaired_tool_tests {
    }
 
    #[test]
+   fn the_reserved_namespace_is_renamed_on_the_way_up_and_restored_on_the_way_back() {
+      let mut rest = input(serde_json::json!([
+          {"type": "additional_tools", "role": "developer", "tools": [{"type": "namespace", "name": "collaboration", "tools": [{"type": "function", "name": "spawn_agent", "parameters": {"type": "object", "properties": {"message": {"type": "string", "encrypted": true}}}}]}]},
+          {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "call functions.collaboration.spawn_agent"}]},
+          {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "functions.collaboration.spawn_agent stays"}]},
+          {"type": "function_call", "call_id": "c1", "name": "spawn_agent", "namespace": "collaboration", "arguments": "{}"},
+          {"type": "function_call_output", "call_id": "c1", "output": "ok"},
+      ]));
+      assert_eq!(rename_reserved_namespace(&mut rest), 2);
+      assert_eq!(strip_encrypted_argument_flags(&mut rest), 1);
+      assert_eq!(rest["input"][0]["tools"][0]["name"], "slop_collab");
+      assert_eq!(
+         rest["input"][1]["content"][0]["text"],
+         "call functions.slop_collab.spawn_agent"
+      );
+      assert_eq!(
+         rest["input"][2]["content"][0]["text"],
+         "functions.collaboration.spawn_agent stays"
+      );
+      assert_eq!(rest["input"][3]["namespace"], "slop_collab");
+      let frame = r#"{"type":"response.output_item.done","item":{"type":"function_call","name":"spawn_agent","namespace":"slop_collab"}}"#;
+      assert_eq!(
+         restore_reserved_namespace(frame.to_owned()),
+         r#"{"type":"response.output_item.done","item":{"type":"function_call","name":"spawn_agent","namespace":"collaboration"}}"#
+      );
+   }
+
+   #[test]
    fn a_plaintext_payload_becomes_input_text_and_a_fernet_token_stays() {
       let mut rest = input(serde_json::json!([
           {"type": "agent_message", "author": "/root", "recipient": "/root/t", "content": [

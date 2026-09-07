@@ -426,6 +426,84 @@ fn strip_encrypted_from_tools(tools: &mut [Value]) -> usize {
    stripped
 }
 
+/// Namespace the collaboration tools are declared under on the way up. The
+/// backend leaves a schema under any other name alone, so the `encrypted`
+/// flag can come off and the spawn message arrives readable.
+const PROXY_NAMESPACE: &str = "slop_collab";
+
+fn rename_tools(tools: &mut [Value]) -> usize {
+   let mut renamed = 0;
+   for tool in tools.iter_mut() {
+      let reserved = tool.get("name").and_then(Value::as_str) == Some(RESERVED_NAMESPACE)
+         && tool.get("tools").is_some();
+      if reserved && let Some(tool) = tool.as_object_mut() {
+         tool.insert("name".into(), Value::String(PROXY_NAMESPACE.into()));
+         renamed += 1;
+      }
+   }
+   renamed
+}
+
+fn rename_reserved_namespace(rest: &mut serde_json::Map<String, Value>) -> usize {
+   let mut renamed = 0;
+   if let Some(&mut Value::Array(ref mut tools)) = rest.get_mut("tools") {
+      renamed += rename_tools(tools);
+   }
+   let Some(&mut Value::Array(ref mut items)) = rest.get_mut("input") else {
+      return renamed;
+   };
+   let mention = format!("functions.{RESERVED_NAMESPACE}.");
+   let replacement = format!("functions.{PROXY_NAMESPACE}.");
+   for item in items.iter_mut() {
+      let reserved_call = item.get("namespace").and_then(Value::as_str) == Some(RESERVED_NAMESPACE);
+      if reserved_call && let Some(item) = item.as_object_mut() {
+         item.insert("namespace".into(), Value::String(PROXY_NAMESPACE.into()));
+         renamed += 1;
+         continue;
+      }
+      let kind = item
+         .get("type")
+         .and_then(Value::as_str)
+         .unwrap_or_default()
+         .to_owned();
+      if kind == "additional_tools"
+         && let Some(&mut Value::Array(ref mut tools)) = item.get_mut("tools")
+      {
+         renamed += rename_tools(tools);
+         continue;
+      }
+      if kind == "message"
+         && item.get("role").and_then(Value::as_str) == Some("developer")
+         && let Some(&mut Value::Array(ref mut parts)) = item.get_mut("content")
+      {
+         for part in parts.iter_mut() {
+            let rewritten = part
+               .get("text")
+               .and_then(Value::as_str)
+               .filter(|text| text.contains(&mention))
+               .map(|text| text.replace(&mention, &replacement));
+            if let Some(text) = rewritten
+               && let Some(part) = part.as_object_mut()
+            {
+               part.insert("text".into(), Value::String(text));
+            }
+         }
+      }
+   }
+   renamed
+}
+
+/// The router on the client resolves a call by namespace and name, so a
+/// frame naming the proxy's namespace has to reach it under the original.
+fn restore_reserved_namespace(data: String) -> String {
+   let marker = format!("\"namespace\":\"{PROXY_NAMESPACE}\"");
+   if data.contains(&marker) {
+      data.replace(&marker, &format!("\"namespace\":\"{RESERVED_NAMESPACE}\""))
+   } else {
+      data
+   }
+}
+
 fn is_fernet_token(text: &str) -> bool {
    text.starts_with("gAAAA")
 }
@@ -635,10 +713,15 @@ pub async fn responses_passthrough(
    // this by provider silences it exactly where it has to fire and the child
    // on another backend receives ciphertext it cannot read. Reserved functions
    // are skipped per tool in strip_encrypted_from_tools instead.
+   let renamed = if provider == Provider::OpenAi {
+      rename_reserved_namespace(&mut req.rest)
+   } else {
+      0
+   };
    let flags = strip_encrypted_argument_flags(&mut req.rest);
    let payloads = unwrap_plaintext_agent_payloads(&mut req.rest);
-   if flags + payloads > 0 {
-      tracing::debug!(flags, payloads, user = %auth.user, "kept inter-agent payloads readable");
+   if renamed + flags + payloads > 0 {
+      tracing::debug!(renamed, flags, payloads, user = %auth.user, "kept inter-agent payloads readable");
    }
 
    if provider == Provider::Zen {
@@ -792,7 +875,7 @@ async fn raw_response(
    log_usage(&state, record);
    (
       [("content-type", "application/json")],
-      value.get().to_owned(),
+      restore_reserved_namespace(value.get().to_owned()),
    )
       .into_response()
 }
@@ -955,7 +1038,7 @@ fn relay_stream(
                   let head: String = event.data.chars().take(600).collect();
                   tracing::warn!(frame = %head, "upstream failed inside a 200");
                }
-               let mut out = Event::default().data(event.data);
+               let mut out = Event::default().data(restore_reserved_namespace(event.data));
                if !event.event.is_empty() && event.event != "message" {
                   out = out.event(event.event);
                }

@@ -504,6 +504,36 @@ fn restore_reserved_namespace(data: String) -> String {
    }
 }
 
+/// Item type, author and the first characters of every `encrypted_content`
+/// left in the request after unwrapping, for reading a decrypt failure.
+fn opaque_payloads(rest: &serde_json::Map<String, Value>) -> Vec<String> {
+   let Some(items) = rest.get("input").and_then(Value::as_array) else {
+      return Vec::new();
+   };
+   let mut found = Vec::new();
+   for item in items {
+      let kind = item.get("type").and_then(Value::as_str).unwrap_or("?");
+      if kind == "reasoning" {
+         continue;
+      }
+      let parts = item
+         .get("content")
+         .or_else(|| item.get("output"))
+         .and_then(Value::as_array);
+      let Some(parts) = parts else {
+         continue;
+      };
+      for part in parts {
+         if let Some(text) = part.get("encrypted_content").and_then(Value::as_str) {
+            let head: String = text.chars().take(12).collect();
+            let author = item.get("author").and_then(Value::as_str).unwrap_or("");
+            found.push(format!("{kind}:{author}:{head}"));
+         }
+      }
+   }
+   found
+}
+
 fn is_fernet_token(text: &str) -> bool {
    text.starts_with("gAAAA")
 }
@@ -720,6 +750,10 @@ pub async fn responses_passthrough(
    };
    let flags = strip_encrypted_argument_flags(&mut req.rest);
    let payloads = unwrap_plaintext_agent_payloads(&mut req.rest);
+   let opaque = opaque_payloads(&req.rest);
+   if !opaque.is_empty() {
+      tracing::info!(?opaque, user = %auth.user, "request still carries encrypted payloads");
+   }
    if renamed + flags + payloads > 0 {
       tracing::debug!(renamed, flags, payloads, user = %auth.user, "kept inter-agent payloads readable");
    }

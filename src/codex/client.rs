@@ -204,6 +204,10 @@ async fn refuse_early(resp: reqwest::Response) -> Result<reqwest::Response, Send
 }
 
 impl CodexClient {
+   pub(super) const fn config(&self) -> &CodexConfig {
+      &self.cfg
+   }
+
    pub fn new(cfg: CodexConfig) -> Self {
       let http = reqwest::Client::builder()
          .cookie_store(true)
@@ -222,9 +226,17 @@ impl CodexClient {
       req: &Bytes,
       session_id: &str,
       model: &str,
+      headers: &header::HeaderMap,
    ) -> Result<reqwest::Response, SendError> {
       match self
-         .send_once(access_token, chatgpt_account_id, req, session_id, model)
+         .send_once(
+            access_token,
+            chatgpt_account_id,
+            req,
+            session_id,
+            model,
+            headers,
+         )
          .await
       {
          Err(SendError::BadRequest(body))
@@ -241,6 +253,7 @@ impl CodexClient {
                   &Bytes::from(retry),
                   session_id,
                   model,
+                  headers,
                )
                .await
          },
@@ -249,14 +262,28 @@ impl CodexClient {
                && let Some(retry) = drop_undecryptable_payloads(req) =>
          {
             self
-               .send_once(access_token, chatgpt_account_id, &retry, session_id, model)
+               .send_once(
+                  access_token,
+                  chatgpt_account_id,
+                  &retry,
+                  session_id,
+                  model,
+                  headers,
+               )
                .await
          },
          // Cloudflare occasionally 403s fresh headless clients; the cookie
          // jar picks up clearance on the first response, so retry once.
          Err(SendError::Upstream { status: 403, .. }) => {
             self
-               .send_once(access_token, chatgpt_account_id, req, session_id, model)
+               .send_once(
+                  access_token,
+                  chatgpt_account_id,
+                  req,
+                  session_id,
+                  model,
+                  headers,
+               )
                .await
          },
          other => other,
@@ -360,23 +387,18 @@ impl CodexClient {
       req: &Bytes,
       session_id: &str,
       model: &str,
+      headers: &header::HeaderMap,
    ) -> Result<reqwest::Response, SendError> {
       let resp = self
          .http
-         .post(format!(
-            "{}/responses",
-            self.cfg.base_url.trim_end_matches('/')
-         ))
-         .bearer_auth(access_token)
-         .header("chatgpt-account-id", chatgpt_account_id)
-         .header("OpenAI-Beta", "responses=experimental")
-         .header("originator", self.cfg.originator.clone())
-         .header("version", self.cfg.version.clone())
-         .header("session_id", session_id)
-         .header("session-id", session_id)
-         .header("thread_id", session_id)
-         .header("thread-id", session_id)
-         .header("x-codex-routing-hint", format!("model={model}"))
+         .post(self.responses_url())
+         .headers(self.responses_headers(
+            access_token,
+            chatgpt_account_id,
+            session_id,
+            model,
+            headers,
+         )?)
          .header("Accept", "text/event-stream")
          .header(header::CONTENT_TYPE, "application/json")
          .body(req.clone())

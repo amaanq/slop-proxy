@@ -7,11 +7,23 @@ use super::{
 use crate::codex::client::CodexClient;
 use crate::codex::models::ModelInfo;
 use crate::codex::types::ErrorEnvelope;
+use crate::codex::websocket::Connection;
 use crate::provider::Provider;
 use crate::upstream::SendError;
 
 /// Session-sticky pool over codex accounts, owning the backend client.
 pub type CodexPool = Pool<CodexClient>;
+
+#[derive(Clone)]
+pub enum Call {
+   Http { body: Bytes, headers: HeaderMap },
+   WebSocket(HeaderMap),
+}
+
+pub enum Reply {
+   Http(reqwest::Response),
+   WebSocket(Box<Connection>),
+}
 
 impl Backend for CodexClient {
    const PROVIDER: Provider = Provider::OpenAi;
@@ -25,8 +37,8 @@ impl Backend for CodexClient {
    /// A capacity refusal cools the account for 60s and the same model
    /// refuses again after the wait, so a bound session moves on instead.
    const BOUND_WAIT_SECS: i64 = 0;
-   type Request = Bytes;
-   type Response = reqwest::Response;
+   type Request = Call;
+   type Response = Reply;
 
    fn reason(body: String) -> String {
       ErrorEnvelope::reason(body)
@@ -43,15 +55,33 @@ impl Backend for CodexClient {
       route: Route<'_>,
       req: &Self::Request,
    ) -> Result<Self::Response, SendError> {
-      Self::post(
-         self,
-         token,
-         &slot.provider_account_id,
-         req,
-         &session_uuid(route.session_key),
-         route.model,
-      )
-      .await
+      let session = session_uuid(route.session_key);
+      match *req {
+         Call::Http {
+            ref body,
+            ref headers,
+         } => self
+            .post(
+               token,
+               &slot.provider_account_id,
+               body,
+               &session,
+               route.model,
+               headers,
+            )
+            .await
+            .map(Reply::Http),
+         Call::WebSocket(ref headers) => self
+            .connect_websocket(
+               token,
+               &slot.provider_account_id,
+               &session,
+               route.model,
+               headers,
+            )
+            .await
+            .map(|connection| Reply::WebSocket(Box::new(connection))),
+      }
    }
 
    fn retryable_bad_request(&self, body: &str) -> bool {
@@ -62,11 +92,39 @@ impl Backend for CodexClient {
    }
 
    fn usage_from(&self, resp: &Self::Response) -> Option<AccountUsage> {
-      usage_from_headers(resp.headers())
+      usage_from_headers(match *resp {
+         Reply::Http(ref response) => response.headers(),
+         Reply::WebSocket(ref connection) => &connection.headers,
+      })
    }
 }
 
 impl Pool<CodexClient> {
+   pub async fn post(
+      &self,
+      route: Route<'_>,
+      body: Bytes,
+      headers: HeaderMap,
+   ) -> Result<(Option<i64>, reqwest::Response), PoolError> {
+      let (account, reply) = self.execute(route, Call::Http { body, headers }).await?;
+      match reply {
+         Reply::Http(response) => Ok((account, response)),
+         Reply::WebSocket(_) => Err(PoolError::Upstream("unexpected WebSocket reply".into())),
+      }
+   }
+
+   pub async fn websocket(
+      &self,
+      route: Route<'_>,
+      headers: HeaderMap,
+   ) -> Result<(Option<i64>, Connection), PoolError> {
+      let (account, reply) = self.execute(route, Call::WebSocket(headers)).await?;
+      match reply {
+         Reply::WebSocket(connection) => Ok((account, *connection)),
+         Reply::Http(_) => Err(PoolError::Upstream("unexpected HTTP reply".into())),
+      }
+   }
+
    pub const fn client(&self) -> &CodexClient {
       self.backend()
    }

@@ -9,7 +9,7 @@ categories  = [ "command-line-utilities", "web-programming::http-server" ]
 publish     = false
 
 [dependencies]
-axum = "0.8"
+axum = { features = [ "ws" ], version = "0.8" }
 color-eyre = "0.6.5"
 data-encoding = "2"
 eventsource-stream = "0.2"
@@ -47,6 +47,7 @@ tokio = {
 	version = "1",
 }
 toml = "0.8"
+tokio-tungstenite = { features = [ "rustls-tls-webpki-roots" ], version = "0.29" }
 tracing = "0.1"
 tracing-subscriber = { features = [ "env-filter" ], version = "0.3" }
 uuid = { features = [ "v4" ], version = "1" }

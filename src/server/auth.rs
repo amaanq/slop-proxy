@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use axum::extract::{Request, State};
-use axum::http::{HeaderMap, HeaderName, HeaderValue};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method};
 use axum::middleware::Next;
 use axum::response::Response;
 use tokio::time;
@@ -16,7 +16,7 @@ use crate::provider::Provider;
 pub struct AuthInfo {
    pub token_id: i64,
    pub user: String,
-   pub meter_id: i64,
+   pub meter_id: Option<i64>,
    pub limits: TokenLimits,
 }
 
@@ -50,6 +50,21 @@ pub async fn require_token(
 
    match state.db.auth_token(&raw).await {
       Ok(Some(token)) => {
+         if req.method() == Method::GET
+            && req.uri().path() == "/v1/responses"
+            && req
+               .headers()
+               .get("upgrade")
+               .is_some_and(|value| value.as_bytes().eq_ignore_ascii_case(b"websocket"))
+         {
+            req.extensions_mut().insert(AuthInfo {
+               token_id: token.id,
+               user: token.user,
+               meter_id: None,
+               limits: token.limits,
+            });
+            return next.run(req).await;
+         }
          let admission = match state.db.admit_token(token.id, &token.limits).await {
             Ok(Ok(admission)) => admission,
             Ok(Err(err)) => {
@@ -76,7 +91,7 @@ pub async fn require_token(
          req.extensions_mut().insert(AuthInfo {
             token_id: token.id,
             user: token.user.clone(),
-            meter_id: admission.meter_id,
+            meter_id: Some(admission.meter_id),
             limits: token.limits.clone(),
          });
          let mut response = next.run(req).await;
@@ -121,7 +136,7 @@ fn insert_header(response: &mut Response, name: &'static str, value: i64) {
 
 /// Gemini CLI sends its key as `x-goog-api-key`, and the raw REST form puts it
 /// in a `key` query parameter, so neither of the other two headers is present.
-fn bearer_token(headers: &HeaderMap, query: Option<&str>) -> Option<String> {
+pub(super) fn bearer_token(headers: &HeaderMap, query: Option<&str>) -> Option<String> {
    let header = |name: &str| headers.get(name)?.to_str().ok().map(str::to_owned);
    header("x-api-key")
       .or_else(|| header("x-goog-api-key"))

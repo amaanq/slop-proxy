@@ -484,6 +484,7 @@ pub struct Usage {
 #[serde(default)]
 pub struct TokenDetails {
    pub cached_tokens: i64,
+   pub cache_write_tokens: i64,
    pub reasoning_tokens: i64,
 }
 

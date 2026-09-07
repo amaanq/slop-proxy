@@ -451,6 +451,7 @@ async fn metrics_render_accounts_and_usage() {
    assert!(text.contains("slop_requests_total{user=\"alice\",account=\"test@example.com\",provider=\"openai\",requested_model=\"gpt-5-codex\",model=\"gpt-5-codex\",effort=\"medium\",service_tier=\"unset\",dialect=\"chat\"} 1"));
    assert!(text.contains("kind=\"input\"} 80"));
    assert!(text.contains("kind=\"cache_read\"} 20"));
+   assert!(text.contains("slop_cache_hit_ratio{user=\"alice\",account=\"test@example.com\",provider=\"openai\",requested_model=\"gpt-5-codex\",model=\"gpt-5-codex\",effort=\"medium\",service_tier=\"unset\",dialect=\"chat\"} 0.2"));
 }
 
 #[tokio::test]

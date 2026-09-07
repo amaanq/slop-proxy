@@ -328,6 +328,7 @@ pub struct ChatUsage {
 #[serde(default)]
 pub struct PromptTokensDetails {
    pub cached_tokens: i64,
+   pub cache_write_tokens: i64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -351,10 +352,12 @@ impl From<ChatUsage> for Usage {
          total_tokens: chat.prompt_tokens + billed_output,
          input_tokens_details: TokenDetails {
             cached_tokens: chat.prompt_tokens_details.cached_tokens,
+            cache_write_tokens: chat.prompt_tokens_details.cache_write_tokens,
             reasoning_tokens: 0,
          },
          output_tokens_details: TokenDetails {
             cached_tokens: 0,
+            cache_write_tokens: 0,
             reasoning_tokens,
          },
       }
@@ -369,6 +372,7 @@ impl From<&Usage> for ChatUsage {
          total_tokens: usage.input_tokens + usage.output_tokens,
          prompt_tokens_details: PromptTokensDetails {
             cached_tokens: usage.input_tokens_details.cached_tokens,
+            cache_write_tokens: usage.input_tokens_details.cache_write_tokens,
          },
          completion_tokens_details: CompletionTokensDetails {
             reasoning_tokens: usage.output_tokens_details.reasoning_tokens,
@@ -530,11 +534,34 @@ mod tests {
          prompt_tokens: 100,
          completion_tokens: 10,
          total_tokens: 110,
-         prompt_tokens_details: PromptTokensDetails { cached_tokens: 90 },
+         prompt_tokens_details: PromptTokensDetails {
+            cached_tokens: 90,
+            ..Default::default()
+         },
          ..Default::default()
       }
       .into();
       assert_eq!(usage.input_tokens_details.cached_tokens, 90);
+   }
+
+   #[test]
+   fn cache_write_tokens_survive_the_chat_bridge() {
+      let usage: Usage = ChatUsage {
+         prompt_tokens: 150,
+         completion_tokens: 10,
+         total_tokens: 160,
+         prompt_tokens_details: PromptTokensDetails {
+            cached_tokens: 120,
+            cache_write_tokens: 30,
+         },
+         ..Default::default()
+      }
+      .into();
+      assert_eq!(usage.input_tokens_details.cached_tokens, 120);
+      assert_eq!(usage.input_tokens_details.cache_write_tokens, 30);
+      let back = ChatUsage::from(&usage);
+      assert_eq!(back.prompt_tokens_details.cache_write_tokens, 30);
+      assert_eq!(back.prompt_tokens, 150);
    }
 
    #[test]
@@ -545,17 +572,19 @@ mod tests {
          input_tokens_details: TokenDetails {
             cached_tokens: 2,
             reasoning_tokens: 0,
+            ..Default::default()
          },
          output_tokens_details: TokenDetails {
             cached_tokens: 0,
             reasoning_tokens: 3,
+            ..Default::default()
          },
          ..Default::default()
       }))
       .unwrap();
       assert_eq!(
          value["prompt_tokens_details"],
-         json!({"cached_tokens": 2_i64})
+         json!({"cached_tokens": 2_i64, "cache_write_tokens": 0_i64})
       );
       assert_eq!(
          value["completion_tokens_details"],

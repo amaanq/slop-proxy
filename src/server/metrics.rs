@@ -10,7 +10,7 @@ use axum::response::Response;
 use super::AppState;
 use crate::clock;
 use crate::db::usage::{
-   ErrorRow, InsightRow, MetricsRow, SessionRow, ToolRow, USAGE_DIMENSIONS,
+   ErrorRow, InsightRow, MetricsRow, SessionRow, ToolRow, USAGE_DIMENSIONS, cache_hit_ratio,
 };
 use crate::pool::{AccountSnapshot, UsageWindow};
 use crate::provider::Provider;
@@ -144,6 +144,24 @@ fn render_usage(out: &mut String, rows: &[MetricsRow]) {
          labels.push(("kind", kind));
          sample(out, "slop_tokens_total", &labels, get(row));
       }
+   }
+
+   gauge(
+      out,
+      "slop_cache_hit_ratio",
+      "Share of all recorded prompt tokens served from cache per label set",
+   );
+   for row in rows {
+      sample(
+         out,
+         "slop_cache_hit_ratio",
+         &usage_labels(row),
+         cache_hit_ratio(
+            row.input_tokens,
+            row.cache_read_tokens,
+            row.cache_write_tokens,
+         ),
+      );
    }
 }
 

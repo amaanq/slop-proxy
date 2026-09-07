@@ -348,6 +348,16 @@ pub enum UsageDim {
    Model,
 }
 
+pub fn cache_hit_ratio(input_tokens: i64, cache_read_tokens: i64, cache_write_tokens: i64) -> f64 {
+   let cached = cache_read_tokens.max(0) as f64;
+   let prompt = input_tokens.max(0) as f64 + cached + cache_write_tokens.max(0) as f64;
+   if prompt <= 0.0_f64 {
+      return 0.0;
+   }
+
+   cached / prompt
+}
+
 /// Every column `usage_metrics` groups by, against its exported label. A
 /// column missing here duplicates a label set, and Prometheus keeps whichever
 /// the scrape emitted first.

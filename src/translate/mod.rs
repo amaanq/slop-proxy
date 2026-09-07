@@ -108,6 +108,18 @@ pub struct CapturedUsage {
 #[derive(Default, Clone)]
 pub struct UsageCapture(pub Arc<Mutex<CapturedUsage>>);
 
+pub fn input_token_partition(usage: &Usage) -> (i64, i64, i64) {
+   let cached = usage.input_tokens_details.cached_tokens.max(0);
+   let written = usage.input_tokens_details.cache_write_tokens.max(0);
+   let fresh = usage
+      .input_tokens
+      .max(0)
+      .saturating_sub(cached)
+      .saturating_sub(written)
+      .max(0);
+   (fresh, cached, written)
+}
+
 impl UsageCapture {
    pub fn observe(&self, event: &ResponsesEvent) {
       self.note_event(event.kind());
@@ -132,9 +144,9 @@ impl UsageCapture {
       }
    }
 
-   /// Codex counts cached tokens inside `input_tokens`, Anthropic reports
-   /// them alongside. Subtracting leaves it meaning freshly billed prompt on
-   /// both. `reasoning_tokens` stays a subset of `output_tokens`.
+   /// Responses includes cache reads and writes in `input_tokens`, while
+   /// Anthropic reports them alongside fresh input. `reasoning_tokens` stays
+   /// a subset of `output_tokens`.
    pub fn record(&self, usage: &Usage) {
       self.record_partial(usage);
       self.0.lock().unwrap().completed = true;
@@ -142,10 +154,11 @@ impl UsageCapture {
 
    pub fn record_partial(&self, usage: &Usage) {
       let mut captured = self.0.lock().unwrap();
-      let cached = usage.input_tokens_details.cached_tokens;
-      captured.input_tokens = (usage.input_tokens - cached).max(0);
+      let (fresh, cached, written) = input_token_partition(usage);
+      captured.input_tokens = fresh;
       captured.output_tokens = usage.output_tokens;
       captured.cache_read_tokens = cached;
+      captured.cache_write_tokens = written;
       captured.reasoning_tokens = usage.output_tokens_details.reasoning_tokens;
    }
 
@@ -569,14 +582,17 @@ impl Walker {
       }
       let usage = usage.unwrap_or_else(|| {
          let snapshot = self.capture.snapshot();
+         let input_tokens = snapshot
+            .input_tokens
+            .saturating_add(snapshot.cache_read_tokens)
+            .saturating_add(snapshot.cache_write_tokens);
          Usage {
-            input_tokens: snapshot.input_tokens + snapshot.cache_read_tokens,
+            input_tokens,
             output_tokens: snapshot.output_tokens,
-            total_tokens: snapshot.input_tokens
-               + snapshot.cache_read_tokens
-               + snapshot.output_tokens,
+            total_tokens: input_tokens.saturating_add(snapshot.output_tokens),
             input_tokens_details: TokenDetails {
                cached_tokens: snapshot.cache_read_tokens,
+               cache_write_tokens: snapshot.cache_write_tokens,
                ..Default::default()
             },
             output_tokens_details: TokenDetails {

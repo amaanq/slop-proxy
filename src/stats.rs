@@ -3,7 +3,7 @@ use serde::Serialize;
 
 use crate::clock;
 use crate::db::Db;
-use crate::db::usage::{UsageAgg, UsageDim};
+use crate::db::usage::{UsageAgg, UsageDim, cache_hit_ratio};
 
 #[derive(Serialize)]
 struct Tokens {
@@ -12,6 +12,8 @@ struct Tokens {
    input_tokens: i64,
    output_tokens: i64,
    cache_read_tokens: i64,
+   cache_write_tokens: i64,
+   cache_hit_ratio: f64,
    reasoning_tokens: i64,
 }
 
@@ -23,6 +25,12 @@ impl From<&UsageAgg> for Tokens {
          input_tokens: agg.input_tokens,
          output_tokens: agg.output_tokens,
          cache_read_tokens: agg.cache_read_tokens,
+         cache_write_tokens: agg.cache_write_tokens,
+         cache_hit_ratio: cache_hit_ratio(
+            agg.input_tokens,
+            agg.cache_read_tokens,
+            agg.cache_write_tokens,
+         ),
          reasoning_tokens: agg.reasoning_tokens,
       }
    }

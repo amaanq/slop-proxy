@@ -645,6 +645,7 @@ fn zen_input_fixups(rest: &mut serde_json::Map<String, Value>) -> ZenFixups {
                   .unwrap_or(Value::Null)
                };
             },
+            "reasoning" if item.get("encrypted_content").is_some() => *item = Value::Null,
             "local_shell_call" | "context_compaction" => *item = Value::Null,
             _ => {},
          }

@@ -109,6 +109,7 @@ pub async fn chat_completions(
    let route = Route {
       session_key: &session_key,
       model: &upstream_req.model,
+      service_tier: upstream_req.service_tier.as_deref(),
       user: &auth.user,
       pinned_account: auth.limits.pinned_account,
       prefer_trusted: auth.limits.prefer_trusted,
@@ -172,9 +173,10 @@ pub fn responses_upgrade_required() -> Response {
 }
 
 /// Codex asks with a `client_version` query and reads its context window out
-/// of the reply, so it gets the backend payload untouched.
+/// of the reply, so its catalog preserves the backend's model metadata.
 pub async fn models(
    State(state): State<AppState>,
+   Extension(auth): Extension<AuthInfo>,
    headers: HeaderMap,
    Query(query): Query<ModelsQuery>,
 ) -> Response {
@@ -217,28 +219,43 @@ pub async fn models(
          .into_iter()
          .filter(|id| state.cfg.models.route(id) == Provider::Zen)
          .collect();
-      return state.catalog_raw().await.map_or_else(
-         || {
-            super::error::error_response(
-               DIALECT,
-               503,
-               "api_error",
-               "no usable codex account to read the model catalog from",
-            )
-         },
-         |body| {
-            let body = with_zen_entries(&body, &state.cfg.models.default, &zen).unwrap_or(body);
-            ([("content-type", "application/json")], body).into_response()
-         },
-      );
+      return state
+         .catalog(&auth.user, auth.limits.pinned_account)
+         .await
+         .map_or_else(
+            || {
+               super::error::error_response(
+                  DIALECT,
+                  503,
+                  "api_error",
+                  "no usable codex account to read the model catalog from",
+               )
+            },
+            |catalog| {
+               let body = match serde_json::to_string(&catalog) {
+                  Ok(body) => body,
+                  Err(error) => {
+                     return super::error::error_response(
+                        DIALECT,
+                        500,
+                        "api_error",
+                        &format!("serializing model catalog failed {error}"),
+                     );
+                  },
+               };
+               let body = with_zen_entries(&body, &state.cfg.models.default, &zen).unwrap_or(body);
+               ([("content-type", "application/json")], body).into_response()
+            },
+         );
    }
 
    let created = unix_now();
 
-   let live = state.catalog().await;
+   let live = state.catalog(&auth.user, auth.limits.pinned_account).await;
 
    let mut data = if let Some(models) = live {
       models
+         .models
          .iter()
          .filter(|model| model.listed())
          .map(|model| ModelEntry {
@@ -879,6 +896,7 @@ pub async fn responses_passthrough(
    let route = Route {
       session_key: &session_key,
       model: &record.upstream_model,
+      service_tier: req.service_tier.as_deref(),
       user: &auth.user,
       pinned_account: auth.limits.pinned_account,
       prefer_trusted: auth.limits.prefer_trusted,

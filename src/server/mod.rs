@@ -13,7 +13,7 @@ pub mod relay;
 mod tests;
 
 use std::ops::Deref;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::Router;
@@ -25,7 +25,7 @@ use eyre::WrapErr as _;
 use tokio::net::TcpListener;
 use tokio::{signal, time};
 
-use crate::codex::models::{ModelInfo, ModelsResponse};
+use crate::codex::models::ModelsResponse;
 use crate::codex::types::ResponsesRequest;
 use crate::config::Config;
 use crate::db::Db;
@@ -41,7 +41,6 @@ pub struct Inner {
    pub db: Db,
    pub cfg: Config,
    pub prices: Prices,
-   pub models: ModelCache,
    pub pools: Pools,
 }
 
@@ -53,76 +52,14 @@ impl Deref for AppState {
 }
 
 impl AppState {
-   /// The catalog exactly as the codex backend sent it.
-   pub async fn catalog_raw(&self) -> Option<String> {
-      if let Some(cached) = self.models.get() {
-         return Some(cached);
-      }
-      match self.pools.codex.models_raw().await {
-         Ok(body) => {
-            self.models.put(body.clone());
-            Some(body)
-         },
+   pub async fn catalog(&self, user: &str, pinned_account: Option<i64>) -> Option<ModelsResponse> {
+      match self.pools.codex.catalog(user, pinned_account).await {
+         Ok(catalog) => Some(catalog),
          Err(err) => {
             tracing::warn!("fetching models from codex backend: {err}");
-            self.models.stale()
-         },
-      }
-   }
-
-   pub async fn catalog(&self) -> Option<Vec<ModelInfo>> {
-      let raw = self.catalog_raw().await?;
-      match serde_json::from_str::<ModelsResponse>(&raw) {
-         Ok(parsed) => Some(parsed.models),
-         Err(err) => {
-            tracing::warn!("parsing models response: {err}");
             None
          },
       }
-   }
-}
-
-pub struct ModelCache {
-   inner: Mutex<Option<(Instant, String)>>,
-   ttl: Duration,
-}
-
-impl ModelCache {
-   pub const fn new() -> Self {
-      Self {
-         inner: Mutex::new(None),
-         ttl: Duration::from_mins(5),
-      }
-   }
-
-   pub fn get(&self) -> Option<String> {
-      let guard = self.inner.lock().unwrap();
-      guard
-         .as_ref()
-         .filter(|&&(ref tick, _)| tick.elapsed() < self.ttl)
-         .map(|&(_, ref model)| model.clone())
-   }
-
-   /// The last body regardless of age, for when every account is cooling
-   /// and a fresh fetch is refused. A client that gets a 503 here falls back
-   /// to metadata without the zen entries and declares tools zen rejects.
-   pub fn stale(&self) -> Option<String> {
-      self
-         .inner
-         .lock()
-         .unwrap()
-         .as_ref()
-         .map(|&(_, ref model)| model.clone())
-   }
-
-   pub fn put(&self, catalog: String) {
-      *self.inner.lock().unwrap() = Some((Instant::now(), catalog));
-   }
-}
-
-impl Default for ModelCache {
-   fn default() -> Self {
-      Self::new()
    }
 }
 
@@ -134,7 +71,6 @@ pub async fn serve(db: Db, cfg: Config, bind: &str) -> Result<()> {
       db,
       cfg,
       prices,
-      models: ModelCache::new(),
       pools,
    }));
    price_history(&state).await;

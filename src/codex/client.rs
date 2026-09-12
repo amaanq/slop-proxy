@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::time::{sleep, timeout};
 
+use crate::codex::models::ModelsResponse;
 use crate::config::CodexConfig;
 use crate::upstream::{Classify, SendError, classify};
 
@@ -179,9 +180,13 @@ async fn refuse_early(resp: reqwest::Response) -> Result<reqwest::Response, Send
          Opening::Serve => break,
          Opening::Undecryptable => return Err(SendError::BadRequest(UNDECRYPTABLE.into())),
          Opening::Refused(body) => {
-            let spent = ["usage_limit_reached", "usage_not_included", "insufficient_quota"]
-               .iter()
-               .any(|code| body.contains(code));
+            let spent = [
+               "usage_limit_reached",
+               "usage_not_included",
+               "insufficient_quota",
+            ]
+            .iter()
+            .any(|code| body.contains(code));
             let retry_after = if spent {
                EXHAUSTED_REFUSAL_COOLDOWN
             } else {
@@ -351,6 +356,7 @@ impl CodexClient {
       self
          .http
          .get(self.models_url())
+         .timeout(Duration::from_secs(10))
          .bearer_auth(access_token)
          .header("ChatGPT-Account-ID", chatgpt_account_id)
          .header("chatgpt-account-id", chatgpt_account_id)
@@ -378,22 +384,21 @@ impl CodexClient {
       Ok((status, body))
    }
 
-   pub async fn list_models(
+   pub async fn catalog(
       &self,
       access_token: &str,
       chatgpt_account_id: &str,
-   ) -> Result<Vec<super::models::ModelInfo>, SendError> {
+   ) -> Result<ModelsResponse, SendError> {
       let resp = self
          .models_response(access_token, chatgpt_account_id)
          .await?;
       let resp = classify(resp, Classify::STRICT).await?;
       let status = resp.status().as_u16();
-      let parsed: super::models::ModelsResponse =
-         resp.json().await.map_err(|err| SendError::Upstream {
-            status,
-            body: format!("parsing models response: {err}"),
-         })?;
-      Ok(parsed.models)
+      let parsed: ModelsResponse = resp.json().await.map_err(|err| SendError::Upstream {
+         status,
+         body: format!("parsing models response: {err}"),
+      })?;
+      Ok(parsed)
    }
 
    async fn send_once(

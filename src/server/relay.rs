@@ -267,6 +267,7 @@ pub async fn messages(
    let route = Route {
       session_key: &key,
       model: &peek.upstream_model,
+      service_tier: None,
       user: &auth.user,
       pinned_account: auth.limits.pinned_account,
       prefer_trusted: false,
@@ -413,6 +414,7 @@ pub async fn count_tokens(
          Route {
             session_key: &key,
             model: &peek.upstream_model,
+            service_tier: None,
             user: &auth.user,
             pinned_account: auth.limits.pinned_account,
             prefer_trusted: false,

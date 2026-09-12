@@ -59,12 +59,21 @@ pub enum AuthPolicy {
 }
 
 #[derive(Clone, Copy)]
-pub struct Route<'a> {
-   pub session_key: &'a str,
-   pub model: &'a str,
-   pub user: &'a str,
+pub struct Route<'route> {
+   pub session_key: &'route str,
+   pub model: &'route str,
+   pub service_tier: Option<&'route str>,
+   pub user: &'route str,
    pub pinned_account: Option<i64>,
    pub prefer_trusted: bool,
+}
+
+impl<'route> Route<'route> {
+   pub fn explicit_tier(self) -> Option<&'route str> {
+      self
+         .service_tier
+         .filter(|tier| !matches!(*tier, "auto" | "default"))
+   }
 }
 
 pub trait Backend: Send + Sync + 'static {
@@ -293,10 +302,16 @@ impl<B: Backend> Pool<B> {
          if pinned.is_some_and(|id| slot.id != id) || !slot.serves(route.user) {
             continue;
          }
+         if B::PROVIDER == Provider::OpenAi
+            && let Some(tier) = route.explicit_tier()
+            && !self.slots.serves_tier(&slot, route.model, tier).await
+         {
+            continue;
+         }
          // A gated model is absent from an untrusted account's catalog and the
          // backend 400s it rather than substituting.
-         let missing = !route.model.is_empty()
-            && !self.slots.serves_model(&slot, route.model).await;
+         let missing =
+            !route.model.is_empty() && !self.slots.serves_model(&slot, route.model).await;
          let band = self.slots.band(&slot, self.backend.soft_limit()).await;
          scored.push((
             missing,
@@ -364,6 +379,18 @@ impl<B: Backend> Pool<B> {
    ) -> Result<(Option<i64>, B::Response), PoolError> {
       let ranked = self.ranked(route).await;
       if ranked.is_empty() {
+         if B::PROVIDER == Provider::OpenAi
+            && let Some(tier) = route.explicit_tier()
+         {
+            return Err(PoolError::BadRequest {
+               provider: B::PROVIDER,
+               model: route.model.to_owned(),
+               body: format!(
+                  "no eligible account advertises service tier {tier} for {}",
+                  route.model
+               ),
+            });
+         }
          if B::ANONYMOUS {
             return match self.backend.send_anonymous(route, req).await {
                Ok(resp) => Ok((None, resp)),
@@ -525,6 +552,7 @@ mod retry_tests {
       Route {
          session_key: "s",
          model: "m",
+         service_tier: None,
          user: "u",
          pinned_account: None,
          prefer_trusted: false,

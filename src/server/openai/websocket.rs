@@ -17,9 +17,7 @@ use tokio_tungstenite::tungstenite::protocol::CloseFrame as UpstreamCloseFrame;
 
 use super::{DIALECT, PassthroughRequest, prepare_request, restore_reserved_namespace};
 use crate::codex::types::{ResponsesEvent, ResponsesRequest};
-use crate::codex::websocket::{
-   Fault, MAX_MESSAGE_SIZE, Socket, response_error as upstream_error,
-};
+use crate::codex::websocket::{Fault, MAX_MESSAGE_SIZE, Socket, response_error as upstream_error};
 use crate::db::usage::AdmissionError;
 use crate::pool::Route;
 use crate::provider::Provider;
@@ -71,6 +69,7 @@ pub async fn responses(
    let route = Route {
       session_key: &session_key,
       model: &resolved.model,
+      service_tier: None,
       user: &auth.user,
       pinned_account: auth.limits.pinned_account,
       prefer_trusted: auth.limits.prefer_trusted,
@@ -187,7 +186,7 @@ impl Relay {
       })
    }
 
-   async fn request(&mut self, text: &str) -> Result<String, Response> {
+   async fn request(&mut self, text: &str, upstream: &mut Socket) -> Result<String, Response> {
       let value: Value = serde_json::from_str(text)
          .map_err(|err| translation_error(DIALECT, &format!("invalid request {err}")))?;
       if value.get("type").and_then(Value::as_str) != Some("response.create") {
@@ -205,6 +204,48 @@ impl Relay {
             DIALECT,
             "this connection only serves OpenAI models",
          ));
+      }
+      let route = Route {
+         session_key: &self.session_key,
+         model: req
+            .model
+            .as_deref()
+            .unwrap_or(&self.state.cfg.models.default),
+         service_tier: req.service_tier.as_deref(),
+         user: &auth.user,
+         pinned_account: auth.limits.pinned_account,
+         prefer_trusted: auth.limits.prefer_trusted,
+      };
+      let serves = self
+         .state
+         .pools
+         .codex
+         .websocket_serves(self.account_id, route)
+         .await
+         .map_err(|error| pool_error_response(DIALECT, &self.state.cfg.models, error))?;
+      if !serves {
+         if !self.pending.is_empty()
+            || req
+               .rest
+               .get("previous_response_id")
+               .is_some_and(|previous| !previous.is_null())
+         {
+            return Err(translation_error(
+               DIALECT,
+               "changing service tier requires a new connection with the complete input history",
+            ));
+         }
+         let (account_id, connection) = self
+            .state
+            .pools
+            .codex
+            .websocket(route, self.headers.clone())
+            .await
+            .map_err(|error| pool_error_response(DIALECT, &self.state.cfg.models, error))?;
+         let _ = send_upstream(upstream, UpstreamMessage::Close(None)).await;
+         *upstream = connection.socket;
+         self.account_id = account_id;
+         self.upstream_failed = false;
       }
       req.stream = None;
       req.rest.remove("background");
@@ -378,7 +419,7 @@ impl Relay {
                   },
                };
                let message = match message {
-                  Message::Text(text) => match self.request(&text).await {
+                  Message::Text(text) => match self.request(&text, &mut upstream).await {
                      Ok(text) => UpstreamMessage::Text(text.into()),
                      Err(response) => {
                         let lane = serde_json::from_str::<Value>(&text).ok()

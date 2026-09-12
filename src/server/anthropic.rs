@@ -75,6 +75,7 @@ pub async fn messages(
    let route = Route {
       session_key: &session_key,
       model: &upstream_req.model,
+      service_tier: None,
       user: &auth.user,
       pinned_account: auth.limits.pinned_account,
       prefer_trusted: auth.limits.prefer_trusted,

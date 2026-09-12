@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -16,18 +18,58 @@ pub struct ModelInfo {
    pub supported_in_api: Option<bool>,
    #[serde(default)]
    pub context_window: Option<i64>,
+   #[serde(default)]
+   pub service_tiers: Vec<ServiceTier>,
+   #[serde(flatten)]
+   pub rest: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ServiceTier {
+   pub id: String,
+   pub name: String,
+   pub description: String,
+   #[serde(flatten)]
+   pub rest: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ReasoningLevel {
    #[serde(default)]
    pub effort: String,
+   #[serde(flatten)]
+   pub rest: BTreeMap<String, Value>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ModelsResponse {
-   #[serde(default)]
    pub models: Vec<ModelInfo>,
+   #[serde(flatten)]
+   pub rest: BTreeMap<String, Value>,
+}
+
+impl ModelsResponse {
+   pub fn merge(&mut self, incoming: &Self) {
+      for candidate in &incoming.models {
+         if let Some(model) = self
+            .models
+            .iter_mut()
+            .find(|model| model.slug == candidate.slug)
+         {
+            for tier in &candidate.service_tiers {
+               if !model
+                  .service_tiers
+                  .iter()
+                  .any(|existing| existing.id == tier.id)
+               {
+                  model.service_tiers.push(tier.clone());
+               }
+            }
+         } else {
+            self.models.push(candidate.clone());
+         }
+      }
+   }
 }
 
 impl ModelInfo {
@@ -56,6 +98,8 @@ struct ZenEntry<'a> {
    availability_nux: Option<()>,
    comp_hash: Option<()>,
    default_reasoning_level: &'static str,
+   service_tiers: [(); 0],
+   additional_speed_tiers: [(); 0],
    supported_reasoning_levels: Vec<Value>,
 }
 
@@ -117,6 +161,8 @@ pub fn with_zen_entries(raw: &str, template: &str, ids: &[String]) -> Option<Str
          comp_hash: None,
          default_reasoning_level: "high",
          supported_reasoning_levels: levels.clone(),
+         service_tiers: [],
+         additional_speed_tiers: [],
       })
       .ok()?;
       let mut entry = base.clone();

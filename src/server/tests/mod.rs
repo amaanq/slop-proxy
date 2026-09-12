@@ -157,7 +157,6 @@ async fn spawn_proxy_at(
       db: db.clone(),
       cfg,
       prices: Prices::new(&cfg_db_path, PricingConfig::default().url),
-      models: super::ModelCache::new(),
       pools,
    }));
    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -438,7 +437,6 @@ async fn metrics_render_accounts_and_usage() {
       db: db.clone(),
       cfg,
       prices: Prices::new(&PathBuf::new(), PricingConfig::default().url),
-      models: super::ModelCache::new(),
       pools,
    }));
    let resp = metrics::metrics(State(state)).await;
@@ -594,7 +592,6 @@ async fn spawn_proxy_with_gemini_reply(
       db: db.clone(),
       cfg,
       prices: Prices::new(&cfg_db_path, PricingConfig::default().url),
-      models: super::ModelCache::new(),
       pools,
    }));
    let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

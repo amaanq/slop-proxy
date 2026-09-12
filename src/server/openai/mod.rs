@@ -41,6 +41,54 @@ pub struct ModelsQuery {
    client_version: Option<String>,
 }
 
+/// `context_length` and `input` are the keys a discovering client reads, so a
+/// harness needs no hand-written model list of its own.
+#[derive(serde::Serialize)]
+pub struct ModelEntry {
+   pub id: String,
+   pub object: &'static str,
+   pub created: i64,
+   pub owned_by: &'static str,
+   #[serde(skip_serializing_if = "Option::is_none")]
+   pub context_length: Option<i64>,
+   #[serde(skip_serializing_if = "Vec::is_empty")]
+   pub input: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
+pub struct ModelList {
+   pub object: &'static str,
+   pub data: Vec<ModelEntry>,
+}
+
+/// The Gemini pool's chat-capable catalog, shared by `/v1/models` and the
+/// `/v1beta` surface a native-dialect caller discovers from.
+pub async fn gemini_entries(state: &AppState) -> Vec<ModelEntry> {
+   let created = unix_now();
+   state
+      .pools
+      .gemini
+      .models()
+      .await
+      .into_iter()
+      .filter_map(|model| {
+         state
+            .cfg
+            .models
+            .route(&model.id)
+            .eq(&Provider::Gemini)
+            .then_some(ModelEntry {
+               id: model.id,
+               object: "model",
+               created,
+               owned_by: "google",
+               context_length: model.context_window,
+               input: Vec::new(),
+            })
+      })
+      .collect()
+}
+
 pub async fn chat_completions(
    State(state): State<AppState>,
    Extension(auth): Extension<AuthInfo>,
@@ -180,22 +228,6 @@ pub async fn models(
    headers: HeaderMap,
    Query(query): Query<ModelsQuery>,
 ) -> Response {
-   #[derive(serde::Serialize)]
-   struct ModelEntry {
-      id: String,
-      object: &'static str,
-      created: i64,
-      owned_by: &'static str,
-      #[serde(skip_serializing_if = "Option::is_none")]
-      context_window: Option<i64>,
-   }
-
-   #[derive(serde::Serialize)]
-   struct ModelList {
-      object: &'static str,
-      data: Vec<ModelEntry>,
-   }
-
    // Both harnesses ask the same path for a catalog, and each only
    // understands its own. `anthropic-version` is required on every Anthropic
    // API call, so its presence identifies the caller.
@@ -263,7 +295,8 @@ pub async fn models(
             object: "model",
             created,
             owned_by: "openai",
-            context_window: model.context_window,
+            context_length: model.context_window,
+            input: model.input_modalities.clone(),
          })
          .collect::<Vec<ModelEntry>>()
    } else {
@@ -278,7 +311,8 @@ pub async fn models(
             object: "model",
             created,
             owned_by: "slop-proxy",
-            context_window: None,
+            context_length: None,
+            input: Vec::new(),
          })
          .collect::<Vec<ModelEntry>>()
    };
@@ -294,32 +328,12 @@ pub async fn models(
             object: "model",
             created,
             owned_by: "opencode",
-            context_window: None,
+            context_length: None,
+            input: Vec::new(),
          })
    }));
 
-   data.extend(
-      state
-         .pools
-         .gemini
-         .models()
-         .await
-         .into_iter()
-         .filter_map(|id| {
-            state
-               .cfg
-               .models
-               .route(&id)
-               .eq(&Provider::Gemini)
-               .then_some(ModelEntry {
-                  id,
-                  object: "model",
-                  created,
-                  owned_by: "google",
-                  context_window: None,
-               })
-         }),
-   );
+   data.extend(gemini_entries(&state).await);
 
    Json(ModelList {
       object: "list",

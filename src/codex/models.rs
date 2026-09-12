@@ -19,6 +19,8 @@ pub struct ModelInfo {
    #[serde(default)]
    pub context_window: Option<i64>,
    #[serde(default)]
+   pub input_modalities: Vec<String>,
+   #[serde(default)]
    pub service_tiers: Vec<ServiceTier>,
    #[serde(flatten)]
    pub rest: BTreeMap<String, Value>,

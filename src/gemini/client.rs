@@ -8,7 +8,7 @@ use crate::translate::chat::ChatRequest;
 
 use crate::config::GeminiConfig;
 use crate::gemini::native;
-use crate::gemini::types::ModelList;
+use crate::gemini::types::{ListedModel, ModelList};
 use crate::upstream::{Classify, SendError, classify};
 
 const RULES: Classify = Classify {
@@ -187,7 +187,7 @@ impl GeminiClient {
       &self,
       api_key: &str,
       account_referer: Option<&str>,
-   ) -> Result<Vec<String>, SendError> {
+   ) -> Result<Vec<ListedModel>, SendError> {
       let base = self.cfg.base_url.trim_end_matches('/');
       let mut req = account_referer.map_or_else(
          || self.http.get(format!("{base}/models")).bearer_auth(api_key),
@@ -223,12 +223,24 @@ impl GeminiClient {
       } else {
          body.data
       };
-      let ids = entries
+      let listed = entries
          .into_iter()
-         .filter_map(|entry| entry.id.or(entry.name))
-         .map(|id| id.trim_start_matches("models/").to_owned())
+         .filter(|entry| {
+            entry.supported_generation_methods.is_empty()
+               || entry
+                  .supported_generation_methods
+                  .iter()
+                  .any(|method| method == "generateContent")
+         })
+         .filter_map(|entry| {
+            let id = entry.id.or(entry.name)?;
+            Some(ListedModel {
+               id: id.trim_start_matches("models/").to_owned(),
+               context_window: entry.input_token_limit,
+            })
+         })
          .collect();
-      Ok(ids)
+      Ok(listed)
    }
 }
 
@@ -325,17 +337,26 @@ mod tests {
          base_url: format!("http://{address}"),
          ..GeminiConfig::default()
       });
-      assert_eq!(
-         client.models("test-key", None).await.unwrap(),
-         Vec::<String>::new()
-      );
+      assert!(client.models("test-key", None).await.unwrap().is_empty());
    }
 
    #[tokio::test]
    async fn the_native_catalog_strips_the_models_prefix() {
       let app = axum::Router::new().route(
          "/models",
-         get(|| async { Json(json!({"models": [{"name": "models/gemini-x"}]})) }),
+         get(|| async {
+            Json(json!({"models": [
+               {
+                  "name": "models/gemini-x",
+                  "supportedGenerationMethods": ["generateContent"],
+                  "inputTokenLimit": 1_000_000_i64,
+               },
+               {
+                  "name": "models/gemini-embedding-x",
+                  "supportedGenerationMethods": ["embedContent"],
+               },
+            ]}))
+         }),
       );
       let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
       let address = listener.local_addr().unwrap();
@@ -345,9 +366,14 @@ mod tests {
          base_url: format!("http://{address}"),
          ..GeminiConfig::default()
       });
+      let listed = client.models("test-key", None).await.unwrap();
       assert_eq!(
-         client.models("test-key", None).await.unwrap(),
-         vec!["gemini-x".to_owned()]
+         listed
+            .iter()
+            .map(|model| model.id.as_str())
+            .collect::<Vec<_>>(),
+         vec!["gemini-x"]
       );
+      assert_eq!(listed[0].context_window, Some(1_000_000));
    }
 }

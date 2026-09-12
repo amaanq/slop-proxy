@@ -9,11 +9,9 @@
       nixpkgs,
     }:
     let
+      inherit (nixpkgs) lib;
       forEachSystem =
-        fn:
-        nixpkgs.lib.genAttrs nixpkgs.lib.platforms.linux (
-          system: fn system nixpkgs.legacyPackages.${system}
-        );
+        fn: lib.genAttrs lib.platforms.linux (system: fn system nixpkgs.legacyPackages.${system});
 
       hasWild = plat: plat.isLinux && (plat.isx86_64 || plat.isAarch64);
     in
@@ -31,7 +29,7 @@
                 rust-analyzer
                 pkg-config
               ]
-              ++ nixpkgs.lib.optionals (hasWild pkgs.stdenv.hostPlatform) [
+              ++ lib.optionals (hasWild pkgs.stdenv.hostPlatform) [
                 pkgs.wild
                 pkgs.clang
               ];
@@ -52,14 +50,14 @@
             nativeBuildInputs = [
               pkgs.pkg-config
             ]
-            ++ nixpkgs.lib.optionals (hasWild pkgs.stdenv.hostPlatform) [
+            ++ lib.optionals (hasWild pkgs.stdenv.hostPlatform) [
               pkgs.wild
               pkgs.clang
             ];
 
             buildInputs = [ pkgs.sqlite ];
 
-            env = nixpkgs.lib.optionalAttrs (hasWild pkgs.stdenv.hostPlatform) {
+            env = lib.optionalAttrs (hasWild pkgs.stdenv.hostPlatform) {
               RUSTFLAGS = "-Clinker=${pkgs.clang}/bin/clang -Clink-arg=--ld-path=wild";
             };
 

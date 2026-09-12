@@ -10,6 +10,7 @@ use crate::codex::types::{
    ToolOutput,
 };
 use crate::config::Config;
+use crate::provider::Provider;
 
 #[derive(Debug, Deserialize)]
 pub struct AnthropicRequest {
@@ -185,9 +186,10 @@ pub fn empty_schema() -> Box<RawValue> {
       .expect("schema serializes")
 }
 
-pub fn to_responses(req: &AnthropicRequest, cfg: &Config) -> ResponsesRequest {
+pub fn to_responses(req: &AnthropicRequest, cfg: &Config, provider: Provider) -> ResponsesRequest {
    let resolved = model_map::resolve(&cfg.models, &req.model);
    let mut out = ResponsesRequest::new(resolved.model.clone(), cfg.codex.instructions());
+   let replay_reasoning = provider == Provider::OpenAi;
 
    if let Some(system) = req.system.as_ref() {
       let text = system_text(system);
@@ -200,7 +202,7 @@ pub fn to_responses(req: &AnthropicRequest, cfg: &Config) -> ResponsesRequest {
    }
 
    for msg in &req.messages {
-      convert_message(msg, &mut out.input);
+      convert_message(msg, &mut out.input, replay_reasoning);
    }
 
    if let Some(tools) = req.tools.as_ref() {
@@ -273,7 +275,7 @@ fn system_text(system: &SystemPrompt) -> String {
    }
 }
 
-fn convert_message(msg: &AnthMessage, out: &mut Vec<InputItem>) {
+fn convert_message(msg: &AnthMessage, out: &mut Vec<InputItem>, replay_reasoning: bool) {
    let assistant = msg.role == "assistant";
    let role = if assistant { "assistant" } else { "user" };
 
@@ -351,7 +353,7 @@ fn convert_message(msg: &AnthMessage, out: &mut Vec<InputItem>) {
             ref thinking,
             ref signature,
          } => {
-            let Some(sig) = signature.as_ref() else {
+            let Some(sig) = signature.as_ref().filter(|_| replay_reasoning) else {
                continue;
             };
             let (id, encrypted_content) = decode_signature(sig);
@@ -399,7 +401,7 @@ fn tool_result_text(content: Option<&ToolResultContent>) -> String {
 
 #[cfg(test)]
 mod tests {
-   use super::{AnthropicRequest, to_responses};
+   use super::{AnthropicRequest, Provider, to_responses};
    use crate::config::Config;
 
    fn parse(content: &serde_json::Value) -> Result<AnthropicRequest, serde_json::Error> {
@@ -414,11 +416,11 @@ mod tests {
       let mut req = parse(&serde_json::json!("hi")).unwrap();
 
       req.max_tokens = Some(8);
-      let dropped = to_responses(&req, &Config::for_tests());
+      let dropped = to_responses(&req, &Config::for_tests(), Provider::OpenAi);
       assert_eq!(dropped.max_output_tokens, None);
 
       req.max_tokens = Some(4096);
-      let kept = to_responses(&req, &Config::for_tests());
+      let kept = to_responses(&req, &Config::for_tests(), Provider::OpenAi);
       assert_eq!(kept.max_output_tokens, Some(4096));
    }
 

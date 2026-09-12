@@ -52,7 +52,7 @@ pub async fn messages(
          return translation_error(DIALECT, &format!("invalid request: {err}"));
       },
    };
-   let mut upstream_req = anthropic_req::to_responses(&req, &state.cfg);
+   let mut upstream_req = anthropic_req::to_responses(&req, &state.cfg, provider);
    upstream_req.prompt_cache_key = Some(cache_key(&auth.user, &upstream_req));
    let est_input = count_tokens::estimate(&upstream_req);
 
@@ -159,7 +159,7 @@ pub async fn count_tokens(
       Err(err) => return translation_error(DIALECT, &format!("invalid request: {err}")),
    };
    Json(TokenCount {
-      input_tokens: count_tokens::estimate(&anthropic_req::to_responses(&req, &state.cfg)),
+      input_tokens: count_tokens::estimate(&anthropic_req::to_responses(&req, &state.cfg, provider)),
    })
    .into_response()
 }

@@ -254,6 +254,19 @@ pub struct ModelEntry {
    pub id: Option<String>,
    #[serde(skip_serializing_if = "Option::is_none")]
    pub name: Option<String>,
+   /// Only the native surface sends this. `embedContent`, `bidiGenerateContent`
+   /// and `predictLongRunning` name models this proxy carries no path for.
+   #[serde(skip_serializing_if = "Vec::is_empty")]
+   pub supported_generation_methods: Vec<String>,
+   #[serde(skip_serializing_if = "Option::is_none")]
+   pub input_token_limit: Option<i64>,
+}
+
+/// A Gemini model the proxy will serve, with the metadata a catalog reply needs.
+#[derive(Debug, Clone)]
+pub struct ListedModel {
+   pub id: String,
+   pub context_window: Option<i64>,
 }
 
 #[cfg(test)]

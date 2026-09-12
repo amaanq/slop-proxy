@@ -7,6 +7,7 @@ use crate::translate::chat::ChatRequest;
 
 use super::{AuthPolicy, Backend, Cooldown, Pool, Route, Slot};
 use crate::gemini::client::{GeminiClient, GeminiProtocol, GeminiResponse};
+use crate::gemini::types::ListedModel;
 use crate::provider::Provider;
 use crate::upstream::SendError;
 
@@ -99,7 +100,7 @@ impl Backend for GeminiClient {
 impl Pool<GeminiClient> {
    /// The first account that answers. Every key sees the same catalog, so
    /// there is nothing to merge across accounts.
-   pub async fn models(&self) -> Vec<String> {
+   pub async fn models(&self) -> Vec<ListedModel> {
       for slot in self.slots.list().await {
          let Ok(key) = self.slots.fresh_token(&slot, false).await else {
             continue;
@@ -109,7 +110,7 @@ impl Pool<GeminiClient> {
             .models(&key, slot.http_referer.as_deref())
             .await
          {
-            Ok(ids) => return ids,
+            Ok(listed) => return listed,
             Err(err) => tracing::debug!("models for {}: {err}", slot.display),
          }
       }

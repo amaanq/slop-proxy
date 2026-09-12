@@ -2,7 +2,7 @@ use axum::body::{Body, Bytes};
 use axum::extract::{Path, RawQuery, State};
 use axum::http::HeaderMap;
 use axum::http::response::Builder;
-use axum::response::Response;
+use axum::response::{IntoResponse as _, Response};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -287,6 +287,18 @@ impl ChatUsageScan {
          self.capture.note_cutoff(&status);
       }
    }
+}
+
+/// A catalog for a client pinned to the `/v1beta` base URL. Google's own
+/// `ListModels` keys each entry by `name`, which a discovering harness reading
+/// `data[].id` cannot see, so this answers in the same shape as `/v1/models`
+/// narrowed to the Gemini pool.
+pub async fn models(State(state): State<AppState>) -> Response {
+   axum::Json(super::openai::ModelList {
+      object: "list",
+      data: super::openai::gemini_entries(&state).await,
+   })
+   .into_response()
 }
 
 /// The native surface Gemini CLI speaks. Nothing is translated in either

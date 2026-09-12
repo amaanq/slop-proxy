@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::body::Bytes;
@@ -11,7 +12,7 @@ use super::{
 };
 use crate::clock::unix_now;
 use crate::codex::client::CodexClient;
-use crate::codex::models::{ModelInfo, ModelsResponse};
+use crate::codex::models::{ModelInfo, ModelsResponse, ServiceTier};
 use crate::codex::types::ErrorEnvelope;
 use crate::codex::websocket::Connection;
 use crate::provider::Provider;
@@ -370,6 +371,15 @@ impl Pool<CodexClient> {
       for entry in entries {
          combined.merge(&entry);
       }
+      combined.add_service_tier(
+         "gpt-5.6-sol",
+         ServiceTier {
+            id: "ultrafast".into(),
+            name: "Ultrafast".into(),
+            description: "The fastest available responses for latency-sensitive work.".into(),
+            rest: BTreeMap::default(),
+         },
+      );
       Ok(combined)
    }
 

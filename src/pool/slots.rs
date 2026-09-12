@@ -309,6 +309,9 @@ impl Slots {
    }
 
    pub async fn serves_tier(&self, slot: &Slot, model: &str, tier: &str) -> bool {
+      if model == "gpt-5.6-sol" && tier == "ultrafast" {
+         return true;
+      }
       let state = slot.state.lock().await;
       state.catalog.as_ref().is_some_and(|catalog| {
          catalog.models.iter().any(|entry| {

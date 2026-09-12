@@ -161,6 +161,7 @@ mod tests {
          .ranked(Route {
             session_key,
             model: "",
+            service_tier: None,
             user: "",
             pinned_account: None,
             prefer_trusted: false,

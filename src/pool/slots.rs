@@ -1,11 +1,12 @@
 use crate::clock;
+use crate::codex::models::ModelsResponse;
 use crate::db::Db;
 use crate::db::accounts::{Account, AccountStatus};
 use crate::oauth::anthropic;
 use crate::oauth::refresh;
 use crate::oauth::refresh::RefreshError;
 use crate::provider::{AuthMode, Provider};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
@@ -18,6 +19,7 @@ pub struct Slot {
    pub auth_mode: AuthMode,
    pub plan: Option<String>,
    pub http_referer: Option<String>,
+   pub catalog_refresh: Arc<Mutex<()>>,
    credentials: Arc<Mutex<Credentials>>,
    state: Arc<Mutex<SlotState>>,
 }
@@ -41,8 +43,9 @@ struct SlotState {
    consecutive_fails: u32,
    usage: Option<AccountUsage>,
    limit_windows: BTreeMap<String, Vec<UsageWindow>>,
-   /// Model ids this account's own catalog lists, `None` until one is read.
-   catalog: Option<HashSet<String>>,
+   /// Model ids and service tiers this account's own catalog lists, `None`
+   /// until one is read.
+   catalog: Option<Arc<ModelsResponse>>,
    catalog_at: i64,
 }
 
@@ -279,10 +282,14 @@ impl Slots {
       slot.state.lock().await.status == Status::Disabled
    }
 
-   pub async fn note_catalog(&self, slot: &Slot, models: HashSet<String>) {
+   pub async fn note_catalog(&self, slot: &Slot, catalog: Arc<ModelsResponse>) {
       let mut state = slot.state.lock().await;
-      state.catalog = Some(models);
+      state.catalog = Some(catalog);
       state.catalog_at = clock::unix_now();
+   }
+
+   pub async fn catalog(&self, slot: &Slot) -> Option<Arc<ModelsResponse>> {
+      slot.state.lock().await.catalog.as_ref().map(Arc::clone)
    }
 
    pub async fn catalog_older_than(&self, slot: &Slot, secs: i64) -> bool {
@@ -294,13 +301,20 @@ impl Slots {
    /// backend 400s it rather than falling back. Unknown catalogs serve
    /// everything, so a provider that publishes none is unaffected.
    pub async fn serves_model(&self, slot: &Slot, model: &str) -> bool {
-      slot
-         .state
-         .lock()
-         .await
-         .catalog
-         .as_ref()
-         .is_none_or(|catalog| catalog.is_empty() || catalog.contains(model))
+      let state = slot.state.lock().await;
+      let Some(catalog) = state.catalog.as_ref() else {
+         return true;
+      };
+      catalog.models.is_empty() || catalog.models.iter().any(|entry| entry.slug == model)
+   }
+
+   pub async fn serves_tier(&self, slot: &Slot, model: &str, tier: &str) -> bool {
+      let state = slot.state.lock().await;
+      state.catalog.as_ref().is_some_and(|catalog| {
+         catalog.models.iter().any(|entry| {
+            entry.slug == model && entry.service_tiers.iter().any(|service| service.id == tier)
+         })
+      })
    }
 
    pub async fn mark_ok(&self, slot: &Slot) {
@@ -614,6 +628,7 @@ fn reslot(account: &Account, prev: &Slot) -> Slot {
       http_referer: account.http_referer.clone(),
       display: display_for(account),
       credentials: Arc::clone(&prev.credentials),
+      catalog_refresh: Arc::clone(&prev.catalog_refresh),
       state: Arc::clone(&prev.state),
    }
 }
@@ -644,6 +659,7 @@ fn slot_from_account(account: Account) -> Slot {
          refresh_token: account.refresh_token,
          expires_at: account.access_expires_at,
       })),
+      catalog_refresh: Arc::new(Mutex::new(())),
       state: Arc::new(Mutex::new(SlotState {
          status,
          consecutive_fails: 0,
@@ -681,6 +697,7 @@ pub fn test_slots(db: Db, provider: Provider, ids: &[(i64, bool)]) -> Slots {
                      refresh_token: "rt".into(),
                      expires_at: None,
                   })),
+                  catalog_refresh: Arc::new(Mutex::new(())),
                   state: Arc::new(Mutex::new(SlotState {
                      status: Status::Active,
                      consecutive_fails: 0,
@@ -717,6 +734,7 @@ mod allowlist_tests {
             refresh_token: "rt".into(),
             expires_at: None,
          })),
+         catalog_refresh: Arc::new(Mutex::new(())),
          state: Arc::new(Mutex::new(SlotState {
             status: Status::Active,
             consecutive_fails: 0,

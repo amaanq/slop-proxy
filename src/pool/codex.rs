@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use axum::body::Bytes;
+use futures_util::{StreamExt as _, stream};
 use reqwest::header::HeaderMap;
 use serde_json::{Value, json};
 
@@ -10,7 +11,7 @@ use super::{
 };
 use crate::clock::unix_now;
 use crate::codex::client::CodexClient;
-use crate::codex::models::ModelInfo;
+use crate::codex::models::{ModelInfo, ModelsResponse};
 use crate::codex::types::ErrorEnvelope;
 use crate::codex::websocket::Connection;
 use crate::provider::Provider;
@@ -23,7 +24,7 @@ pub type CodexPool = Pool<CodexClient>;
 const EXHAUSTED_COOLDOWN: i64 = 15 * 60;
 
 /// A catalog only moves when a model ships or an account's access changes.
-const CATALOG_TTL: i64 = 3600;
+const CATALOG_TTL: i64 = 300;
 
 #[derive(Clone)]
 pub enum Call {
@@ -219,6 +220,9 @@ impl Pool<CodexClient> {
       body: Bytes,
       headers: HeaderMap,
    ) -> Result<(Option<i64>, reqwest::Response), PoolError> {
+      if route.explicit_tier().is_some() {
+         self.catalogs(route.user, route.pinned_account).await?;
+      }
       let (account, reply) = self.execute(route, Call::Http { body, headers }).await?;
       match reply {
          Reply::Http(response) => Ok((account, response)),
@@ -231,6 +235,9 @@ impl Pool<CodexClient> {
       route: Route<'_>,
       headers: HeaderMap,
    ) -> Result<(Option<i64>, Connection), PoolError> {
+      if route.explicit_tier().is_some() {
+         self.catalogs(route.user, route.pinned_account).await?;
+      }
       let (account, reply) = self.execute(route, Call::WebSocket(headers)).await?;
       match reply {
          Reply::WebSocket(connection) => Ok((account, *connection)),
@@ -247,18 +254,15 @@ impl Pool<CodexClient> {
    /// a served response.
    pub async fn poll_usage(&self) {
       for slot in self.slots.list().await {
+         if self.slots.is_disabled(&slot).await {
+            continue;
+         }
+         if let Err(error) = self.account_catalog(&slot).await {
+            tracing::debug!(account = %slot.display, %error, "reading codex catalog failed");
+         }
          let Ok(token) = self.slots.fresh_token(&slot, false).await else {
             continue;
          };
-         if self.slots.catalog_older_than(&slot, CATALOG_TTL).await
-            && let Ok(models) = self
-               .backend
-               .list_models(&token, &slot.provider_account_id)
-               .await
-         {
-            let ids = models.into_iter().map(|model| model.slug).collect();
-            self.slots.note_catalog(&slot, ids).await;
-         }
          match self.backend.usage(&token, &slot.provider_account_id).await {
             Ok(usage) => {
                let windows = usage
@@ -317,13 +321,14 @@ impl Pool<CodexClient> {
    /// that is entirely cooling after a restart must still serve one. A
    /// disabled account is not: it is idle, so `ranked` bands it on no quota
    /// at all and sorts it ahead of the working fleet.
-   async fn listing_slots(&self) -> Vec<Arc<Slot>> {
+   async fn listing_slots(&self, user: &str, pinned_account: Option<i64>) -> Vec<Arc<Slot>> {
       let ranked = self
          .ranked(Route {
             session_key: "",
             model: "",
-            user: "",
-            pinned_account: None,
+            service_tier: None,
+            user,
+            pinned_account,
             prefer_trusted: true,
          })
          .await;
@@ -337,7 +342,7 @@ impl Pool<CodexClient> {
    }
 
    pub async fn any_active_credentials(&self) -> Option<(String, String)> {
-      for slot in self.listing_slots().await {
+      for slot in self.listing_slots("", None).await {
          let Ok(access) = self.slots.fresh_token(&slot, false).await else {
             continue;
          };
@@ -347,46 +352,102 @@ impl Pool<CodexClient> {
    }
 
    pub async fn list_models(&self) -> Result<Vec<ModelInfo>, PoolError> {
-      let mut last = None;
-      for slot in self.listing_slots().await {
-         let Ok(access) = self.slots.fresh_token(&slot, false).await else {
-            continue;
-         };
-         match self
-            .backend
-            .list_models(&access, &slot.provider_account_id)
-            .await
-         {
-            Ok(models) => return Ok(models),
-            Err(err) => last = Some(PoolError::from(err)),
-         }
-      }
-      Err(last.unwrap_or(PoolError::NoAccounts(Provider::OpenAi)))
+      Ok(self.catalog("", None).await?.models)
    }
 
-   /// The catalog body untouched, for relaying to a codex client verbatim.
-   pub async fn models_raw(&self) -> Result<String, PoolError> {
+   pub async fn catalog(
+      &self,
+      user: &str,
+      pinned_account: Option<i64>,
+   ) -> Result<ModelsResponse, PoolError> {
+      let catalogs = self.catalogs(user, pinned_account).await?;
+      let mut entries = catalogs.into_iter();
+      let mut combined = entries
+         .next()
+         .expect("catalogs returns at least one catalog")
+         .as_ref()
+         .clone();
+      for entry in entries {
+         combined.merge(&entry);
+      }
+      Ok(combined)
+   }
+
+   async fn catalogs(
+      &self,
+      user: &str,
+      pinned_account: Option<i64>,
+   ) -> Result<Vec<Arc<ModelsResponse>>, PoolError> {
+      let slots = self.listing_slots(user, pinned_account).await;
+      let mut requests = stream::iter(slots)
+         .map(|slot| async move {
+            let result = self.account_catalog(&slot).await;
+            if self.slots.is_disabled(&slot).await {
+               return Err(PoolError::NoAccounts(Provider::OpenAi));
+            }
+            match result {
+               Ok(catalog) => Ok(catalog),
+               Err(error) => {
+                  tracing::warn!(account = %slot.display, %error, "reading codex catalog failed");
+                  self.slots.catalog(&slot).await.ok_or(error)
+               },
+            }
+         })
+         .buffered(8);
+      let mut catalogs = Vec::new();
       let mut last = None;
-      for slot in self.listing_slots().await {
-         let Ok(access) = self.slots.fresh_token(&slot, false).await else {
-            continue;
-         };
-         match self
-            .backend
-            .models_raw(&access, &slot.provider_account_id)
-            .await
-         {
-            Ok((status, body)) if status.is_success() => return Ok(body),
-            Ok((status, body)) => {
-               last = Some(PoolError::Upstream(format!(
-                  "{status}: {}",
-                  body.chars().take(400).collect::<String>()
-               )));
-            },
-            Err(err) => last = Some(PoolError::from(err)),
+      while let Some(result) = requests.next().await {
+         match result {
+            Ok(catalog) => catalogs.push(catalog),
+            Err(error) => last = Some(error),
          }
       }
-      Err(last.unwrap_or(PoolError::NoAccounts(Provider::OpenAi)))
+      if catalogs.is_empty() {
+         return Err(last.unwrap_or(PoolError::NoAccounts(Provider::OpenAi)));
+      }
+      Ok(catalogs)
+   }
+
+   async fn account_catalog(&self, slot: &Slot) -> Result<Arc<ModelsResponse>, PoolError> {
+      let _refresh = slot.catalog_refresh.lock().await;
+      if !self.slots.catalog_older_than(slot, CATALOG_TTL).await
+         && let Some(cached) = self.slots.catalog(slot).await
+      {
+         return Ok(cached);
+      }
+      let access = self
+         .slots
+         .fresh_token(slot, false)
+         .await
+         .map_err(|()| PoolError::Upstream("refreshing catalog credentials failed".into()))?;
+      let catalog = Arc::new(
+         self
+            .backend
+            .catalog(&access, &slot.provider_account_id)
+            .await?,
+      );
+      self.slots.note_catalog(slot, Arc::clone(&catalog)).await;
+      Ok(catalog)
+   }
+
+   pub async fn websocket_serves(
+      &self,
+      account_id: Option<i64>,
+      route: Route<'_>,
+   ) -> Result<bool, PoolError> {
+      let Some(tier) = route.explicit_tier() else {
+         return Ok(true);
+      };
+      self.catalogs(route.user, route.pinned_account).await?;
+      let Some(id) = account_id else {
+         return Ok(false);
+      };
+      let Some(slot) = self.slots.by_id(id).await else {
+         return Ok(false);
+      };
+      Ok(slot.serves(route.user)
+         && !self.slots.is_disabled(&slot).await
+         && self.slots.serves_tier(&slot, route.model, tier).await)
    }
 }
 

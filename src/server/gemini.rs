@@ -71,6 +71,7 @@ pub async fn chat_completions(
          Route {
             session_key: &session_key,
             model: &record.upstream_model,
+            service_tier: None,
             user: &auth.user,
             pinned_account: auth.limits.pinned_account,
             prefer_trusted: false,
@@ -366,6 +367,7 @@ pub async fn native(
          Route {
             session_key: &key,
             model: &resolved.model,
+            service_tier: None,
             user: &auth.user,
             pinned_account: auth.limits.pinned_account,
             prefer_trusted: false,

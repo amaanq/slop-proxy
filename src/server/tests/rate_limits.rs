@@ -55,7 +55,6 @@ async fn spawn_proxy_with_codex_status(status: StatusCode) -> (String, Db) {
       db: db.clone(),
       cfg,
       prices: Prices::new(&cfg_db_path, PricingConfig::default().url),
-      models: super::super::ModelCache::new(),
       pools,
    }));
    let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

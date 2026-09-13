@@ -188,18 +188,19 @@ impl GeminiClient {
       api_key: &str,
       account_referer: Option<&str>,
    ) -> Result<Vec<ListedModel>, SendError> {
+      // The compat surface answers without `supportedGenerationMethods`, so
+      // the filter below cannot tell an embedding-only model from a chat one
+      // and every one of them reaches the catalog. It also rejects bearer
+      // auth, and pages at 50 by default against 56 models today.
       let base = self.cfg.base_url.trim_end_matches('/');
-      let mut req = account_referer.map_or_else(
-         || self.http.get(format!("{base}/models")).bearer_auth(api_key),
-         |referer| {
-            let base = base.strip_suffix("/openai").unwrap_or(base);
-            self
-               .http
-               .get(format!("{base}/models"))
-               .header("x-goog-api-key", api_key)
-               .header("referer", referer)
-         },
-      );
+      let base = base.strip_suffix("/openai").unwrap_or(base);
+      let mut req = self
+         .http
+         .get(format!("{base}/models?pageSize=1000"))
+         .header("x-goog-api-key", api_key);
+      if let Some(referer) = account_referer {
+         req = req.header("referer", referer);
+      }
       for (name, value) in &self.cfg.headers {
          if name.eq_ignore_ascii_case("referer") && account_referer.is_some() {
             continue;

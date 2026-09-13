@@ -319,56 +319,48 @@ pub async fn messages(
             .await
       },
       Provider::Zen => {
-         let mut outcome = None;
-         for attempt in 1..=ZEN_EMPTY_STREAM_ATTEMPTS {
-            let relay = ZenRelay {
-               path: "/messages",
-               body: body.clone(),
-               attempt: attempt - 1,
+         let relay = ZenRelay {
+            path: "/messages",
+            body,
+         };
+         let opened = timeout(ZEN_FIRST_FRAME, async {
+            let (account_id, mut resp) = state.pools.zen.execute(route, relay).await?;
+            let opening = if is_event_stream(&resp) {
+               resp
+                  .chunk()
+                  .await
+                  .map_err(|err| PoolError::Upstream(err.to_string()))?
+            } else {
+               None
             };
-            let opened = timeout(ZEN_FIRST_FRAME, async {
-               let (account_id, mut resp) = state.pools.zen.execute(route, relay).await?;
-               let opening = if is_event_stream(&resp) {
-                  resp
-                     .chunk()
-                     .await
-                     .map_err(|err| PoolError::Upstream(err.to_string()))?
-               } else {
-                  None
-               };
-               Ok((account_id, resp, opening))
-            })
-            .await;
-            match opened {
-               Ok(Ok((account_id, resp, opening))) => {
-                  if opening.is_none() && is_event_stream(&resp) {
-                     tracing::warn!(
-                        attempt,
-                        model = %peek.upstream_model,
-                        "zen answered 200 and closed the stream without a byte"
-                     );
-                     continue;
-                  }
-                  first = opening;
-                  outcome = Some(Ok((account_id, resp)));
-                  break;
-               },
-               Ok(Err(err)) => {
-                  outcome = Some(Err(err));
-                  break;
-               },
-               Err(_) => tracing::warn!(
-                  attempt,
+            Ok((account_id, resp, opening))
+         })
+         .await;
+         match opened {
+            Ok(Ok((_, resp, opening))) if opening.is_none() && is_event_stream(&resp) => {
+               tracing::warn!(
+                  model = %peek.upstream_model,
+                  "zen answered 200 and closed the stream without a byte"
+               );
+               Err(PoolError::Upstream(
+                  "zen answered 200 and closed the stream without a byte".into(),
+               ))
+            },
+            Ok(Ok((account_id, resp, opening))) => {
+               first = opening;
+               Ok((account_id, resp))
+            },
+            Ok(Err(err)) => Err(err),
+            Err(_) => {
+               tracing::warn!(
                   model = %peek.upstream_model,
                   "zen sent no frame before the deadline"
-               ),
-            }
+               );
+               Err(PoolError::Upstream(
+                  "zen sent no frame before the deadline".into(),
+               ))
+            },
          }
-         outcome.unwrap_or_else(|| {
-            Err(PoolError::Upstream(format!(
-               "zen opened no stream for this model on {ZEN_EMPTY_STREAM_ATTEMPTS} attempts"
-            )))
-         })
       },
       Provider::OpenAi | Provider::Gemini => Err(PoolError::BadRequest {
          provider,
@@ -397,15 +389,6 @@ pub async fn messages(
    relay_response(state, record, resp, first, builder, started).await
 }
 
-/// Zen has answered 200 with an event-stream content type and then closed
-/// without a byte, for 33 seconds at a time, while muse stayed up on the same
-/// egress. Nothing is on the wire until the first chunk arrives, so the turn
-/// can still be re-dispatched.
-const ZEN_EMPTY_STREAM_ATTEMPTS: usize = 3;
-
-/// A healthy turn answers and opens with `message_start` before the model has
-/// generated anything, so waiting out zen's own 33 second close on a dead one
-/// only delays the retry.
 const ZEN_FIRST_FRAME: Duration = Duration::from_secs(12);
 
 fn is_event_stream(resp: &reqwest::Response) -> bool {

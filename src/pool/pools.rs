@@ -26,7 +26,7 @@ use crate::provider::Provider;
 use crate::translate::UsageCapture;
 use crate::translate::gemini_bridge;
 use crate::translate::gemini_req::{custom_tools, to_chat};
-use crate::zen::client::ZenClient;
+use crate::zen::client::{ZenClient, egress_of};
 
 /// A backend's reply to a Responses request, before anything reads it.
 pub enum Upstream {
@@ -45,7 +45,12 @@ impl Upstream {
    /// The reply as Responses events, whichever dialect it arrived in.
    pub fn events(self, model: &str, capture: UsageCapture) -> EventStream {
       match self {
-         Self::Responses(response) => sse::event_stream(response),
+         Self::Responses(response) => {
+            if let Some(index) = egress_of(&response) {
+               capture.note_egress(index);
+            }
+            sse::event_stream(response)
+         },
          Self::Bridged {
             response,
             protocol,

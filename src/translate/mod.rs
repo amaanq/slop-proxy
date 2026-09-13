@@ -96,6 +96,11 @@ pub struct CapturedUsage {
    pub last_event: Option<String>,
    /// Separates a slow account from a long answer, which one duration cannot.
    pub first_byte_at: Option<Instant>,
+   /// How long upstream had been silent when it quit, which separates an
+   /// idle timer somewhere in the path from an abort mid-answer.
+   pub last_byte_at: Option<Instant>,
+   /// Which zen proxy carried this, to tell one rotten egress from all 250.
+   pub egress: Option<usize>,
    pub response_bytes: i64,
    pub stop_reason: Option<String>,
    /// Names only. An argument is the caller's shell command or source.
@@ -166,6 +171,7 @@ impl UsageCapture {
       let mut captured = self.0.lock().unwrap();
       captured.last_event = Some(name.to_owned());
       captured.first_byte_at.get_or_insert_with(Instant::now);
+      captured.last_byte_at = Some(Instant::now());
    }
 
    pub fn note_bytes(&self, len: usize) {
@@ -175,6 +181,11 @@ impl UsageCapture {
       let mut captured = self.0.lock().unwrap();
       captured.response_bytes += len as i64;
       captured.first_byte_at.get_or_insert_with(Instant::now);
+      captured.last_byte_at = Some(Instant::now());
+   }
+
+   pub fn note_egress(&self, index: usize) {
+      self.0.lock().unwrap().egress = Some(index);
    }
 
    pub fn note_stop_reason(&self, reason: &str) {

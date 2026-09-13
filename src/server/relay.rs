@@ -26,6 +26,7 @@ use crate::provider::Provider;
 use crate::translate::UsageCapture;
 use crate::translate::anthropic_req::AnthropicRequest;
 use crate::translate::model_map::resolve;
+use crate::zen::client::egress_of;
 
 const DIALECT: Dialect = Dialect::Anthropic;
 
@@ -453,6 +454,9 @@ async fn relay_response(
 ) -> Response {
    if is_event_stream(&resp) {
       let capture = UsageCapture::default();
+      if let Some(index) = egress_of(&resp) {
+         capture.note_egress(index);
+      }
       let mut scan = SseScan::new(capture.clone());
       let head = stream::iter(first.map(Ok::<Bytes, reqwest::Error>));
       return relayed_stream(

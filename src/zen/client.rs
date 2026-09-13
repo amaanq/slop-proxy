@@ -25,6 +25,18 @@ pub struct ZenClient {
    next: AtomicUsize,
 }
 
+/// Rides the response so a stream that dies halfway can name the proxy it
+/// died on, which the headers cannot.
+#[derive(Clone, Copy)]
+pub struct EgressIndex(pub usize);
+
+pub fn egress_of(response: &reqwest::Response) -> Option<usize> {
+   response
+      .extensions()
+      .get::<EgressIndex>()
+      .map(|index| index.0)
+}
+
 struct Egress {
    http: reqwest::Client,
    unavailable_until: AtomicI64,
@@ -94,7 +106,8 @@ impl ZenClient {
             .send_via(index, key, session, &request_id, path, req)
             .await
          {
-            Ok(response) => {
+            Ok(mut response) => {
+               response.extensions_mut().insert(EgressIndex(index));
                if tried > 1 {
                   tracing::info!(
                      egress = index,

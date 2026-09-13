@@ -12,6 +12,11 @@ pub enum SendError {
       retry_after: Option<i64>,
       body: String,
    },
+   #[error("upstream rate limited this model")]
+   ModelLimited {
+      retry_after: Option<i64>,
+      body: String,
+   },
    #[error("upstream error {status}: {body}")]
    Upstream { status: u16, body: String },
    #[error("bad request upstream: {0}")]

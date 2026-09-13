@@ -53,7 +53,10 @@ pub struct ModelsResponse {
 impl ModelsResponse {
    pub fn add_service_tier(&mut self, slug: &str, tier: ServiceTier) {
       if let Some(model) = self.models.iter_mut().find(|model| model.slug == slug)
-         && !model.service_tiers.iter().any(|existing| existing.id == tier.id)
+         && !model
+            .service_tiers
+            .iter()
+            .any(|existing| existing.id == tier.id)
       {
          model.service_tiers.push(tier);
       }

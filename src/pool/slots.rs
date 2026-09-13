@@ -719,9 +719,7 @@ pub fn test_slots(db: Db, provider: Provider, ids: &[(i64, bool)]) -> Slots {
                      | Provider::Glm
                      | Provider::DeepSeek
                      | Provider::Zen
-                     | Provider::Experiential => {
-                        AuthMode::ApiKey
-                     },
+                     | Provider::Experiential => AuthMode::ApiKey,
                   },
                   plan: None,
                   http_referer: None,

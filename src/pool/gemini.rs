@@ -7,9 +7,9 @@ use crate::translate::chat::ChatRequest;
 
 use super::{AuthPolicy, Backend, Cooldown, Pool, Route, Slot};
 use crate::gemini::client::{GeminiClient, GeminiResponse};
-use crate::translate::bridge::BridgeProtocol;
 use crate::gemini::types::ListedModel;
 use crate::provider::Provider;
+use crate::translate::bridge::BridgeProtocol;
 use crate::upstream::SendError;
 
 /// What to send upstream. A caller already speaking the native dialect skips

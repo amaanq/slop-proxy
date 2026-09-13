@@ -323,12 +323,10 @@ pub async fn models(
          .collect::<Vec<ModelEntry>>()
    };
 
+   // This catalog is what an openai-dialect client discovers from, so a zen
+   // model the responses surface refuses must not appear in it.
    data.extend(state.pools.zen.models().await.into_iter().filter_map(|id| {
-      state
-         .cfg
-         .models
-         .route(&id)
-         .eq(&Provider::Zen)
+      (state.cfg.models.route(&id) == Provider::Zen && !state.cfg.models.zen_speaks_messages(&id))
          .then_some(ModelEntry {
             id,
             object: "model",

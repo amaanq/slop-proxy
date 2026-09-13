@@ -319,7 +319,15 @@ impl Relay {
       let error = upstream_error(&value);
       match error.as_ref().map(|error| error.fault) {
          Some(Fault::Exhausted) => self.exhaust_upstream().await,
-         Some(Fault::Transient) => self.fail_upstream().await,
+         Some(Fault::Transient) => {
+            let status = error.as_ref().map_or(0, |error| error.status);
+            self
+               .fail_upstream(&format!(
+                  "websocket error frame {status}: {}",
+                  text.chars().take(300).collect::<String>()
+               ))
+               .await;
+         },
          Some(Fault::Caller) | None => {},
       }
       if matches!(kind, "error" | "response.failed") {
@@ -378,14 +386,14 @@ impl Relay {
          .await;
    }
 
-   async fn fail_upstream(&mut self) {
+   async fn fail_upstream(&mut self, why: &str) {
       if !self.upstream_failed {
          self.upstream_failed = true;
          self
             .state
             .pools
             .codex
-            .websocket_failed(self.account_id)
+            .websocket_failed(self.account_id, why)
             .await;
       }
    }
@@ -395,7 +403,12 @@ impl Relay {
          pending.capture.note_upstream_eof();
       }
       if !self.pending.is_empty() {
-         self.fail_upstream().await;
+         self
+            .fail_upstream(&format!(
+               "websocket closed with {} streams pending",
+               self.pending.len()
+            ))
+            .await;
       }
    }
 

@@ -549,10 +549,10 @@ impl Slots {
       self.cool(slot, secs, "rate limited").await;
    }
 
-   pub async fn cool_failure(&self, slot: &Slot) {
+   pub async fn cool_failure(&self, slot: &Slot, why: &str) {
       let fails = slot.state.lock().await.consecutive_fails;
       let secs = 15_i64.saturating_mul(1 << fails.min(6)).min(900);
-      self.cool(slot, secs, "upstream failure").await;
+      self.cool(slot, secs, why).await;
    }
 
    /// Seconds until this one slot is claimable, 0 when it already is.

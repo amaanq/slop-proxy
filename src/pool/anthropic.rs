@@ -69,6 +69,9 @@ impl Pool<AnthropicClient> {
    /// and a locked account is known before it rejects traffic.
    pub async fn poll_usage(&self) {
       for slot in self.slots.list().await {
+         if self.slots.is_disabled(&slot).await {
+            continue;
+         }
          let Ok(token) = self.slots.fresh_token(&slot, false).await else {
             continue;
          };

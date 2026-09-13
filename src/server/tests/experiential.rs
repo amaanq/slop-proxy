@@ -59,6 +59,7 @@ async fn gateway(
       db_path: db_path.clone(),
       experiential: ExperientialConfig {
          base_url: upstream_url,
+         ..ExperientialConfig::default()
       },
       models: ModelsConfig {
          experiential_patterns: vec!["gateway-model".into()],

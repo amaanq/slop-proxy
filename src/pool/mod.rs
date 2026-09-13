@@ -503,7 +503,7 @@ impl<B: Backend> Pool<B> {
                });
             },
             Err(err) => {
-               self.slots.cool_failure(&slot).await;
+               self.slots.cool_failure(&slot, &err.to_string()).await;
                last_err = Some(err);
             },
          }

@@ -117,11 +117,11 @@ impl Backend for CodexClient {
 }
 
 impl Pool<CodexClient> {
-   pub async fn websocket_failed(&self, account_id: Option<i64>) {
+   pub async fn websocket_failed(&self, account_id: Option<i64>, why: &str) {
       if let Some(id) = account_id
          && let Some(slot) = self.slots.by_id(id).await
       {
-         self.slots.cool_failure(&slot).await;
+         self.slots.cool_failure(&slot, why).await;
       }
    }
 

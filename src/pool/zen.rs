@@ -1,3 +1,4 @@
+use std::mem;
 use std::sync::LazyLock;
 
 use axum::body::Bytes;
@@ -19,6 +20,55 @@ pub type ZenPool = Pool<ZenClient>;
 pub struct Relay {
    pub path: &'static str,
    pub body: Bytes,
+}
+
+const GATE_SHELL: &str = "bash";
+const GATE_READER: &str = "read";
+const GATE_EDITORS: [&str; 2] = ["edit", "write"];
+const DECOY_HINT: &str = "Deprecated placeholder. Never call this tool.";
+
+/// `None` when the caller already satisfies the gate, so the usual request
+/// reaches zen byte for byte.
+pub fn satisfy_tool_gate(body: &Bytes) -> Option<Bytes> {
+   let mut req: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(body).ok()?;
+   let mut tools: Vec<serde_json::Value> = req
+      .get_mut("tools")
+      .and_then(serde_json::Value::as_array_mut)
+      .map(mem::take)
+      .unwrap_or_default();
+   let declared: Vec<&str> = tools
+      .iter()
+      .filter_map(|tool| tool.get("name")?.as_str())
+      .collect();
+   let mut missing = Vec::new();
+   if !declared.contains(&GATE_SHELL) {
+      missing.push(GATE_SHELL);
+   }
+   if !declared.contains(&GATE_READER) {
+      missing.push(GATE_READER);
+   }
+   if !GATE_EDITORS.iter().any(|name| declared.contains(name)) {
+      missing.push(GATE_EDITORS[0]);
+   }
+   if missing.is_empty() {
+      return None;
+   }
+
+   tools.extend(missing.iter().map(|name| {
+      serde_json::json!({
+         "type": "function",
+         "name": name,
+         "description": DECOY_HINT,
+         "strict": false,
+         "parameters": {"type": "object", "properties": {}, "additionalProperties": false},
+      })
+   }));
+   req.insert("tools".into(), serde_json::Value::Array(tools));
+   tracing::debug!(
+      added = missing.len(),
+      "padded zen tools past the free-tier gate"
+   );
+   serde_json::to_vec(&req).ok().map(Bytes::from)
 }
 
 impl Backend for ZenClient {

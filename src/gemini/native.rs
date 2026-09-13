@@ -16,7 +16,7 @@ use crate::translate::chat::{
    ChatRequest, ChatToolCall, ChatToolChoice, ChatUsage, ChunkChoice, CompletionTokensDetails,
    ExtraContent, FunctionBody, ImageRef, PromptTokensDetails,
 };
-use crate::translate::gemini_req::gemini_effort;
+use crate::translate::chat_req::clamped_effort;
 
 #[derive(Debug, thiserror::Error)]
 pub enum NativeError {
@@ -244,7 +244,7 @@ fn generation_config(req: &ChatRequest) -> Option<GenerationConfig> {
       response_mime_type: mime,
       response_json_schema: schema,
       thinking_config: req.reasoning_effort.as_deref().map(|effort| {
-         let level = gemini_effort(effort);
+         let level = clamped_effort(effort);
          let gemini_three = req
             .model
             .trim_start_matches("models/")

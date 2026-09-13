@@ -6,7 +6,8 @@ use crate::translate::chat::ChatError;
 use crate::translate::chat::ChatRequest;
 
 use super::{AuthPolicy, Backend, Cooldown, Pool, Route, Slot};
-use crate::gemini::client::{GeminiClient, GeminiProtocol, GeminiResponse};
+use crate::gemini::client::{GeminiClient, GeminiResponse};
+use crate::translate::bridge::BridgeProtocol;
 use crate::gemini::types::ListedModel;
 use crate::provider::Provider;
 use crate::upstream::SendError;
@@ -91,7 +92,7 @@ impl Backend for GeminiClient {
          .await
          .map(|response| GeminiResponse {
             response,
-            protocol: GeminiProtocol::Native,
+            protocol: BridgeProtocol::GeminiNative,
          }),
       }
    }

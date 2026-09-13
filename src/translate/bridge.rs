@@ -1,21 +1,28 @@
-//! Claude Code only speaks the messages API and every Gemini surface speaks
-//! chat completions.
+//! Chat completions back into Responses events, for the backends that only
+//! speak the older wire: every Gemini surface, and zen's chat-only models.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use futures_util::stream;
 
 use super::chat::{ChatChunk, ChatErrorBody, ChatToolCall, ErrorCode, FinishReason};
-use super::gemini_req::FREEFORM_ARG;
+use super::chat_req::FREEFORM_ARG;
 use crate::codex::sse::EventStream;
 use crate::codex::types::{
    OutputContentPart, OutputItem, ResponseObj, ResponsesEvent, SummaryPart, UpstreamError, Usage,
 };
-use crate::gemini::client::GeminiProtocol;
 use crate::gemini::native::{NativeEvent, NativeStream};
 use crate::gemini::signatures;
 use crate::gemini::sse::Frames;
 use crate::translate::UsageCapture;
+
+/// Which wire the upstream answered in, since only Google's native surface
+/// frames something other than chat completions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BridgeProtocol {
+   Chat,
+   GeminiNative,
+}
 
 /// Tool calls arrive spread across chunks keyed by index, so a slot holds the
 /// name until there is enough to open an item.
@@ -43,7 +50,7 @@ impl Drop for ChatToResponses {
          tracing::warn!(
             frames = self.frames,
             first = self.first_frame.as_deref().unwrap_or("<none>"),
-            "gemini bridge produced no content"
+            "chat bridge produced no content"
          );
       }
    }
@@ -447,14 +454,14 @@ impl ChatToResponses {
 /// in Gemini's own frames, so that protocol is normalised before parsing.
 pub fn event_stream(
    resp: reqwest::Response,
-   protocol: GeminiProtocol,
+   protocol: BridgeProtocol,
    model: &str,
    custom: BTreeSet<String>,
    capture: UsageCapture,
 ) -> EventStream {
    use futures_util::StreamExt as _;
 
-   let mut native = (protocol == GeminiProtocol::Native).then(|| NativeStream::new(model));
+   let mut native = (protocol == BridgeProtocol::GeminiNative).then(|| NativeStream::new(model));
    let mut frames = Frames::default();
    let mut bridge = ChatToResponses::with_custom(custom);
    let upstream = resp
@@ -509,7 +516,7 @@ pub fn event_stream(
 mod tests {
    use super::*;
    use crate::codex::types::ResponsesRequest;
-   use crate::translate::gemini_req::{custom_tools, to_chat};
+   use crate::translate::chat_req::{custom_tools, to_chat};
    use serde_json::{Value, json};
 
    fn chunk(value: Value) -> ChatChunk {

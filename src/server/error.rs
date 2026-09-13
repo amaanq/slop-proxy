@@ -97,11 +97,9 @@ pub fn pool_error_response(dialect: Dialect, models: &ModelsConfig, err: PoolErr
          } else {
             let hint = models
                .suggest(&model)
-               .map(|model| format!(", did you mean {model}?"))
+               .map(|model| format!(": did you mean {model}?"))
                .unwrap_or_default();
-            format!(
-               "no backend is configured for {model}{hint} it fell through to {provider}, which said: {body}"
-            )
+            format!("the {provider} backend rejected {model}{hint}: {body}")
          };
          error_response(dialect, 400, "invalid_request_error", &message)
       },

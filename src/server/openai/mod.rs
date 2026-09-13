@@ -608,6 +608,22 @@ fn unwrap_plaintext_agent_payloads(rest: &mut serde_json::Map<String, Value>) ->
    unwrapped
 }
 
+fn drop_composite_reasoning(rest: &mut serde_json::Map<String, Value>) -> usize {
+   let valid = |id: &str| {
+      id.bytes()
+         .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+   };
+   let Some(&mut Value::Array(ref mut items)) = rest.get_mut("input") else {
+      return 0;
+   };
+   let before = items.len();
+   items.retain(|item| {
+      item.get("type").and_then(Value::as_str) != Some("reasoning")
+         || item.get("id").and_then(Value::as_str).is_none_or(valid)
+   });
+   before - items.len()
+}
+
 /// Zen 400s these codex-only items as `input[N] did not match any supported type`.
 fn zen_input_fixups(rest: &mut serde_json::Map<String, Value>) -> ZenFixups {
    let mut fixes = ZenFixups::default();
@@ -818,12 +834,20 @@ fn prepare_request(
    };
    let flags = strip_encrypted_argument_flags(&mut req.rest);
    let payloads = unwrap_plaintext_agent_payloads(&mut req.rest);
+   let dropped_reasoning = if provider == Provider::OpenAi {
+      drop_composite_reasoning(&mut req.rest)
+   } else {
+      0
+   };
    let opaque = opaque_payloads(&req.rest);
    if !opaque.is_empty() {
       tracing::info!(?opaque, user = %auth.user, "request still carries encrypted payloads");
    }
    if renamed + flags + payloads > 0 {
       tracing::debug!(renamed, flags, payloads, user = %auth.user, "kept inter-agent payloads readable");
+   }
+   if dropped_reasoning > 0 {
+      tracing::debug!(dropped_reasoning, user = %auth.user, "dropped reasoning from another backend");
    }
 
    if provider == Provider::Zen {

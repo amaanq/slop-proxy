@@ -465,6 +465,9 @@ impl Slots {
          Provider::Glm => Err(RefreshError::Terminal(
             "z.ai issues static keys, there is nothing to exchange".into(),
          )),
+         Provider::DeepSeek => Err(RefreshError::Terminal(
+            "deepseek issues static keys, there is nothing to exchange".into(),
+         )),
          Provider::Experiential => Err(RefreshError::Terminal(
             "experiential issues static keys, there is nothing to exchange".into(),
          )),
@@ -689,7 +692,11 @@ pub fn test_slots(db: Db, provider: Provider, ids: &[(i64, bool)]) -> Slots {
                   allowed_users: Vec::new(),
                   auth_mode: match provider {
                      Provider::OpenAi | Provider::Anthropic => AuthMode::OAuth,
-                     Provider::Gemini | Provider::Glm | Provider::Zen | Provider::Experiential => {
+                     Provider::Gemini
+                     | Provider::Glm
+                     | Provider::DeepSeek
+                     | Provider::Zen
+                     | Provider::Experiential => {
                         AuthMode::ApiKey
                      },
                   },

@@ -198,6 +198,9 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
          Provider::Gemini => Err(eyre::eyre!(
             "google has no device-code flow here, use `accounts add-key --provider gemini`"
          )),
+         Provider::DeepSeek => Err(eyre::eyre!(
+            "deepseek issues static keys, use `accounts add-key --provider deepseek`"
+         )),
          Provider::Glm => Err(eyre::eyre!(
             "z.ai issues static keys, use `accounts add-key --provider glm`"
          )),
@@ -567,7 +570,11 @@ async fn debug_refresh(db: &Db, account: &str) -> Result<()> {
    let tokens = match acc.provider {
       Provider::OpenAi => refresh::refresh(&acc.refresh_token).await?,
       Provider::Anthropic => anthropic::refresh(&acc.refresh_token).await?,
-      Provider::Gemini | Provider::Zen | Provider::Glm | Provider::Experiential => {
+      Provider::Gemini
+      | Provider::Zen
+      | Provider::Glm
+      | Provider::DeepSeek
+      | Provider::Experiential => {
          bail!("this provider has no refresh flow")
       },
    };

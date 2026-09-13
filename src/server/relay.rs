@@ -5,7 +5,7 @@ use axum::response::Response;
 use futures_util::{StreamExt as _, stream};
 use serde::Deserialize;
 use serde_json::value::RawValue;
-use std::io::{Result, Write};
+use std::io::{self, Write};
 use std::time::{Duration, Instant};
 use tokio::time::timeout;
 
@@ -17,6 +17,7 @@ use crate::anthropic::client::RelayHeaders;
 use crate::config::ModelsConfig;
 use crate::db::usage::UsageRecord;
 use crate::pool::anthropic::Relay as AnthropicRelay;
+use crate::pool::deepseek::Relay as DeepSeekRelay;
 use crate::pool::experiential::Relay as ExperientialRelay;
 use crate::pool::glm::Relay as GlmRelay;
 use crate::pool::zen::Relay as ZenRelay;
@@ -87,11 +88,11 @@ impl Peek {
    fn session_key(&self, auth: &AuthInfo) -> String {
       struct HashWriter(hmac_sha256::Hash);
       impl Write for HashWriter {
-         fn write(&mut self, buf: &[u8]) -> Result<usize> {
+         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
             self.0.update(buf);
             Ok(buf.len())
          }
-         fn flush(&mut self) -> Result<()> {
+         fn flush(&mut self) -> io::Result<()> {
             Ok(())
          }
       }
@@ -276,6 +277,43 @@ pub async fn messages(
       prefer_trusted: false,
    };
    let body = normalized_body(&body, &peek);
+   let (result, first) = dispatch(&state, route, provider, body, &headers, &peek).await;
+   let served = match result {
+      Ok(served) => served,
+      Err(err) => return dispatch_failed(&state, record, DIALECT, err),
+   };
+   record.account_id = served.account_id;
+   record.attempts = i64::from(served.attempts);
+
+   let resp = served.response;
+   record.status = i64::from(resp.status().as_u16());
+   let mut builder = forwarded_response(&resp);
+   if provider == Provider::Anthropic {
+      for (name, value) in pool_rate_limit_headers(
+         &state
+            .pools
+            .anthropic
+            .pool_windows(&auth.user, auth.limits.pinned_account, None)
+            .await,
+      ) {
+         builder = builder.header(name, value);
+      }
+   }
+
+   relay_response(state, record, resp, first, builder, started).await
+}
+
+/// Hands the body to whichever pool serves the model. Zen is the one backend
+/// that must see its opening frame before the response counts as started, so
+/// that frame comes back alongside the result for the caller to re-emit.
+async fn dispatch(
+   state: &AppState,
+   route: Route<'_>,
+   provider: Provider,
+   body: Bytes,
+   headers: &HeaderMap,
+   peek: &Peek,
+) -> (Result<Served<reqwest::Response>, PoolError>, Option<Bytes>) {
    let mut first = None;
    let result = match provider {
       Provider::Anthropic => {
@@ -287,7 +325,7 @@ pub async fn messages(
                AnthropicRelay {
                   path: "/v1/messages",
                   body,
-                  hdrs: relay_headers(&headers),
+                  hdrs: relay_headers(headers),
                },
             )
             .await
@@ -299,6 +337,19 @@ pub async fn messages(
             .execute(
                route,
                GlmRelay {
+                  path: "/v1/messages",
+                  body,
+               },
+            )
+            .await
+      },
+      Provider::DeepSeek => {
+         state
+            .pools
+            .deepseek
+            .execute(
+               route,
+               DeepSeekRelay {
                   path: "/v1/messages",
                   body,
                },
@@ -379,27 +430,7 @@ pub async fn messages(
          body: "not served over the messages api".into(),
       }),
    };
-   let served = match result {
-      Ok(served) => served,
-      Err(err) => return dispatch_failed(&state, record, DIALECT, err),
-   };
-   record.account_id = served.account_id;
-   record.attempts = i64::from(served.attempts);
-   let resp = served.response;
-   record.status = i64::from(resp.status().as_u16());
-   let mut builder = forwarded_response(&resp);
-   if provider == Provider::Anthropic {
-      for (name, value) in pool_rate_limit_headers(
-         &state
-            .pools
-            .anthropic
-            .pool_windows(&auth.user, auth.limits.pinned_account, None)
-            .await,
-      ) {
-         builder = builder.header(name, value);
-      }
-   }
-   relay_response(state, record, resp, first, builder, started).await
+   (result, first)
 }
 
 const ZEN_FIRST_FRAME: Duration = Duration::from_secs(12);

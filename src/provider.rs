@@ -9,6 +9,7 @@ pub enum Provider {
    Gemini,
    Zen,
    Glm,
+   DeepSeek,
    Experiential,
 }
 
@@ -16,7 +17,7 @@ pub enum Provider {
 /// spelling no config pattern, database row or `--providers` list accepts.
 impl pound::FromArg for Provider {
    const POSSIBLE: Option<&'static [&'static str]> =
-      Some(&["openai", "anthropic", "gemini", "zen", "glm"]);
+      Some(&["openai", "anthropic", "gemini", "zen", "glm", "deepseek"]);
 
    fn from_arg(text: &str) -> Result<Self, pound::ValueError> {
       Self::from_str(text).ok_or_else(|| pound::ValueError::new(text, "unrecognised provider"))
@@ -31,6 +32,7 @@ impl Provider {
          "gemini" => Some(Self::Gemini),
          "zen" => Some(Self::Zen),
          "glm" => Some(Self::Glm),
+         "deepseek" => Some(Self::DeepSeek),
          "experiential" => Some(Self::Experiential),
          _ => None,
       }
@@ -43,6 +45,7 @@ impl Provider {
          Self::Gemini => "gemini",
          Self::Zen => "zen",
          Self::Glm => "glm",
+         Self::DeepSeek => "deepseek",
          Self::Experiential => "experiential",
       }
    }
@@ -111,6 +114,7 @@ impl FromSql for Provider {
          "gemini" => Ok(Self::Gemini),
          "zen" => Ok(Self::Zen),
          "glm" => Ok(Self::Glm),
+         "deepseek" => Ok(Self::DeepSeek),
          "experiential" => Ok(Self::Experiential),
          other => Err(FromSqlError::Other(
             format!("unknown provider {other:?}").into(),

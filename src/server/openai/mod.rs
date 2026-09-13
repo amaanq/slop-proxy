@@ -20,7 +20,8 @@ use super::auth::AuthInfo;
 use super::error::{Dialect, translation_error};
 use super::pipeline::{self, apply_snapshot, dispatch_failed, translated};
 use super::{AppState, LogGuard, cache_key, log_error, log_rejected, log_usage};
-use crate::clock::unix_now;
+use crate::anthropic::{Catalog, Model};
+use crate::clock::{rfc3339, unix_now};
 use crate::codex::models::with_zen_entries;
 use crate::codex::types::{OutputItem, ResponseObj, ResponsesEvent, ResponsesRequest};
 use crate::db::usage::UsageRecord;
@@ -124,7 +125,7 @@ pub async fn chat_completions(
          req.reasoning_effort = req.reasoning_effort.or(resolved.effort);
          return super::gemini::chat_completions(state, auth, req, model, facts).await;
       },
-      Provider::Glm | Provider::Experiential => {
+      Provider::Glm | Provider::DeepSeek | Provider::Experiential => {
          log_rejected(&state, &auth, "chat", &req.model);
          return translation_error(DIALECT, "this model is served over /v1/messages");
       },
@@ -226,6 +227,63 @@ pub fn responses_upgrade_required() -> Response {
       .into_response()
 }
 
+async fn messages_catalog(state: &AppState) -> Result<String, serde_json::Error> {
+   let mut data = match state.pools.anthropic.models_raw().await {
+      Ok(body) => {
+         serde_json::from_str::<Catalog>(&body).map_or_else(|_| Vec::new(), |catalog| catalog.data)
+      },
+      Err(err) => {
+         tracing::debug!("anthropic model catalog: {err}");
+         Vec::new()
+      },
+   };
+
+   let now = rfc3339(unix_now());
+   let synthetic = |id: String| Model {
+      display_name: id.clone(),
+      id,
+      created_at: now.clone(),
+      kind: "model".to_owned(),
+   };
+
+   data.extend(
+      state
+         .pools
+         .glm
+         .models()
+         .await
+         .into_iter()
+         .filter(|model| state.cfg.models.route(&model.id) == Provider::Glm),
+   );
+   data.extend(
+      state
+         .pools
+         .deepseek
+         .models()
+         .await
+         .into_iter()
+         .filter(|id| state.cfg.models.route(id) == Provider::DeepSeek)
+         .map(&synthetic),
+   );
+   data.extend(
+      state
+         .pools
+         .zen
+         .models()
+         .await
+         .into_iter()
+         .filter(|id| state.cfg.models.zen_speaks_messages(id))
+         .map(&synthetic),
+   );
+
+   serde_json::to_string(&Catalog {
+      first_id: data.first().map(|model| model.id.clone()),
+      last_id: data.last().map(|model| model.id.clone()),
+      has_more: false,
+      data,
+   })
+}
+
 /// Codex asks with a `client_version` query and reads its context window out
 /// of the reply, so its catalog preserves the backend's model metadata.
 pub async fn models(
@@ -238,7 +296,7 @@ pub async fn models(
    // understands its own. `anthropic-version` is required on every Anthropic
    // API call, so its presence identifies the caller.
    if headers.contains_key("anthropic-version") {
-      return match state.pools.anthropic.models_raw().await {
+      return match messages_catalog(&state).await {
          Ok(body) => ([("content-type", "application/json")], body).into_response(),
          Err(err) => super::error::error_response(
             super::error::Dialect::Anthropic,
@@ -809,7 +867,7 @@ fn prepare_request(
    let responses_native = match provider {
       Provider::OpenAi | Provider::Gemini => true,
       Provider::Zen => !state.cfg.models.zen_speaks_messages(&resolved.model),
-      Provider::Anthropic | Provider::Glm | Provider::Experiential => false,
+      Provider::Anthropic | Provider::Glm | Provider::DeepSeek | Provider::Experiential => false,
    };
    if !responses_native {
       return Err(Box::new(translation_error(

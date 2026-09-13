@@ -15,8 +15,8 @@ use super::{AppState, Inner, metrics, router};
 use crate::clock;
 use crate::codex::client::CodexClient;
 use crate::config::{
-   AnthropicConfig, CodexConfig, Config, ExperientialConfig, GeminiConfig, GlmConfig, ModelAlias,
-   ModelsConfig, PricingConfig, ZenConfig,
+   AnthropicConfig, CodexConfig, Config, DeepSeekConfig, ExperientialConfig, GeminiConfig,
+   GlmConfig, ModelAlias, ModelsConfig, PricingConfig, ZenConfig,
 };
 use crate::db::Db;
 use crate::db::accounts::NewAccount;
@@ -148,6 +148,7 @@ async fn spawn_proxy_at(
       gemini: GeminiConfig::default(),
       zen: ZenConfig::default(),
       glm: GlmConfig::default(),
+      deepseek: DeepSeekConfig::default(),
       experiential: ExperientialConfig::default(),
       pricing: PricingConfig::default(),
       models,
@@ -428,6 +429,7 @@ async fn metrics_render_accounts_and_usage() {
       gemini: GeminiConfig::default(),
       zen: ZenConfig::default(),
       glm: GlmConfig::default(),
+      deepseek: DeepSeekConfig::default(),
       experiential: ExperientialConfig::default(),
       pricing: PricingConfig::default(),
       models: ModelsConfig::default(),
@@ -583,6 +585,7 @@ async fn spawn_proxy_with_gemini_reply(
       },
       zen: ZenConfig::default(),
       glm: GlmConfig::default(),
+      deepseek: DeepSeekConfig::default(),
       experiential: ExperientialConfig::default(),
       pricing: PricingConfig::default(),
       models: ModelsConfig::default(),

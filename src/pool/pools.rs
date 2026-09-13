@@ -5,6 +5,7 @@ use reqwest::header::HeaderMap;
 
 use super::anthropic::AnthropicPool;
 use super::codex::CodexPool;
+use super::deepseek::DeepSeekPool;
 use super::experiential::ExperientialPool;
 use super::gemini::{Call, GeminiPool};
 use super::glm::GlmPool;
@@ -17,6 +18,7 @@ use crate::codex::sse::EventStream;
 use crate::codex::types::ResponsesRequest;
 use crate::config::Config;
 use crate::db::Db;
+use crate::deepseek::client::DeepSeekClient;
 use crate::experiential::client::ExperientialClient;
 use crate::gemini::client::{GeminiClient, GeminiProtocol};
 use crate::glm::client::GlmClient;
@@ -65,6 +67,7 @@ pub struct Pools {
    pub gemini: GeminiPool,
    pub zen: ZenPool,
    pub glm: GlmPool,
+   pub deepseek: DeepSeekPool,
    pub experiential: ExperientialPool,
 }
 
@@ -76,6 +79,8 @@ impl Pools {
       let gemini = GeminiPool::load(db.clone(), GeminiClient::new(cfg.gemini.clone())).await?;
       let zen = ZenPool::load(db.clone(), ZenClient::new(cfg.zen.clone())?).await?;
       let glm = GlmPool::load(db.clone(), GlmClient::new(cfg.glm.clone())).await?;
+      let deepseek =
+         DeepSeekPool::load(db.clone(), DeepSeekClient::new(cfg.deepseek.clone())).await?;
       let experiential = ExperientialPool::load(
          db.clone(),
          ExperientialClient::new(cfg.experiential.clone()),
@@ -90,6 +95,7 @@ impl Pools {
       announce("gemini", gemini.len().await, None);
       announce("zen", zen.len().await, None);
       announce("glm", glm.len().await, None);
+      announce("deepseek", deepseek.len().await, None);
       announce("experiential", experiential.len().await, None);
       Ok(Self {
          codex,
@@ -97,17 +103,19 @@ impl Pools {
          gemini,
          zen,
          glm,
+         deepseek,
          experiential,
       })
    }
 
    pub async fn reload(&self) {
-      let (codex, anthropic, gemini, zen, glm, experiential) = tokio::join!(
+      let (codex, anthropic, gemini, zen, glm, deepseek, experiential) = tokio::join!(
          self.codex.reload(),
          self.anthropic.reload(),
          self.gemini.reload(),
          self.zen.reload(),
          self.glm.reload(),
+         self.deepseek.reload(),
          self.experiential.reload()
       );
       for (provider, result) in [
@@ -116,6 +124,7 @@ impl Pools {
          (Provider::Gemini, gemini),
          (Provider::Zen, zen),
          (Provider::Glm, glm),
+         (Provider::DeepSeek, deepseek),
          (Provider::Experiential, experiential),
       ] {
          if let Err(err) = result {
@@ -210,7 +219,7 @@ impl Pools {
                },
             })
          },
-         Provider::Anthropic | Provider::Glm | Provider::Experiential => {
+         Provider::Anthropic | Provider::Glm | Provider::DeepSeek | Provider::Experiential => {
             Err(PoolError::BadRequest {
                provider,
                model: route.model.to_owned(),
@@ -226,6 +235,7 @@ impl Pools {
       out.extend(self.gemini.snapshot().await);
       out.extend(self.zen.snapshot().await);
       out.extend(self.glm.snapshot().await);
+      out.extend(self.deepseek.snapshot().await);
       out.extend(self.experiential.snapshot().await);
       out
    }

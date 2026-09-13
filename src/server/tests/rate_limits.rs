@@ -43,6 +43,7 @@ async fn spawn_proxy_with_codex_status(status: StatusCode) -> (String, Db) {
       gemini: GeminiConfig::default(),
       zen: ZenConfig::default(),
       glm: GlmConfig::default(),
+      deepseek: DeepSeekConfig::default(),
       experiential: ExperientialConfig::default(),
       pricing: PricingConfig::default(),
       models: ModelsConfig {

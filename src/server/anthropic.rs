@@ -39,7 +39,7 @@ pub async fn messages(
    match provider {
       // Z.ai speaks this dialect, so the body it needs is the one that
       // arrived and the reply needs no translating back.
-      Provider::Anthropic | Provider::Glm | Provider::Experiential => {
+      Provider::Anthropic | Provider::Glm | Provider::DeepSeek | Provider::Experiential => {
          return super::relay::messages(state, auth, headers, body, peek, provider).await;
       },
       Provider::Zen if state.cfg.models.zen_speaks_messages(&peek.upstream_model) => {
@@ -156,6 +156,7 @@ pub async fn count_tokens(
       Provider::Gemini
       | Provider::Zen
       | Provider::Glm
+      | Provider::DeepSeek
       | Provider::OpenAi
       | Provider::Experiential => {},
    }

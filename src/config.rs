@@ -21,6 +21,7 @@ pub struct Config {
    pub gemini: GeminiConfig,
    pub zen: ZenConfig,
    pub glm: GlmConfig,
+   pub deepseek: DeepSeekConfig,
    pub experiential: ExperientialConfig,
    pub pricing: PricingConfig,
    pub models: ModelsConfig,
@@ -88,6 +89,22 @@ impl Default for GlmConfig {
    fn default() -> Self {
       Self {
          base_url: "https://api.z.ai/api/anthropic".into(),
+      }
+   }
+}
+
+/// The site root, not the messages surface. `DeepSeek` serves its catalog from
+/// the root and its Anthropic dialect from `/anthropic` under it.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(default)]
+pub struct DeepSeekConfig {
+   pub base_url: String,
+}
+
+impl Default for DeepSeekConfig {
+   fn default() -> Self {
+      Self {
+         base_url: "https://api.deepseek.com".into(),
       }
    }
 }
@@ -218,6 +235,8 @@ pub struct ModelsConfig {
    pub zen_messages_patterns: Vec<String>,
    /// Model patterns served by Z.ai's anthropic-compatible endpoint.
    pub glm_patterns: Vec<String>,
+   /// Model patterns served by `DeepSeek`'s anthropic-compatible endpoint.
+   pub deepseek_patterns: Vec<String>,
    /// Model patterns relayed verbatim to the Experiential gateway over
    /// /v1/messages only. Empty by default, set to opt in.
    pub experiential_patterns: Vec<String>,
@@ -235,6 +254,7 @@ impl Default for ModelsConfig {
          zen_patterns: Vec::new(),
          zen_messages_patterns: Vec::new(),
          glm_patterns: vec!["glm-*".into()],
+         deepseek_patterns: vec!["deepseek-*".into()],
          experiential_patterns: Vec::new(),
       }
    }
@@ -265,13 +285,14 @@ impl ModelsConfig {
       best.map(|(_, provider)| provider)
    }
 
-   const fn sets(&self) -> [(Provider, &Vec<String>); 6] {
+   const fn sets(&self) -> [(Provider, &Vec<String>); 7] {
       [
          (Provider::Anthropic, &self.anthropic_patterns),
          (Provider::Gemini, &self.gemini_patterns),
          (Provider::Zen, &self.zen_patterns),
          (Provider::Zen, &self.zen_messages_patterns),
          (Provider::Glm, &self.glm_patterns),
+         (Provider::DeepSeek, &self.deepseek_patterns),
          (Provider::Experiential, &self.experiential_patterns),
       ]
    }
@@ -342,6 +363,7 @@ struct FileConfig {
    gemini: Option<GeminiConfig>,
    zen: Option<ZenConfig>,
    glm: Option<GlmConfig>,
+   deepseek: Option<DeepSeekConfig>,
    experiential: Option<ExperientialConfig>,
    pricing: Option<PricingConfig>,
    models: Option<ModelsConfig>,
@@ -385,6 +407,7 @@ impl Config {
          gemini: file.gemini.unwrap_or_default(),
          zen: file.zen.unwrap_or_default(),
          glm: file.glm.unwrap_or_default(),
+         deepseek: file.deepseek.unwrap_or_default(),
          experiential: file.experiential.unwrap_or_default(),
          pricing: file.pricing.unwrap_or_default(),
          models: file.models.unwrap_or_default(),
@@ -404,6 +427,7 @@ impl Config {
          gemini: GeminiConfig::default(),
          zen: ZenConfig::default(),
          glm: GlmConfig::default(),
+         deepseek: DeepSeekConfig::default(),
          experiential: ExperientialConfig::default(),
          pricing: PricingConfig::default(),
          models: ModelsConfig::default(),

@@ -6,6 +6,7 @@ use std::time::Duration;
 use axum::body::Bytes;
 use reqwest::header::CONTENT_TYPE;
 
+use crate::anthropic::Model;
 use crate::config::GlmConfig;
 use crate::upstream::{Classify, SendError, classify};
 
@@ -22,6 +23,35 @@ impl GlmClient {
          .build()
          .expect("building http client");
       Self { http, cfg }
+   }
+
+   pub async fn models(&self, key: &str) -> Result<Vec<Model>, SendError> {
+      #[derive(serde::Deserialize)]
+      struct Listing {
+         data: Vec<Model>,
+      }
+      let resp = self
+         .http
+         .get(format!(
+            "{}/v1/models",
+            self.cfg.base_url.trim_end_matches('/')
+         ))
+         .header("x-api-key", key)
+         .header("anthropic-version", "2023-06-01")
+         .send()
+         .await
+         .map_err(|err| SendError::Network(err.to_string()))?;
+      let status = resp.status().as_u16();
+      let body = resp.text().await.map_err(|err| SendError::Upstream {
+         status,
+         body: format!("reading models response: {err}"),
+      })?;
+      serde_json::from_str::<Listing>(&body)
+         .map(|listing| listing.data)
+         .map_err(|err| SendError::Upstream {
+            status,
+            body: format!("parsing models response: {err}"),
+         })
    }
 
    pub async fn post(

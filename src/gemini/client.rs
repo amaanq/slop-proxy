@@ -4,6 +4,7 @@ use axum::body::Bytes;
 use axum::http::Response;
 use reqwest::header::CONTENT_TYPE;
 
+use crate::translate::bridge::BridgeProtocol;
 use crate::translate::chat::ChatRequest;
 
 use crate::config::GeminiConfig;
@@ -47,15 +48,9 @@ pub struct GeminiClient {
    cfg: GeminiConfig,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GeminiProtocol {
-   OpenAi,
-   Native,
-}
-
 pub struct GeminiResponse {
    pub response: reqwest::Response,
-   pub protocol: GeminiProtocol,
+   pub protocol: BridgeProtocol,
 }
 
 impl GeminiClient {
@@ -108,9 +103,9 @@ impl GeminiClient {
          .map(|_| native::request(body).map_err(|err| SendError::BadRequest(err.to_string())))
          .transpose()?;
       let protocol = if translated.is_some() {
-         GeminiProtocol::Native
+         BridgeProtocol::GeminiNative
       } else {
-         GeminiProtocol::OpenAi
+         BridgeProtocol::Chat
       };
 
       let translated = translated.as_ref();
@@ -324,7 +319,7 @@ mod tests {
          )
          .await
          .unwrap();
-      assert_eq!(response.protocol, GeminiProtocol::Native);
+      assert_eq!(response.protocol, BridgeProtocol::GeminiNative);
 
       let (headers, uri) = seen.lock().unwrap().take().unwrap();
       assert_eq!(headers["x-goog-api-key"], "test-key");

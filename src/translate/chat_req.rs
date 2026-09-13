@@ -155,7 +155,7 @@ pub fn to_chat(req: &ResponsesRequest) -> ChatRequest {
          .reasoning
          .as_ref()
          .filter(|reasoning| !reasoning.effort.is_empty())
-         .map(|reasoning| gemini_effort(&reasoning.effort).to_owned()),
+         .map(|reasoning| clamped_effort(&reasoning.effort).to_owned()),
       tools: (!tools.is_empty()).then_some(tools),
       tool_choice: req.tool_choice.as_ref().map(|choice| match *choice {
          ToolChoice::Mode(ref mode) => ChatToolChoice::Mode(mode.clone()),
@@ -165,9 +165,9 @@ pub fn to_chat(req: &ResponsesRequest) -> ChatRequest {
    }
 }
 
-/// Gemini takes none, low, medium or high and rejects anything else outright,
-/// so codex asking for xhigh would 400 the whole turn.
-pub fn gemini_effort(effort: &str) -> &str {
+/// Gemini and zen both take none, low, medium or high and reject anything
+/// else outright, so codex asking for xhigh would kill the whole turn.
+pub fn clamped_effort(effort: &str) -> &str {
    match effort {
       "none" | "minimal" => "none",
       "low" => "low",

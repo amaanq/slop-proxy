@@ -11,6 +11,7 @@ use super::auth::AuthInfo;
 use super::error::{Dialect, translation_error};
 use super::pipeline::{self, apply_snapshot, dispatch_failed, translated};
 use super::{AppState, LogGuard, cache_key, log_rejected};
+use crate::config::ZenDialect;
 use crate::pool::Route;
 use crate::pool::pools::Dispatched;
 use crate::provider::Provider;
@@ -42,7 +43,7 @@ pub async fn messages(
       Provider::Anthropic | Provider::Glm | Provider::DeepSeek | Provider::Experiential => {
          return super::relay::messages(state, auth, headers, body, peek, provider).await;
       },
-      Provider::Zen if state.cfg.models.zen_speaks_messages(&peek.upstream_model) => {
+      Provider::Zen if state.cfg.models.zen_dialect(&peek.upstream_model) == ZenDialect::Messages => {
          return super::relay::messages(state, auth, headers, body, peek, provider).await;
       },
       Provider::Gemini | Provider::Zen | Provider::OpenAi => {},
@@ -87,7 +88,7 @@ pub async fn messages(
       account_id,
       upstream,
       attempts,
-   } = match state.pools.responses(provider, route, &upstream_req).await {
+   } = match state.pools.responses(&state.cfg.models, provider, route, &upstream_req).await {
       Ok(dispatched) => dispatched,
       Err(err) => return dispatch_failed(&state, record, DIALECT, err),
    };

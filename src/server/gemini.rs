@@ -13,7 +13,7 @@ use super::relay::forwarded_response;
 use super::{AppState, LogGuard, log_error};
 use crate::codex::types::Usage;
 use crate::db::usage::UsageRecord;
-use crate::gemini::client::GeminiProtocol;
+use crate::translate::bridge::BridgeProtocol;
 use crate::gemini::native::{NativeStream, chat_usage, response};
 use crate::gemini::sse::Frames;
 use crate::gemini::types::{GenerateContentRequest, GenerateContentResponse};
@@ -24,7 +24,7 @@ use crate::translate::UsageCapture;
 use crate::translate::chat::{
    ChatChunk, ChatEnvelope, ChatError, ChatErrorBody, ChatRequest, ErrorCode, StreamOptions,
 };
-use crate::translate::gemini_req;
+use crate::translate::chat_req;
 use crate::translate::model_map::resolve;
 
 const DIALECT: Dialect = Dialect::OpenAi;
@@ -42,7 +42,7 @@ pub async fn chat_completions(
    let started = Instant::now();
    let streaming = body.stream.unwrap_or(false);
    if let Some(effort) = body.reasoning_effort.as_ref() {
-      body.reasoning_effort = Some(gemini_req::gemini_effort(effort).to_owned());
+      body.reasoning_effort = Some(chat_req::clamped_effort(effort).to_owned());
    }
    // Without this the terminal chunk carries no usage and the request bills
    // as zero tokens.
@@ -94,7 +94,7 @@ pub async fn chat_completions(
    if !ok {
       return upstream_rejected(&state, record, builder, resp, started).await;
    }
-   if streaming && protocol == GeminiProtocol::Native {
+   if streaming && protocol == BridgeProtocol::GeminiNative {
       let capture = UsageCapture::default();
       let mut native = NativeStream::new(&model);
       let mut scan = ChatUsageScan::new(capture.clone());
@@ -114,7 +114,7 @@ pub async fn chat_completions(
          Bytes::new,
       );
    }
-   if streaming && protocol == GeminiProtocol::OpenAi {
+   if streaming && protocol == BridgeProtocol::Chat {
       let capture = UsageCapture::default();
       let scan = Arc::new(Mutex::new(ChatUsageScan::new(capture.clone())));
       let each = {
@@ -158,7 +158,7 @@ pub async fn chat_completions(
       Ok(bytes) => bytes,
       Err(resp) => return resp,
    };
-   let bytes = if protocol == GeminiProtocol::Native {
+   let bytes = if protocol == BridgeProtocol::GeminiNative {
       match response(&bytes, &model)
          .map_err(|err| err.to_string())
          .and_then(|env| serde_json::to_vec(&env).map_err(|err| err.to_string()))

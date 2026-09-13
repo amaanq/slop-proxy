@@ -9,34 +9,35 @@ use super::deepseek::DeepSeekPool;
 use super::experiential::ExperientialPool;
 use super::gemini::{Call, GeminiPool};
 use super::glm::GlmPool;
-use super::zen::{Relay as ZenRelay, ZenPool, satisfy_tool_gate};
+use super::zen::{Relay as ZenRelay, ZenPool, satisfy_chat_tool_gate, satisfy_tool_gate};
 use super::{AccountSnapshot, Backend, PoolError, Route, Served};
 use crate::anthropic::client::AnthropicClient;
 use crate::codex::client::CodexClient;
 use crate::codex::sse;
 use crate::codex::sse::EventStream;
 use crate::codex::types::ResponsesRequest;
-use crate::config::Config;
+use crate::config::{Config, ModelsConfig, ZenDialect};
 use crate::db::Db;
 use crate::deepseek::client::DeepSeekClient;
 use crate::experiential::client::ExperientialClient;
-use crate::gemini::client::{GeminiClient, GeminiProtocol};
+use crate::gemini::client::GeminiClient;
 use crate::glm::client::GlmClient;
 use crate::provider::Provider;
 use crate::translate::UsageCapture;
-use crate::translate::gemini_bridge;
-use crate::translate::gemini_req::{custom_tools, to_chat};
+use crate::translate::bridge;
+use crate::translate::bridge::BridgeProtocol;
+use crate::translate::chat_req::{custom_tools, to_chat};
 use crate::zen::client::{ZenClient, egress_of};
 
 /// A backend's reply to a Responses request, before anything reads it.
 pub enum Upstream {
    /// Responses SSE from codex or zen, relayable byte for byte.
    Responses(reqwest::Response),
-   /// Gemini reached through the chat bridge, so the frames are chat
-   /// completions or Google's own and need bridging back.
+   /// Gemini or a chat-only zen model, so the frames are chat completions
+   /// or Google's own and need bridging back.
    Bridged {
       response: reqwest::Response,
-      protocol: GeminiProtocol,
+      protocol: BridgeProtocol,
       custom: BTreeSet<String>,
    },
 }
@@ -55,7 +56,12 @@ impl Upstream {
             response,
             protocol,
             custom,
-         } => gemini_bridge::event_stream(response, protocol, model, custom, capture),
+         } => {
+            if let Some(index) = egress_of(&response) {
+               capture.note_egress(index);
+            }
+            bridge::event_stream(response, protocol, model, custom, capture)
+         },
       }
    }
 }
@@ -144,9 +150,10 @@ impl Pools {
    }
 
    /// One Responses request to whichever backend serves the model. Codex and
-   /// zen take the body as sent, gemini takes it through the chat bridge.
+   /// zen's responses models take the body as sent, the rest are bridged.
    pub async fn responses(
       &self,
+      models: &ModelsConfig,
       provider: Provider,
       route: Route<'_>,
       req: &ResponsesRequest,
@@ -155,7 +162,7 @@ impl Pools {
          .map(Bytes::from)
          .map_err(|err| PoolError::Upstream(format!("serializing request: {err}")))?;
       self
-         .responses_raw(provider, route, body, Some(req), &HeaderMap::new())
+         .responses_raw(models, provider, route, body, Some(req), &HeaderMap::new())
          .await
    }
 
@@ -165,6 +172,7 @@ impl Pools {
    /// the bridge needs, absent when the body did not type.
    pub async fn responses_raw(
       &self,
+      models: &ModelsConfig,
       provider: Provider,
       route: Route<'_>,
       body: Bytes,
@@ -176,8 +184,45 @@ impl Pools {
          upstream: Upstream::Responses(served.response),
          attempts: served.attempts,
       };
+      let unbridgeable = |backend: &str| PoolError::BadRequest {
+         provider,
+         model: route.model.to_owned(),
+         body: format!(
+            "this request cannot be bridged to {backend}; see the proxy log for the field that failed"
+         ),
+      };
       match provider {
          Provider::OpenAi => self.codex.post(route, body, headers.clone()).await.map(raw),
+         Provider::Zen if models.zen_dialect(route.model) == ZenDialect::Chat => {
+            let Some(req) = typed else {
+               return Err(unbridgeable("zen"));
+            };
+            let custom = custom_tools(req);
+            let mut chat = to_chat(req);
+            satisfy_chat_tool_gate(&mut chat);
+            let bridged = serde_json::to_vec(&chat)
+               .map(Bytes::from)
+               .map_err(|err| PoolError::Upstream(format!("serializing request: {err}")))?;
+            let served = self
+               .zen
+               .execute(
+                  route,
+                  ZenRelay {
+                     path: "/chat/completions",
+                     body: bridged,
+                  },
+               )
+               .await?;
+            Ok(Dispatched {
+               account_id: served.account_id,
+               attempts: served.attempts,
+               upstream: Upstream::Bridged {
+                  response: served.response,
+                  protocol: BridgeProtocol::Chat,
+                  custom,
+               },
+            })
+         },
          Provider::Zen => self
             .zen
             .execute(
@@ -191,11 +236,7 @@ impl Pools {
             .map(raw),
          Provider::Gemini => {
             let Some(req) = typed else {
-               return Err(PoolError::BadRequest {
-                        provider,
-                        model: route.model.to_owned(),
-                        body: "this request cannot be bridged to gemini; see the proxy log for the field that failed".into(),
-                    });
+               return Err(unbridgeable("gemini"));
             };
             let custom = custom_tools(req);
             let chat = to_chat(req);

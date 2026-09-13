@@ -1,9 +1,9 @@
 pub mod anthropic_req;
 pub mod anthropic_stream;
+pub mod bridge;
 pub mod chat;
+pub mod chat_req;
 pub mod count_tokens;
-pub mod gemini_bridge;
-pub mod gemini_req;
 pub mod model_map;
 pub mod openai_req;
 pub mod openai_stream;

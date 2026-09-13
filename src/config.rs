@@ -253,6 +253,9 @@ pub struct ModelsConfig {
    /// Zen models answered on its messages endpoint instead of its responses
    /// one. Also routes to zen, so a name belongs in one list or the other.
    pub zen_messages_patterns: Vec<String>,
+   /// Zen models answered on its chat completions endpoint, which are
+   /// bridged both ways rather than relayed.
+   pub zen_chat_patterns: Vec<String>,
    /// Model patterns served by Z.ai's anthropic-compatible endpoint.
    pub glm_patterns: Vec<String>,
    /// Model patterns served by `DeepSeek`'s anthropic-compatible endpoint.
@@ -273,11 +276,19 @@ impl Default for ModelsConfig {
          gemini_patterns: vec!["gemini-*".into()],
          zen_patterns: Vec::new(),
          zen_messages_patterns: Vec::new(),
+         zen_chat_patterns: Vec::new(),
          glm_patterns: vec!["glm-*".into()],
          deepseek_patterns: vec!["deepseek-*".into()],
          experiential_patterns: Vec::new(),
       }
    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZenDialect {
+   Responses,
+   Messages,
+   Chat,
 }
 
 impl ModelsConfig {
@@ -305,31 +316,40 @@ impl ModelsConfig {
       best.map(|(_, provider)| provider)
    }
 
-   const fn sets(&self) -> [(Provider, &Vec<String>); 7] {
+   const fn sets(&self) -> [(Provider, &Vec<String>); 8] {
       [
          (Provider::Anthropic, &self.anthropic_patterns),
          (Provider::Gemini, &self.gemini_patterns),
          (Provider::Zen, &self.zen_patterns),
          (Provider::Zen, &self.zen_messages_patterns),
+         (Provider::Zen, &self.zen_chat_patterns),
          (Provider::Glm, &self.glm_patterns),
          (Provider::DeepSeek, &self.deepseek_patterns),
          (Provider::Experiential, &self.experiential_patterns),
       ]
    }
 
-   /// Zen answers each model in exactly one dialect. `union-alpha` and the
-   /// other chat-native ones 500 on `/responses` and take `/messages`.
-   pub fn zen_speaks_messages(&self, model: &str) -> bool {
+   /// Zen answers each model on exactly one endpoint and 500s on the other
+   /// two. `union-alpha` takes `/messages`, the mimo family takes
+   /// `/chat/completions`.
+   pub fn zen_dialect(&self, model: &str) -> ZenDialect {
       let best = |patterns: &Vec<String>| {
          patterns
             .iter()
             .filter_map(|pattern| pattern_specificity(pattern, model))
             .max()
       };
-      match (best(&self.zen_messages_patterns), best(&self.zen_patterns)) {
-         (Some(messages), Some(responses)) => messages > responses,
-         (messages, _) => messages.is_some(),
-      }
+      // Listed least specific first so `max_by_key`, which keeps the last of
+      // a tie, leaves a name in two lists on the responses endpoint.
+      [
+         (ZenDialect::Chat, best(&self.zen_chat_patterns)),
+         (ZenDialect::Messages, best(&self.zen_messages_patterns)),
+         (ZenDialect::Responses, best(&self.zen_patterns)),
+      ]
+      .into_iter()
+      .filter_map(|(dialect, score)| Some((dialect, score?)))
+      .max_by_key(|&(_, score)| score)
+      .map_or(ZenDialect::Responses, |(dialect, _)| dialect)
    }
 
    /// The name meant when a backend prefix was dropped, `fable-5-1` for

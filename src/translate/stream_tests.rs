@@ -4,8 +4,8 @@ use futures_util::stream;
 use serde_json::{Value, json};
 
 use super::anthropic_stream::AnthropicStream;
-use super::gemini_bridge::ChatToResponses;
-use super::gemini_req::{custom_tools, to_chat};
+use super::bridge::ChatToResponses;
+use super::chat_req::{custom_tools, to_chat};
 use super::openai_stream::OpenAiStream;
 use super::{Block, StopKind, UsageCapture, aggregate};
 use crate::codex::types::{OutputItem, ResponsesEvent};

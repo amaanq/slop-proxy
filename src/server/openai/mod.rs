@@ -24,6 +24,7 @@ use crate::anthropic::{Catalog, Model};
 use crate::clock::{rfc3339, unix_now};
 use crate::codex::models::with_zen_entries;
 use crate::codex::types::{OutputItem, ResponseObj, ResponsesEvent, ResponsesRequest};
+use crate::config::ZenDialect;
 use crate::db::usage::UsageRecord;
 use crate::pool::pools::{Dispatched, Upstream};
 use crate::pool::{PoolError, Route, UsageWindow, window_seconds};
@@ -130,7 +131,7 @@ pub async fn chat_completions(
          log_rejected(&state, &auth, "chat", &req.model);
          return translation_error(DIALECT, "this model is served over /v1/messages");
       },
-      Provider::Zen if state.cfg.models.zen_speaks_messages(&resolved.model) => {
+      Provider::Zen if state.cfg.models.zen_dialect(&resolved.model) == ZenDialect::Messages => {
          log_rejected(&state, &auth, "chat", &req.model);
          return translation_error(DIALECT, "this model is served over /v1/messages");
       },
@@ -172,7 +173,7 @@ pub async fn chat_completions(
       account_id,
       upstream,
       attempts,
-   } = match state.pools.responses(provider, route, &upstream_req).await {
+   } = match state.pools.responses(&state.cfg.models, provider, route, &upstream_req).await {
       Ok(dispatched) => dispatched,
       Err(err) => return dispatch_failed(&state, record, DIALECT, err),
    };
@@ -273,7 +274,7 @@ async fn messages_catalog(state: &AppState) -> Result<String, serde_json::Error>
          .models()
          .await
          .into_iter()
-         .filter(|id| state.cfg.models.zen_speaks_messages(id))
+         .filter(|id| state.cfg.models.zen_dialect(id) == ZenDialect::Messages)
          .map(&synthetic),
    );
 
@@ -315,7 +316,8 @@ pub async fn models(
          .await
          .into_iter()
          .filter(|id| {
-            state.cfg.models.route(id) == Provider::Zen && !state.cfg.models.zen_speaks_messages(id)
+            state.cfg.models.route(id) == Provider::Zen
+               && state.cfg.models.zen_dialect(id) != ZenDialect::Messages
          })
          .collect();
       return state
@@ -387,7 +389,8 @@ pub async fn models(
    // This catalog is what an openai-dialect client discovers from, so a zen
    // model the responses surface refuses must not appear in it.
    data.extend(state.pools.zen.models().await.into_iter().filter_map(|id| {
-      (state.cfg.models.route(&id) == Provider::Zen && !state.cfg.models.zen_speaks_messages(&id))
+      (state.cfg.models.route(&id) == Provider::Zen
+         && state.cfg.models.zen_dialect(&id) != ZenDialect::Messages)
          .then_some(ModelEntry {
             id,
             object: "model",
@@ -867,7 +870,7 @@ fn prepare_request(
    let provider = state.cfg.models.route(&resolved.model);
    let responses_native = match provider {
       Provider::OpenAi | Provider::Gemini => true,
-      Provider::Zen => !state.cfg.models.zen_speaks_messages(&resolved.model),
+      Provider::Zen => state.cfg.models.zen_dialect(&resolved.model) != ZenDialect::Messages,
       Provider::Anthropic | Provider::Glm | Provider::DeepSeek | Provider::Experiential => false,
    };
    if !responses_native {
@@ -1013,7 +1016,7 @@ pub async fn responses_passthrough(
       attempts,
    } = match state
       .pools
-      .responses_raw(provider, route, encoded, typed.as_ref(), &headers)
+      .responses_raw(&state.cfg.models, provider, route, encoded, typed.as_ref(), &headers)
       .await
    {
       Ok(dispatched) => dispatched,

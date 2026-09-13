@@ -606,7 +606,7 @@ async fn spawn_proxy_with_gemini_reply(
 }
 
 #[tokio::test]
-async fn a_rejected_gemini_request_keeps_googles_reason() {
+async fn a_rejected_chat_request_keeps_googles_reason() {
    let (base, db) = spawn_proxy_with_gemini().await;
    let resp = reqwest::Client::new()
       .post(format!(

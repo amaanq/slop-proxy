@@ -7,7 +7,8 @@ use rand::{Rng as _, thread_rng};
 use super::{AuthPolicy, Backend, Cooldown, Pool, Route, Slot};
 use crate::clock::unix_now_ms;
 use crate::provider::Provider;
-use crate::translate::chat::ChatError;
+use crate::translate::anthropic_req::empty_schema;
+use crate::translate::chat::{ChatError, ChatRequest, ChatToolDef, FunctionDef};
 use crate::upstream::SendError;
 use crate::zen::client::ZenClient;
 
@@ -27,6 +28,20 @@ const GATE_READER: &str = "read";
 const GATE_EDITORS: [&str; 2] = ["edit", "write"];
 const DECOY_HINT: &str = "Deprecated placeholder. Never call this tool.";
 
+fn missing_gate_tools(declared: &[&str]) -> Vec<&'static str> {
+   let mut missing = Vec::new();
+   if !declared.contains(&GATE_SHELL) {
+      missing.push(GATE_SHELL);
+   }
+   if !declared.contains(&GATE_READER) {
+      missing.push(GATE_READER);
+   }
+   if !GATE_EDITORS.iter().any(|name| declared.contains(name)) {
+      missing.push(GATE_EDITORS[0]);
+   }
+   missing
+}
+
 /// `None` when the caller already satisfies the gate, so the usual request
 /// reaches zen byte for byte.
 pub fn satisfy_tool_gate(body: &Bytes) -> Option<Bytes> {
@@ -40,16 +55,7 @@ pub fn satisfy_tool_gate(body: &Bytes) -> Option<Bytes> {
       .iter()
       .filter_map(|tool| tool.get("name")?.as_str())
       .collect();
-   let mut missing = Vec::new();
-   if !declared.contains(&GATE_SHELL) {
-      missing.push(GATE_SHELL);
-   }
-   if !declared.contains(&GATE_READER) {
-      missing.push(GATE_READER);
-   }
-   if !GATE_EDITORS.iter().any(|name| declared.contains(name)) {
-      missing.push(GATE_EDITORS[0]);
-   }
+   let missing = missing_gate_tools(&declared);
    if missing.is_empty() {
       return None;
    }
@@ -69,6 +75,33 @@ pub fn satisfy_tool_gate(body: &Bytes) -> Option<Bytes> {
       "padded zen tools past the free-tier gate"
    );
    serde_json::to_vec(&req).ok().map(Bytes::from)
+}
+
+/// The same gate on the chat wire, where a tool's name sits under `function`
+/// rather than at the top level.
+pub fn satisfy_chat_tool_gate(req: &mut ChatRequest) {
+   let tools = req.tools.get_or_insert_with(Vec::new);
+   let declared: Vec<&str> = tools
+      .iter()
+      .filter_map(|tool| tool.def().name.as_deref())
+      .collect();
+   let missing = missing_gate_tools(&declared);
+   if missing.is_empty() {
+      return;
+   }
+
+   tools.extend(missing.iter().map(|name| {
+      ChatToolDef::function(FunctionDef {
+         name: Some((*name).to_owned()),
+         description: Some(DECOY_HINT.to_owned()),
+         parameters: Some(empty_schema()),
+         strict: None,
+      })
+   }));
+   tracing::debug!(
+      added = missing.len(),
+      "padded zen chat tools past the free-tier gate"
+   );
 }
 
 impl Backend for ZenClient {

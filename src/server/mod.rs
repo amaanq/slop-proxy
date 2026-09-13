@@ -240,6 +240,8 @@ impl Drop for LogGuard {
              last_event = cap.last_event.as_deref().unwrap_or("none"),
              upstream_head = cap.upstream_head.as_deref().unwrap_or(""),
              after_ms = self.start.elapsed().as_millis() as i64,
+             idle_ms = cap.last_byte_at.map_or(-1, |last| last.elapsed().as_millis() as i64),
+             egress = cap.egress.map_or(-1, |index| index as i64),
              "stream ended without usage"
          );
       }

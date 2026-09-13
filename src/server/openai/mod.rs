@@ -32,6 +32,7 @@ use crate::translate::chat::ChatRequest;
 use crate::translate::openai_req;
 use crate::translate::openai_stream::{OpenAiStream, render_aggregated};
 use crate::translate::{StopKind, UsageCapture, aggregate, model_map, usable_cap};
+use crate::zen::client::egress_of;
 
 pub mod websocket;
 
@@ -1032,7 +1033,12 @@ pub async fn responses_passthrough(
    record.attempts = i64::from(attempts);
    let capture = UsageCapture::default();
    let resp = match upstream {
-      Upstream::Responses(resp) => resp,
+      Upstream::Responses(resp) => {
+         if let Some(index) = egress_of(&resp) {
+            capture.note_egress(index);
+         }
+         resp
+      },
       bridged @ Upstream::Bridged { .. } => {
          let model = record.upstream_model.clone();
          return bridged_responses(state, record, bridged, model, client_streams, started).await;

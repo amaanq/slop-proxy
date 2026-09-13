@@ -1,6 +1,6 @@
-//! `OpenCode` Zen speaks the `Responses` API, so nothing here translates. The
-//! request goes up as the caller wrote it and comes back as frames the codex
-//! parser already understands.
+//! `OpenCode` Zen speaks both the `Responses` and the messages API, one
+//! dialect per model, so nothing here translates. The request goes up as the
+//! caller wrote it and comes back as frames that caller already understands.
 
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -75,6 +75,7 @@ impl ZenClient {
       &self,
       key: Option<&str>,
       session: &str,
+      path: &str,
       req: &Bytes,
    ) -> Result<reqwest::Response, SendError> {
       let anonymous = key.is_none_or(str::is_empty);
@@ -84,7 +85,7 @@ impl ZenClient {
       let mut tried = 0;
       for index in available.iter().copied().take(EGRESS_ATTEMPTS) {
          tried += 1;
-         match self.send_via(index, key, session, req).await {
+         match self.send_via(index, key, session, path, req).await {
             Ok(response) => {
                if tried > 1 {
                   tracing::info!(
@@ -130,11 +131,12 @@ impl ZenClient {
       index: usize,
       key: Option<&str>,
       session: &str,
+      path: &str,
       req: &Bytes,
    ) -> Result<reqwest::Response, SendError> {
       let mut builder = self.egresses[index]
          .http
-         .post(format!("{}/responses", self.base_url.trim_end_matches('/')))
+         .post(format!("{}{path}", self.base_url.trim_end_matches('/')))
          .header("Accept", "text/event-stream")
          .header("x-opencode-session", session);
       if let Some(key) = key.filter(|key| !key.is_empty()) {
@@ -372,6 +374,7 @@ mod tests {
          .post(
             None,
             "sess-test",
+            "/responses",
             &Bytes::from_static(br#"{"model":"muse-test"}"#),
          )
          .await
@@ -400,6 +403,7 @@ mod tests {
          .post(
             None,
             "sess-test",
+            "/responses",
             &Bytes::from_static(br#"{"model":"muse-test"}"#),
          )
          .await
@@ -408,6 +412,7 @@ mod tests {
          .post(
             None,
             "sess-test",
+            "/responses",
             &Bytes::from_static(br#"{"model":"muse-test"}"#),
          )
          .await
@@ -454,7 +459,7 @@ mod tests {
       .unwrap();
 
       let err = client
-         .post(None, "sess-test", &Bytes::from_static(b"{}"))
+         .post(None, "sess-test", "/responses", &Bytes::from_static(b"{}"))
          .await
          .unwrap_err();
       assert!(
@@ -470,7 +475,7 @@ mod tests {
       assert_eq!(seen(&proxies).await, EGRESS_ATTEMPTS);
 
       let exhausted = client
-         .post(None, "sess-test", &Bytes::from_static(b"{}"))
+         .post(None, "sess-test", "/responses", &Bytes::from_static(b"{}"))
          .await
          .unwrap_err();
       assert!(

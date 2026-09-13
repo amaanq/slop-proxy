@@ -169,7 +169,6 @@ impl Pools {
                ZenRelay {
                   path: "/responses",
                   body,
-                  attempt: 0,
                },
             )
             .await

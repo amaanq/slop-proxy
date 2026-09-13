@@ -1,6 +1,10 @@
+use std::sync::LazyLock;
+
 use axum::body::Bytes;
+use rand::{Rng as _, thread_rng};
 
 use super::{AuthPolicy, Backend, Cooldown, Pool, Route, Slot};
+use crate::clock::unix_now_ms;
 use crate::provider::Provider;
 use crate::translate::chat::ChatError;
 use crate::upstream::SendError;
@@ -15,10 +19,6 @@ pub type ZenPool = Pool<ZenClient>;
 pub struct Relay {
    pub path: &'static str,
    pub body: Bytes,
-   /// Zen hashes the session id's last four characters to pick the upstream
-   /// that serves a model, so a retry has to move the tail or it lands on the
-   /// same dead one. Zero keeps the stable id, and its prompt cache with it.
-   pub attempt: usize,
 }
 
 impl Backend for ZenClient {
@@ -43,7 +43,7 @@ impl Backend for ZenClient {
       route: Route<'_>,
       req: &Self::Request,
    ) -> Result<Self::Response, SendError> {
-      let session = session(route, req.attempt);
+      let session = session(route);
       Self::post(self, Some(token), &session, req.path, &req.body).await
    }
 
@@ -52,14 +52,16 @@ impl Backend for ZenClient {
       route: Route<'_>,
       req: &Self::Request,
    ) -> Result<Self::Response, SendError> {
-      let session = session(route, req.attempt);
+      let session = session(route);
       Self::post(self, None, &session, req.path, &req.body).await
    }
 }
 
 const ALPHABET: &[u8; 62] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+const ID_TIME_MASK: i64 = 0xffff_ffff_ffff;
+static SESSION_PREFIX: LazyLock<String> = LazyLock::new(session_prefix);
 
-fn session(route: Route<'_>, attempt: usize) -> String {
+fn session(route: Route<'_>) -> String {
    let mut hasher = hmac_sha256::Hash::new();
    if route.session_key.is_empty() {
       hasher.update(route.user.as_bytes());
@@ -68,17 +70,19 @@ fn session(route: Route<'_>, attempt: usize) -> String {
    } else {
       hasher.update(route.session_key.as_bytes());
    }
-   if attempt > 0 {
-      hasher.update(b"\0retry\0");
-      hasher.update(attempt.to_le_bytes());
-   }
    let digest = hasher.finalize();
-   let body = digest
+   let suffix = digest
       .iter()
-      .take(26)
+      .take(14)
       .map(|byte| char::from(ALPHABET[usize::from(*byte) % ALPHABET.len()]))
       .collect::<String>();
-   format!("ses_{body}")
+   format!("ses_{}{suffix}", SESSION_PREFIX.as_str())
+}
+
+fn session_prefix() -> String {
+   let counter = thread_rng().gen_range(1..=0xfff_i64);
+   let timestamp = !(unix_now_ms().saturating_mul(0x1000) + counter) & ID_TIME_MASK;
+   format!("{timestamp:012x}")
 }
 
 impl Pool<ZenClient> {

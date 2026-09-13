@@ -7,6 +7,7 @@ use reqwest::header::CONTENT_TYPE;
 use crate::translate::chat::ChatRequest;
 
 use crate::config::GeminiConfig;
+use crate::egress::Egresses;
 use crate::gemini::native;
 use crate::gemini::types::{ListedModel, ModelList};
 use crate::upstream::{Classify, SendError, classify};
@@ -42,7 +43,7 @@ async fn cool_a_dead_key(resp: reqwest::Response) -> Result<reqwest::Response, S
 }
 
 pub struct GeminiClient {
-   http: reqwest::Client,
+   egresses: Egresses,
    cfg: GeminiConfig,
 }
 
@@ -58,13 +59,25 @@ pub struct GeminiResponse {
 }
 
 impl GeminiClient {
-   pub fn new(cfg: GeminiConfig) -> Self {
-      let http = reqwest::Client::builder()
-         .connect_timeout(Duration::from_secs(30))
-         .tcp_keepalive(Duration::from_secs(30))
-         .build()
-         .expect("building http client");
-      Self { http, cfg }
+   pub fn new(cfg: GeminiConfig) -> eyre::Result<Self> {
+      let egresses = Egresses::new(&cfg.egress.urls()?, "gemini", None)?;
+      Ok(Self { egresses, cfg })
+   }
+
+   /// Config headers ride every call, minus a `Referer` an account already
+   /// supplied for itself.
+   fn with_headers(
+      &self,
+      mut req: reqwest::RequestBuilder,
+      has_referer: bool,
+   ) -> reqwest::RequestBuilder {
+      for (name, value) in &self.cfg.headers {
+         if name.eq_ignore_ascii_case("referer") && has_referer {
+            continue;
+         }
+         req = req.header(name, value);
+      }
+      req
    }
 
    pub const fn soft_utilization_limit(&self) -> f64 {
@@ -89,50 +102,51 @@ impl GeminiClient {
             .then_some(value.as_str())
       });
       let referer = account_referer.or(configured_referer);
-      let (mut req, protocol) = if let Some(referer) = referer {
-         let translated =
-            native::request(body).map_err(|err| SendError::BadRequest(err.to_string()))?;
-         let base = self.cfg.base_url.trim_end_matches('/');
-         let base = base.strip_suffix("/openai").unwrap_or(base);
-         let action = if translated.streaming {
-            "streamGenerateContent?alt=sse"
-         } else {
-            "generateContent"
-         };
-         let url = format!("{base}/models/{}:{action}", translated.model);
-         (
-            self
-               .http
-               .post(url)
-               .header("x-goog-api-key", api_key)
-               .header("referer", referer)
-               .json(&translated.body),
-            GeminiProtocol::Native,
-         )
+      // Translating once outside the retry keeps a failover from re-running
+      // it, and a bad request has to fail before any egress is burned.
+      let translated = referer
+         .map(|_| native::request(body).map_err(|err| SendError::BadRequest(err.to_string())))
+         .transpose()?;
+      let protocol = if translated.is_some() {
+         GeminiProtocol::Native
       } else {
-         (
-            self
-               .http
-               .post(format!(
-                  "{}/chat/completions",
-                  self.cfg.base_url.trim_end_matches('/')
-               ))
-               .bearer_auth(api_key)
-               .json(body),
-            GeminiProtocol::OpenAi,
-         )
+         GeminiProtocol::OpenAi
       };
-      for (name, value) in &self.cfg.headers {
-         if name.eq_ignore_ascii_case("referer") && referer.is_some() {
-            continue;
-         }
-         req = req.header(name, value);
-      }
 
-      let resp = req
-         .send()
-         .await
-         .map_err(|err| SendError::Network(err.to_string()))?;
+      let translated = translated.as_ref();
+      let resp = self
+         .egresses
+         .send(|http| async move {
+            let req = match (referer, translated) {
+               (Some(referer), Some(translated)) => {
+                  let base = self.cfg.base_url.trim_end_matches('/');
+                  let base = base.strip_suffix("/openai").unwrap_or(base);
+                  let action = if translated.streaming {
+                     "streamGenerateContent?alt=sse"
+                  } else {
+                     "generateContent"
+                  };
+                  http
+                     .post(format!("{base}/models/{}:{action}", translated.model))
+                     .header("x-goog-api-key", api_key)
+                     .header("referer", referer)
+                     .json(&translated.body)
+               },
+               _ => http
+                  .post(format!(
+                     "{}/chat/completions",
+                     self.cfg.base_url.trim_end_matches('/')
+                  ))
+                  .bearer_auth(api_key)
+                  .json(body),
+            };
+            self
+               .with_headers(req, referer.is_some())
+               .send()
+               .await
+               .map_err(|err| SendError::Network(err.to_string()))
+         })
+         .await?;
       let response = cool_a_dead_key(classify(resp, RULES).await?).await?;
       Ok(GeminiResponse { response, protocol })
    }
@@ -151,12 +165,7 @@ impl GeminiClient {
       let base = self.cfg.base_url.trim_end_matches('/');
       let base = base.strip_suffix("/openai").unwrap_or(base);
       let query = forwarded_query(query);
-      let mut req = self
-         .http
-         .post(format!("{base}/models/{model}:{action}{query}"))
-         .header("x-goog-api-key", api_key)
-         .header(CONTENT_TYPE, "application/json")
-         .body(body.clone());
+      let query = query.as_str();
       let referer = account_referer.or_else(|| {
          self.cfg.headers.iter().find_map(|(name, value)| {
             name
@@ -164,20 +173,24 @@ impl GeminiClient {
                .then_some(value.as_str())
          })
       });
-      if let Some(referer) = referer {
-         req = req.header("referer", referer);
-      }
-      for (name, value) in &self.cfg.headers {
-         if name.eq_ignore_ascii_case("referer") && referer.is_some() {
-            continue;
-         }
-         req = req.header(name, value);
-      }
-
-      let resp = req
-         .send()
-         .await
-         .map_err(|err| SendError::Network(err.to_string()))?;
+      let resp = self
+         .egresses
+         .send(|http| async move {
+            let mut req = http
+               .post(format!("{base}/models/{model}:{action}{query}"))
+               .header("x-goog-api-key", api_key)
+               .header(CONTENT_TYPE, "application/json")
+               .body(body.clone());
+            if let Some(referer) = referer {
+               req = req.header("referer", referer);
+            }
+            self
+               .with_headers(req, referer.is_some())
+               .send()
+               .await
+               .map_err(|err| SendError::Network(err.to_string()))
+         })
+         .await?;
       cool_a_dead_key(classify(resp, RULES).await?).await
    }
 
@@ -190,23 +203,22 @@ impl GeminiClient {
    ) -> Result<Vec<ListedModel>, SendError> {
       let base = self.cfg.base_url.trim_end_matches('/');
       let base = base.strip_suffix("/openai").unwrap_or(base);
-      let mut req = self
-         .http
-         .get(format!("{base}/models?pageSize=1000"))
-         .header("x-goog-api-key", api_key);
-      if let Some(referer) = account_referer {
-         req = req.header("referer", referer);
-      }
-      for (name, value) in &self.cfg.headers {
-         if name.eq_ignore_ascii_case("referer") && account_referer.is_some() {
-            continue;
-         }
-         req = req.header(name, value);
-      }
-      let resp = req
-         .send()
-         .await
-         .map_err(|err| SendError::Network(err.to_string()))?;
+      let resp = self
+         .egresses
+         .send(|http| async move {
+            let mut req = http
+               .get(format!("{base}/models?pageSize=1000"))
+               .header("x-goog-api-key", api_key);
+            if let Some(referer) = account_referer {
+               req = req.header("referer", referer);
+            }
+            self
+               .with_headers(req, account_referer.is_some())
+               .send()
+               .await
+               .map_err(|err| SendError::Network(err.to_string()))
+         })
+         .await?;
       let resp = classify(resp, Classify::STRICT).await?;
       let status = resp.status().as_u16();
       let body: ModelList = resp.json().await.map_err(|err| SendError::Upstream {
@@ -298,7 +310,8 @@ mod tests {
       let client = GeminiClient::new(GeminiConfig {
          base_url: format!("http://{address}/v1beta/openai"),
          ..GeminiConfig::default()
-      });
+      })
+      .unwrap();
       let response = client
          .post(
             "test-key",
@@ -333,7 +346,8 @@ mod tests {
       let client = GeminiClient::new(GeminiConfig {
          base_url: format!("http://{address}"),
          ..GeminiConfig::default()
-      });
+      })
+      .unwrap();
       assert!(client.models("test-key", None).await.unwrap().is_empty());
    }
 
@@ -362,7 +376,8 @@ mod tests {
       let client = GeminiClient::new(GeminiConfig {
          base_url: format!("http://{address}"),
          ..GeminiConfig::default()
-      });
+      })
+      .unwrap();
       let listed = client.models("test-key", None).await.unwrap();
       assert_eq!(
          listed

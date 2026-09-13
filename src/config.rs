@@ -36,6 +36,8 @@ pub struct GeminiConfig {
    pub headers: BTreeMap<String, String>,
    pub soft_utilization_limit: f64,
    pub retry_budget_secs: u64,
+   #[serde(flatten)]
+   pub egress: EgressConfig,
 }
 
 impl Default for GeminiConfig {
@@ -45,6 +47,7 @@ impl Default for GeminiConfig {
          headers: BTreeMap::new(),
          soft_utilization_limit: 0.9,
          retry_budget_secs: 90,
+         egress: EgressConfig::default(),
       }
    }
 }
@@ -69,13 +72,43 @@ impl Default for PricingConfig {
 #[serde(default)]
 pub struct ExperientialConfig {
    pub base_url: String,
+   #[serde(flatten)]
+   pub egress: EgressConfig,
 }
 
 impl Default for ExperientialConfig {
    fn default() -> Self {
       Self {
          base_url: "https://api.experientiallabs.ai".into(),
+         egress: EgressConfig::default(),
       }
+   }
+}
+
+/// Outbound proxies for one provider. Flattened into each provider's own
+/// table, so the keys sit beside `base_url` rather than under a subtable.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default)]
+pub struct EgressConfig {
+   pub proxy_urls: Vec<String>,
+   pub proxy_urls_file: Option<PathBuf>,
+}
+
+impl EgressConfig {
+   pub fn urls(&self) -> Result<Vec<String>> {
+      let mut urls = self.proxy_urls.clone();
+      if let Some(path) = self.proxy_urls_file.as_ref() {
+         let contents = fs::read_to_string(path)
+            .wrap_err_with(|| format!("reading proxy list {}", path.display()))?;
+         urls.extend(
+            contents
+               .lines()
+               .map(str::trim)
+               .filter(|line| !line.is_empty() && !line.starts_with('#'))
+               .map(str::to_owned),
+         );
+      }
+      Ok(urls)
    }
 }
 
@@ -83,12 +116,15 @@ impl Default for ExperientialConfig {
 #[serde(default)]
 pub struct GlmConfig {
    pub base_url: String,
+   #[serde(flatten)]
+   pub egress: EgressConfig,
 }
 
 impl Default for GlmConfig {
    fn default() -> Self {
       Self {
          base_url: "https://api.z.ai/api/anthropic".into(),
+         egress: EgressConfig::default(),
       }
    }
 }
@@ -99,12 +135,15 @@ impl Default for GlmConfig {
 #[serde(default)]
 pub struct DeepSeekConfig {
    pub base_url: String,
+   #[serde(flatten)]
+   pub egress: EgressConfig,
 }
 
 impl Default for DeepSeekConfig {
    fn default() -> Self {
       Self {
          base_url: "https://api.deepseek.com".into(),
+         egress: EgressConfig::default(),
       }
    }
 }
@@ -114,8 +153,8 @@ impl Default for DeepSeekConfig {
 pub struct ZenConfig {
    pub base_url: String,
    pub user_agent: String,
-   pub proxy_urls: Vec<String>,
-   pub proxy_urls_file: Option<PathBuf>,
+   #[serde(flatten)]
+   pub egress: EgressConfig,
 }
 
 impl Default for ZenConfig {
@@ -123,27 +162,8 @@ impl Default for ZenConfig {
       Self {
          base_url: "https://opencode.ai/zen/v1".into(),
          user_agent: "opencode/1.18.31 ai-sdk/provider-utils/4.0.46 runtime/bun/1.3.13".into(),
-         proxy_urls: Vec::new(),
-         proxy_urls_file: None,
+         egress: EgressConfig::default(),
       }
-   }
-}
-
-impl ZenConfig {
-   pub fn proxy_urls(&self) -> Result<Vec<String>> {
-      let mut urls = self.proxy_urls.clone();
-      if let Some(path) = self.proxy_urls_file.as_ref() {
-         let contents = fs::read_to_string(path)
-            .wrap_err_with(|| format!("reading zen proxy list {}", path.display()))?;
-         urls.extend(
-            contents
-               .lines()
-               .map(str::trim)
-               .filter(|line| !line.is_empty() && !line.starts_with('#'))
-               .map(str::to_owned),
-         );
-      }
-      Ok(urls)
    }
 }
 
@@ -555,14 +575,13 @@ mod zen_tests {
          " http://file-one.example:80\n\n# ignored\nhttp://file-two.example:80\n",
       )
       .unwrap();
-      let config = ZenConfig {
+      let config = EgressConfig {
          proxy_urls: vec!["http://inline.example:80".into()],
          proxy_urls_file: Some(path.clone()),
-         ..ZenConfig::default()
       };
 
       assert_eq!(
-         config.proxy_urls().unwrap(),
+         config.urls().unwrap(),
          [
             "http://inline.example:80",
             "http://file-one.example:80",

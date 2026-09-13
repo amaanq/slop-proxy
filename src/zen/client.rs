@@ -55,7 +55,7 @@ impl Egress {
 
 impl ZenClient {
    pub fn new(cfg: ZenConfig) -> eyre::Result<Self> {
-      let proxy_urls = cfg.proxy_urls()?;
+      let proxy_urls = cfg.egress.urls()?;
       let agent = cfg.user_agent.as_str();
       let egresses = if proxy_urls.is_empty() {
          vec![Egress::new(None, 0, agent)?]
@@ -343,6 +343,7 @@ mod tests {
    use tokio::sync::Mutex;
 
    use super::*;
+   use crate::config::EgressConfig;
 
    type Requests = Arc<Mutex<Vec<(String, Option<String>)>>>;
 
@@ -393,8 +394,10 @@ mod tests {
       let client = ZenClient::new(ZenConfig {
          base_url: "http://zen.invalid/v1".into(),
          user_agent: "opencode/1.18.31".into(),
-         proxy_urls: vec![authenticated(&first_url), authenticated(&second_url)],
-         proxy_urls_file: None,
+         egress: EgressConfig {
+            proxy_urls: vec![authenticated(&first_url), authenticated(&second_url)],
+            proxy_urls_file: None,
+         },
       })
       .unwrap();
 
@@ -424,8 +427,10 @@ mod tests {
       let client = ZenClient::new(ZenConfig {
          base_url: "http://zen.invalid/v1".into(),
          user_agent: "opencode/1.18.31".into(),
-         proxy_urls: vec![authenticated(&limited_url), authenticated(&working_url)],
-         proxy_urls_file: None,
+         egress: EgressConfig {
+            proxy_urls: vec![authenticated(&limited_url), authenticated(&working_url)],
+            proxy_urls_file: None,
+         },
       })
       .unwrap();
 
@@ -455,7 +460,10 @@ mod tests {
    #[test]
    fn invalid_proxy_errors_do_not_expose_credentials() {
       let error = ZenClient::new(ZenConfig {
-         proxy_urls: vec!["http://user:secret@[".into()],
+         egress: EgressConfig {
+            proxy_urls: vec!["http://user:secret@[".into()],
+            proxy_urls_file: None,
+         },
          ..ZenConfig::default()
       })
       .err()
@@ -481,11 +489,13 @@ mod tests {
       let client = ZenClient::new(ZenConfig {
          base_url: "http://zen.invalid/v1".into(),
          user_agent: "opencode/1.18.31".into(),
-         proxy_urls: proxies
-            .iter()
-            .map(|&(ref url, _)| authenticated(url))
-            .collect(),
-         proxy_urls_file: None,
+         egress: EgressConfig {
+            proxy_urls: proxies
+               .iter()
+               .map(|&(ref url, _)| authenticated(url))
+               .collect(),
+            proxy_urls_file: None,
+         },
       })
       .unwrap();
 

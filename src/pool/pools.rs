@@ -76,14 +76,14 @@ impl Pools {
       let codex = CodexPool::load(db.clone(), CodexClient::new(cfg.codex.clone())).await?;
       let anthropic =
          AnthropicPool::load(db.clone(), AnthropicClient::new(cfg.anthropic.clone())).await?;
-      let gemini = GeminiPool::load(db.clone(), GeminiClient::new(cfg.gemini.clone())).await?;
+      let gemini = GeminiPool::load(db.clone(), GeminiClient::new(cfg.gemini.clone())?).await?;
       let zen = ZenPool::load(db.clone(), ZenClient::new(cfg.zen.clone())?).await?;
-      let glm = GlmPool::load(db.clone(), GlmClient::new(cfg.glm.clone())).await?;
+      let glm = GlmPool::load(db.clone(), GlmClient::new(cfg.glm.clone())?).await?;
       let deepseek =
-         DeepSeekPool::load(db.clone(), DeepSeekClient::new(cfg.deepseek.clone())).await?;
+         DeepSeekPool::load(db.clone(), DeepSeekClient::new(cfg.deepseek.clone())?).await?;
       let experiential = ExperientialPool::load(
          db.clone(),
-         ExperientialClient::new(cfg.experiential.clone()),
+         ExperientialClient::new(cfg.experiential.clone())?,
       )
       .await?;
       announce("codex", codex.len().await, Some("slop-proxy login"));

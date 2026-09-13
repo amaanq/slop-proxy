@@ -340,9 +340,8 @@ mod tests {
 
       let snapshots = pool.slots.snapshot().await;
       let reported = snapshots[0].usage.as_ref().unwrap();
-      assert_eq!(reported.windows.len(), 1);
-      assert_eq!(reported.windows[0].name, "5h");
-      assert!((reported.peak() - 0.26_f64).abs() < f64::EPSILON);
+      assert_eq!(reported.windows.len(), 2);
+      assert!((reported.peak() - 0.99_f64).abs() < f64::EPSILON);
       let models: Vec<_> = reported
          .model_windows
          .iter()

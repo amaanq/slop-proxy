@@ -184,10 +184,18 @@ impl Db {
       self
          .call(move |conn| {
             let id = key.parse::<i64>().unwrap_or(-1);
-            Ok(conn.execute(
+            let txn = conn.transaction()?;
+            txn.execute(
+               "UPDATE usage_log SET account_id = NULL WHERE account_id IN
+                  (SELECT id FROM accounts WHERE id = ?1 OR email = ?2 OR label = ?2)",
+               params![id, key],
+            )?;
+            let removed = txn.execute(
                "DELETE FROM accounts WHERE id = ?1 OR email = ?2 OR label = ?2",
                params![id, key],
-            )?)
+            )?;
+            txn.commit()?;
+            Ok(removed)
          })
          .await
    }

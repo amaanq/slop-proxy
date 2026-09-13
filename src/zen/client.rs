@@ -6,9 +6,11 @@ use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use axum::body::Bytes;
+use rand::distributions::Alphanumeric;
+use rand::{Rng as _, thread_rng};
 use reqwest::header::CONTENT_TYPE;
 
-use crate::clock::unix_now;
+use crate::clock::{unix_now, unix_now_ms};
 use crate::config::ZenConfig;
 use crate::upstream::{Classify, SendError, classify};
 
@@ -30,8 +32,9 @@ struct Egress {
 }
 
 impl Egress {
-   fn new(proxy_url: Option<&str>, index: usize) -> eyre::Result<Self> {
+   fn new(proxy_url: Option<&str>, index: usize, user_agent: &str) -> eyre::Result<Self> {
       let mut builder = reqwest::Client::builder()
+         .user_agent(user_agent)
          .connect_timeout(Duration::from_secs(30))
          .tcp_keepalive(Duration::from_secs(30));
       if let Some(proxy_url) = proxy_url {
@@ -53,13 +56,14 @@ impl Egress {
 impl ZenClient {
    pub fn new(cfg: ZenConfig) -> eyre::Result<Self> {
       let proxy_urls = cfg.proxy_urls()?;
+      let agent = cfg.user_agent.as_str();
       let egresses = if proxy_urls.is_empty() {
-         vec![Egress::new(None, 0)?]
+         vec![Egress::new(None, 0, agent)?]
       } else {
          proxy_urls
             .iter()
             .enumerate()
-            .map(|(index, url)| Egress::new(Some(url), index))
+            .map(|(index, url)| Egress::new(Some(url), index, agent))
             .collect::<eyre::Result<Vec<_>>>()?
       };
       Ok(Self {
@@ -82,10 +86,14 @@ impl ZenClient {
       let mut rate_limit_body = None;
       let mut network_error = None;
       let available = self.available_egresses(anonymous)?;
+      let request_id = request_id();
       let mut tried = 0;
       for index in available.iter().copied().take(EGRESS_ATTEMPTS) {
          tried += 1;
-         match self.send_via(index, key, session, path, req).await {
+         match self
+            .send_via(index, key, session, &request_id, path, req)
+            .await
+         {
             Ok(response) => {
                if tried > 1 {
                   tracing::info!(
@@ -131,16 +139,25 @@ impl ZenClient {
       index: usize,
       key: Option<&str>,
       session: &str,
+      request_id: &str,
       path: &str,
       req: &Bytes,
    ) -> Result<reqwest::Response, SendError> {
       let mut builder = self.egresses[index]
          .http
          .post(format!("{}{path}", self.base_url.trim_end_matches('/')))
-         .header("Accept", "text/event-stream")
-         .header("x-opencode-session", session);
+         .header("Accept", "*/*")
+         .header("x-opencode-session", session)
+         .header("x-opencode-request", request_id)
+         .header("x-opencode-client", "cli")
+         .header("x-opencode-project", "global");
       if let Some(key) = key.filter(|key| !key.is_empty()) {
          builder = builder.bearer_auth(key);
+      } else {
+         builder = builder.header("x-api-key", "public");
+      }
+      if path.ends_with("/messages") {
+         builder = builder.header("anthropic-version", "2023-06-01");
       }
       let response = builder
          .header(CONTENT_TYPE, "application/json")
@@ -302,6 +319,17 @@ impl ZenClient {
    }
 }
 
+fn request_id() -> String {
+   let counter = thread_rng().gen_range(1..=0xfff_i64);
+   let timestamp = (unix_now_ms().saturating_mul(0x1000) + counter) & 0xffff_ffff_ffff;
+   let random = thread_rng()
+      .sample_iter(Alphanumeric)
+      .take(14)
+      .map(char::from)
+      .collect::<String>();
+   format!("msg_{timestamp:012x}{random}")
+}
+
 #[cfg(test)]
 mod tests {
    use std::sync::Arc;
@@ -364,6 +392,7 @@ mod tests {
       let (second_url, second_requests) = spawn_proxy(StatusCode::OK).await;
       let client = ZenClient::new(ZenConfig {
          base_url: "http://zen.invalid/v1".into(),
+         user_agent: "opencode/1.18.31".into(),
          proxy_urls: vec![authenticated(&first_url), authenticated(&second_url)],
          proxy_urls_file: None,
       })
@@ -394,6 +423,7 @@ mod tests {
       let (working_url, working_requests) = spawn_proxy(StatusCode::OK).await;
       let client = ZenClient::new(ZenConfig {
          base_url: "http://zen.invalid/v1".into(),
+         user_agent: "opencode/1.18.31".into(),
          proxy_urls: vec![authenticated(&limited_url), authenticated(&working_url)],
          proxy_urls_file: None,
       })
@@ -450,6 +480,7 @@ mod tests {
       }
       let client = ZenClient::new(ZenConfig {
          base_url: "http://zen.invalid/v1".into(),
+         user_agent: "opencode/1.18.31".into(),
          proxy_urls: proxies
             .iter()
             .map(|&(ref url, _)| authenticated(url))

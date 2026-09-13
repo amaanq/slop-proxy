@@ -96,6 +96,7 @@ impl Default for GlmConfig {
 #[serde(default)]
 pub struct ZenConfig {
    pub base_url: String,
+   pub user_agent: String,
    pub proxy_urls: Vec<String>,
    pub proxy_urls_file: Option<PathBuf>,
 }
@@ -104,6 +105,7 @@ impl Default for ZenConfig {
    fn default() -> Self {
       Self {
          base_url: "https://opencode.ai/zen/v1".into(),
+         user_agent: "opencode/1.18.31 ai-sdk/provider-utils/4.0.46 runtime/bun/1.3.13".into(),
          proxy_urls: Vec::new(),
          proxy_urls_file: None,
       }

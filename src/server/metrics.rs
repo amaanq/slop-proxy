@@ -192,6 +192,15 @@ fn render_tools(out: &mut String, rows: &[ToolRow]) {
       let labels = [("user", row.user.as_str()), ("tool", &row.tool)];
       sample(out, "slop_tool_turns_total", &labels, row.count);
    }
+   counter(
+      out,
+      "slop_tool_errors_total",
+      "Failed turns that used each tool. Names only, never their arguments or results",
+   );
+   for row in rows {
+      let labels = [("user", row.user.as_str()), ("tool", &row.tool)];
+      sample(out, "slop_tool_errors_total", &labels, row.errors);
+   }
 }
 
 fn render_insights(out: &mut String, rows: &[InsightRow]) {
@@ -309,7 +318,7 @@ const TOKEN_KINDS: [(&str, TokenGetter); 5] = [
 ];
 
 type InsightGetter = fn(&InsightRow) -> i64;
-const INSIGHTS: [(&str, &str, InsightGetter); 9] = [
+const INSIGHTS: [(&str, &str, InsightGetter); 10] = [
    (
       "slop_stop_reason_total",
       "Requests by how the turn ended",
@@ -342,6 +351,11 @@ const INSIGHTS: [(&str, &str, InsightGetter); 9] = [
       "slop_tools_declared_total",
       "Tools offered to the model, summed. Every one costs prompt on every turn",
       |row| row.tools_declared,
+   ),
+   (
+      "slop_attempts_total",
+      "Upstream account claims, summed. Divide by slop_stop_reason_total for attempts per request",
+      |row| row.attempts,
    ),
    (
       "slop_ttft_ms_total",

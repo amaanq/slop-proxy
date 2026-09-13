@@ -86,11 +86,13 @@ pub async fn messages(
    let Dispatched {
       account_id,
       upstream,
+      attempts,
    } = match state.pools.responses(provider, route, &upstream_req).await {
       Ok(dispatched) => dispatched,
       Err(err) => return dispatch_failed(&state, record, DIALECT, err),
    };
    record.account_id = account_id;
+   record.attempts = i64::from(attempts);
 
    let capture = UsageCapture::default();
    let events = upstream.events(&upstream_req.model, capture.clone());
@@ -162,7 +164,9 @@ pub async fn count_tokens(
       Err(err) => return translation_error(DIALECT, &format!("invalid request: {err}")),
    };
    Json(TokenCount {
-      input_tokens: count_tokens::estimate(&anthropic_req::to_responses(&req, &state.cfg, provider)),
+      input_tokens: count_tokens::estimate(&anthropic_req::to_responses(
+         &req, &state.cfg, provider,
+      )),
    })
    .into_response()
 }

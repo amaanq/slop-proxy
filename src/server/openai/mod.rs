@@ -169,11 +169,13 @@ pub async fn chat_completions(
    let Dispatched {
       account_id,
       upstream,
+      attempts,
    } = match state.pools.responses(provider, route, &upstream_req).await {
       Ok(dispatched) => dispatched,
       Err(err) => return dispatch_failed(&state, record, DIALECT, err),
    };
    record.account_id = account_id;
+   record.attempts = i64::from(attempts);
    record.session_key = session_key;
 
    let capture = UsageCapture::default();
@@ -949,6 +951,7 @@ pub async fn responses_passthrough(
    let Dispatched {
       account_id,
       upstream,
+      attempts,
    } = match state
       .pools
       .responses_raw(provider, route, encoded, typed.as_ref(), &headers)
@@ -968,6 +971,7 @@ pub async fn responses_passthrough(
       },
    };
    record.account_id = account_id;
+   record.attempts = i64::from(attempts);
    let capture = UsageCapture::default();
    let resp = match upstream {
       Upstream::Responses(resp) => resp,

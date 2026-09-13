@@ -64,7 +64,7 @@ pub async fn chat_completions(
    record.effort = body.reasoning_effort.clone().unwrap_or_default();
 
    let session_key = record.session_key.clone();
-   let (account_id, upstream) = match state
+   let served = match state
       .pools
       .gemini
       .execute(
@@ -80,12 +80,13 @@ pub async fn chat_completions(
       )
       .await
    {
-      Ok(res) => res,
+      Ok(served) => served,
       Err(err) => return dispatch_failed(&state, record, DIALECT, err),
    };
-   let protocol = upstream.protocol;
-   let resp = upstream.response;
-   record.account_id = account_id;
+   let protocol = served.response.protocol;
+   let resp = served.response.response;
+   record.account_id = served.account_id;
+   record.attempts = i64::from(served.attempts);
    record.status = i64::from(resp.status().as_u16());
 
    let builder = forwarded_response(&resp);
@@ -372,7 +373,7 @@ pub async fn native(
       query,
       body,
    };
-   let (account_id, upstream) = match state
+   let served = match state
       .pools
       .gemini
       .execute(
@@ -388,11 +389,12 @@ pub async fn native(
       )
       .await
    {
-      Ok(res) => res,
+      Ok(served) => served,
       Err(err) => return dispatch_failed(&state, record, DIALECT, err),
    };
-   let resp = upstream.response;
-   record.account_id = account_id;
+   let resp = served.response.response;
+   record.account_id = served.account_id;
+   record.attempts = i64::from(served.attempts);
    record.status = i64::from(resp.status().as_u16());
    let ok = resp.status().is_success();
    let builder = forwarded_response(&resp);

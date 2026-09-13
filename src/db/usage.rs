@@ -46,6 +46,7 @@ pub struct UsageRecord {
    pub response_bytes: i64,
    pub ttft_ms: Option<i64>,
    pub stop_reason: String,
+   pub attempts: i64,
 }
 
 #[derive(Debug, Serialize, Default)]
@@ -113,6 +114,7 @@ pub struct ToolRow {
    pub user: String,
    pub tool: String,
    pub count: i64,
+   pub errors: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -129,6 +131,7 @@ pub struct InsightRow {
    pub tools_declared: i64,
    pub ttft_ms: i64,
    pub ttft_samples: i64,
+   pub attempts: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -404,19 +407,21 @@ impl Db {
    /// Whole-table sums per [`USAGE_DIMENSIONS`]. The log is append-only, so
    /// these are monotonic and safe to expose as Prometheus counters.
    pub async fn usage_metrics(&self) -> Result<Vec<MetricsRow>> {
-      self.reports.call(move |conn| {
-      let selected = USAGE_DIMENSIONS
-         .into_iter()
-         .map(|(label, expr)| format!("{expr} AS {label}"))
-         .collect::<Vec<_>>()
-         .join(", ");
-      let grouped = USAGE_DIMENSIONS
-         .into_iter()
-         .map(|(label, _)| label)
-         .collect::<Vec<_>>()
-         .join(", ");
-      let mut stmt = conn.prepare(&format!(
-            "SELECT {selected}, COUNT(*),
+      self
+         .reports
+         .call(move |conn| {
+            let selected = USAGE_DIMENSIONS
+               .into_iter()
+               .map(|(label, expr)| format!("{expr} AS {label}"))
+               .collect::<Vec<_>>()
+               .join(", ");
+            let grouped = USAGE_DIMENSIONS
+               .into_iter()
+               .map(|(label, _)| label)
+               .collect::<Vec<_>>()
+               .join(", ");
+            let mut stmt = conn.prepare(&format!(
+               "SELECT {selected}, COUNT(*),
                     SUM(u.status >= 400 OR u.error_kind IS NOT NULL),
                     COALESCE(SUM(u.input_tokens),0), COALESCE(SUM(u.output_tokens),0),
                     COALESCE(SUM(u.cache_read_tokens),0), COALESCE(SUM(u.cache_write_tokens),0),
@@ -425,29 +430,30 @@ impl Db {
                     COALESCE(SUM(u.duration_ms),0)
              FROM usage_log u
              GROUP BY {grouped}",
-        ))?;
-      let after = USAGE_DIMENSIONS.len();
-      let rows = stmt.query_map([], |row| {
-         let mut dimensions = USAGE_DIMENSIONS.map(|_| String::new());
-         for (index, value) in dimensions.iter_mut().enumerate() {
-            *value = row.get(index)?;
-         }
-         Ok(MetricsRow {
-            dimensions,
-            requests: row.get(after)?,
-            errors: row.get::<_, Option<i64>>(after + 1)?.unwrap_or(0),
-            input_tokens: row.get(after + 2)?,
-            output_tokens: row.get(after + 3)?,
-            cache_read_tokens: row.get(after + 4)?,
-            cache_write_tokens: row.get(after + 5)?,
-            reasoning_tokens: row.get(after + 6)?,
-            cost_usd: row.get(after + 7)?,
-            list_cost_usd: row.get(after + 8)?,
-            duration_ms: row.get(after + 9)?,
+            ))?;
+            let after = USAGE_DIMENSIONS.len();
+            let rows = stmt.query_map([], |row| {
+               let mut dimensions = USAGE_DIMENSIONS.map(|_| String::new());
+               for (index, value) in dimensions.iter_mut().enumerate() {
+                  *value = row.get(index)?;
+               }
+               Ok(MetricsRow {
+                  dimensions,
+                  requests: row.get(after)?,
+                  errors: row.get::<_, Option<i64>>(after + 1)?.unwrap_or(0),
+                  input_tokens: row.get(after + 2)?,
+                  output_tokens: row.get(after + 3)?,
+                  cache_read_tokens: row.get(after + 4)?,
+                  cache_write_tokens: row.get(after + 5)?,
+                  reasoning_tokens: row.get(after + 6)?,
+                  cost_usd: row.get(after + 7)?,
+                  list_cost_usd: row.get(after + 8)?,
+                  duration_ms: row.get(after + 9)?,
+               })
+            })?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
          })
-      })?;
-      Ok(rows.collect::<rusqlite::Result<_>>()?)
-      }).await
+         .await
    }
 
    /// Rows that carry tokens but no cost, which is every row written before
@@ -506,19 +512,22 @@ impl Db {
    pub async fn tool_metrics(&self) -> Result<Vec<ToolRow>> {
       self.reports.call(move |conn| {
       let mut stmt = conn.prepare(
-            "WITH RECURSIVE split(user, tool, rest) AS (
-               SELECT user, '', tools_called || ',' FROM usage_log WHERE tools_called <> ''
+            "WITH RECURSIVE split(user, failed, tool, rest) AS (
+               SELECT user, (status >= 400 OR error_kind IS NOT NULL), '', tools_called || ','
+               FROM usage_log WHERE tools_called <> ''
                UNION ALL
-               SELECT user, substr(rest, 1, instr(rest, ',') - 1), substr(rest, instr(rest, ',') + 1)
+               SELECT user, failed, substr(rest, 1, instr(rest, ',') - 1), substr(rest, instr(rest, ',') + 1)
                FROM split WHERE rest <> ''
              )
-             SELECT user, tool, COUNT(*) FROM split WHERE tool <> '' GROUP BY user, tool",
+             SELECT user, tool, COUNT(*), SUM(failed)
+             FROM split WHERE tool <> '' GROUP BY user, tool",
         )?;
       let rows = stmt.query_map([], |row| {
          Ok(ToolRow {
             user: row.get(0)?,
             tool: row.get(1)?,
             count: row.get(2)?,
+            errors: row.get::<_, Option<i64>>(3)?.unwrap_or(0),
          })
       })?;
       Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -545,7 +554,8 @@ impl Db {
                     COALESCE(SUM(u.request_bytes),0), COALESCE(SUM(u.response_bytes),0),
                     COALESCE(SUM(u.turn_index),0), COALESCE(SUM(u.image_count),0),
                     COALESCE(SUM(u.thinking_budget),0), COALESCE(SUM(u.tools_declared),0),
-                    COALESCE(SUM(u.ttft_ms),0), SUM(u.ttft_ms IS NOT NULL)
+                    COALESCE(SUM(u.ttft_ms),0), SUM(u.ttft_ms IS NOT NULL),
+                    COALESCE(SUM(u.attempts),0)
              FROM usage_log u
              GROUP BY u.user, account, stop_reason",
             )?;
@@ -563,6 +573,7 @@ impl Db {
                   tools_declared: row.get(9)?,
                   ttft_ms: row.get(10)?,
                   ttft_samples: row.get::<_, Option<i64>>(11)?.unwrap_or(0),
+                  attempts: row.get(12)?,
                })
             })?;
             Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -637,9 +648,9 @@ fn insert_usage(conn: &mut rusqlite::Connection, record: &UsageRecord) -> Result
    txn.execute(
             "INSERT INTO usage_log (token_id, user, account_id, provider, dialect, requested_model, upstream_model, effort, service_tier,
                input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, cost_usd, list_cost_usd, status, error_kind, duration_ms,
-               session_key, turn_index, tools_declared, tools_called, thinking_budget, image_count, request_bytes, response_bytes, ttft_ms, stop_reason)
+               session_key, turn_index, tools_declared, tools_called, thinking_budget, image_count, request_bytes, response_bytes, ttft_ms, stop_reason, attempts)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                     ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29)",
+                     ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30)",
             params![
                 record.token_id,
                 record.user,
@@ -670,6 +681,7 @@ fn insert_usage(conn: &mut rusqlite::Connection, record: &UsageRecord) -> Result
                 record.response_bytes,
                 record.ttft_ms,
                 record.stop_reason,
+                record.attempts,
             ],
         )?;
    if let Some(meter_id) = record.meter_id {

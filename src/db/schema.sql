@@ -75,7 +75,8 @@ CREATE TABLE IF NOT EXISTS usage_log (
   request_bytes     INTEGER NOT NULL DEFAULT 0,
   response_bytes    INTEGER NOT NULL DEFAULT 0,
   ttft_ms           INTEGER,
-  stop_reason       TEXT    NOT NULL DEFAULT ''
+  stop_reason       TEXT    NOT NULL DEFAULT '',
+  attempts          INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_usage_ts         ON usage_log(ts);

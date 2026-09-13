@@ -31,7 +31,7 @@ pub enum PoolError {
    #[error("no usable {0} accounts; run `slop-proxy login`")]
    NoAccounts(Provider),
    #[error("all upstream accounts are cooling down")]
-   AllCoolingDown { retry_after: i64 },
+   AllCoolingDown { retry_after: i64, attempts: u32 },
    #[error("the {provider} backend rejected {model}: {body}")]
    BadRequest {
       provider: Provider,
@@ -45,6 +45,15 @@ pub enum PoolError {
 impl From<SendError> for PoolError {
    fn from(err: SendError) -> Self {
       Self::Upstream(err.to_string())
+   }
+}
+
+impl PoolError {
+   pub const fn attempts(&self) -> u32 {
+      match *self {
+         Self::AllCoolingDown { attempts, .. } => attempts,
+         Self::NoAccounts(_) | Self::BadRequest { .. } | Self::Upstream(_) => 0,
+      }
    }
 }
 
@@ -80,7 +89,7 @@ pub trait Backend: Send + Sync + 'static {
    const PROVIDER: Provider;
    const RATE_LIMIT: Cooldown;
    const ON_AUTH: AuthPolicy;
-   const ATTEMPTS: usize = 3;
+   const ATTEMPTS: u32 = 3;
    /// Accounts come in two tiers and a token may prefer one, codex only.
    const TIERED: bool = false;
    /// A session waits this long for its own account's cooldown rather than losing the prompt cache.
@@ -152,6 +161,12 @@ pub struct Pool<B: Backend> {
    slots: Slots,
    backend: B,
    bound: Mutex<HashMap<String, Bound>>,
+}
+
+pub struct Served<Response> {
+   pub account_id: Option<i64>,
+   pub response: Response,
+   pub attempts: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -348,14 +363,16 @@ impl<B: Backend> Pool<B> {
       &self,
       route: Route<'_>,
       req: B::Request,
-   ) -> Result<(Option<i64>, B::Response), PoolError> {
+   ) -> Result<Served<B::Response>, PoolError> {
       let budget = self.backend.retry_budget();
       let deadline = Instant::now() + budget;
+      let mut prior_attempts = 0_u32;
       loop {
-         let err = match self.sweep(route, &req).await {
+         let err = match self.sweep(route, &req, prior_attempts).await {
             Err(err @ PoolError::AllCoolingDown { .. }) if !budget.is_zero() => err,
             other => return other,
          };
+         prior_attempts = err.attempts();
          let left = deadline.saturating_duration_since(Instant::now());
          if left.is_zero() {
             return Err(err);
@@ -376,7 +393,8 @@ impl<B: Backend> Pool<B> {
       &self,
       route: Route<'_>,
       req: &B::Request,
-   ) -> Result<(Option<i64>, B::Response), PoolError> {
+      prior_attempts: u32,
+   ) -> Result<Served<B::Response>, PoolError> {
       let ranked = self.ranked(route).await;
       if ranked.is_empty() {
          if B::PROVIDER == Provider::OpenAi
@@ -393,7 +411,11 @@ impl<B: Backend> Pool<B> {
          }
          if B::ANONYMOUS {
             return match self.backend.send_anonymous(route, req).await {
-               Ok(resp) => Ok((None, resp)),
+               Ok(resp) => Ok(Served {
+                  account_id: None,
+                  response: resp,
+                  attempts: prior_attempts,
+               }),
                Err(SendError::BadRequest(body)) => Err(PoolError::BadRequest {
                   provider: B::PROVIDER,
                   model: route.model.into(),
@@ -401,6 +423,7 @@ impl<B: Backend> Pool<B> {
                }),
                Err(SendError::RateLimited { retry_after, .. }) => Err(PoolError::AllCoolingDown {
                   retry_after: retry_after.unwrap_or(30),
+                  attempts: prior_attempts,
                }),
                Err(err) => Err(PoolError::Upstream(err.to_string())),
             };
@@ -409,7 +432,7 @@ impl<B: Backend> Pool<B> {
       }
       self.wait_out_own_cooldown(route, ranked.first()).await;
       let mut last_err = Option::<SendError>::None;
-      let mut attempts = 0;
+      let mut attempts = 0_u32;
       for slot in ranked {
          if attempts >= B::ATTEMPTS {
             break;
@@ -424,7 +447,11 @@ impl<B: Backend> Pool<B> {
          match self.backend.send(&token, &slot, route, req).await {
             Ok(resp) => {
                self.bind_session(route.session_key, slot.id).await;
-               return Ok((Some(slot.id), self.served(&slot, resp).await));
+               return Ok(Served {
+                  account_id: Some(slot.id),
+                  response: self.served(&slot, resp).await,
+                  attempts: prior_attempts.saturating_add(attempts),
+               });
             },
             Err(SendError::Auth(text)) => match B::ON_AUTH {
                AuthPolicy::CoolKey(secs) => {
@@ -437,7 +464,11 @@ impl<B: Backend> Pool<B> {
                      match self.backend.send(&fresh, &slot, route, req).await {
                         Ok(resp) => {
                            self.bind_session(route.session_key, slot.id).await;
-                           return Ok((Some(slot.id), self.served(&slot, resp).await));
+                           return Ok(Served {
+                              account_id: Some(slot.id),
+                              response: self.served(&slot, resp).await,
+                              attempts: prior_attempts.saturating_add(attempts),
+                           });
                         },
                         Err(err) => {
                            self.slots.cool(&slot, 60, "post-refresh failure").await;
@@ -484,6 +515,7 @@ impl<B: Backend> Pool<B> {
          }),
          Some(SendError::RateLimited { .. }) | None => Err(PoolError::AllCoolingDown {
             retry_after: self.slots.min_cooldown().await.max(30),
+            attempts: prior_attempts.saturating_add(attempts),
          }),
          Some(err) => Err(PoolError::Upstream(err.to_string())),
       }
@@ -642,8 +674,11 @@ mod retry_tests {
    #[tokio::test]
    async fn a_rate_limited_pool_is_waited_out_rather_than_handed_back() {
       let pool = pool(1, Duration::from_secs(10));
-      let (_, calls) = pool.execute(route(), ()).await.unwrap();
-      assert_eq!(calls, 2, "the second sweep should have been served");
+      let served = pool.execute(route(), ()).await.unwrap();
+      assert_eq!(
+         served.response, 2,
+         "the second sweep should have been served"
+      );
    }
 
    #[tokio::test]

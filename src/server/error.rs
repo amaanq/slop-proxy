@@ -70,7 +70,7 @@ pub fn pool_error_response(dialect: Dialect, models: &ModelsConfig, err: PoolErr
          "api_error",
          &format!("no usable {provider} accounts; an admin must run `slop-proxy login`"),
       ),
-      PoolError::AllCoolingDown { retry_after } => {
+      PoolError::AllCoolingDown { retry_after, .. } => {
          let err_type = match dialect {
             Dialect::Anthropic => "rate_limit_error",
             Dialect::OpenAi => "rate_limit_exceeded",
@@ -130,6 +130,15 @@ pub const fn pool_error_status(err: &PoolError) -> i64 {
       PoolError::AllCoolingDown { .. } => 429,
       PoolError::BadRequest { .. } => 400,
       PoolError::Upstream(_) => 502,
+   }
+}
+
+pub const fn pool_error_kind(err: &PoolError) -> &'static str {
+   match *err {
+      PoolError::NoAccounts(_) => "pool_no_accounts",
+      PoolError::AllCoolingDown { .. } => "pool_cooling_down",
+      PoolError::BadRequest { .. } => "pool_bad_request",
+      PoolError::Upstream(_) => "pool_upstream",
    }
 }
 

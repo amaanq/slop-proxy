@@ -16,7 +16,9 @@ use futures_util::stream;
 use tokio::time::timeout;
 
 use super::auth::AuthInfo;
-use super::error::{Dialect, error_response, pool_error_response, pool_error_status};
+use super::error::{
+   Dialect, error_response, pool_error_kind, pool_error_response, pool_error_status,
+};
 use super::facts::RequestFacts;
 use super::{AppState, LogGuard, log_error};
 use crate::codex::sse::EventStream;
@@ -54,11 +56,17 @@ pub fn record(
 
 pub fn dispatch_failed(
    state: &AppState,
-   record: UsageRecord,
+   mut record: UsageRecord,
    dialect: Dialect,
    err: PoolError,
 ) -> Response {
-   log_error(state, record, pool_error_status(&err), "pool");
+   record.attempts = i64::from(err.attempts());
+   log_error(
+      state,
+      record,
+      pool_error_status(&err),
+      pool_error_kind(&err),
+   );
    pool_error_response(dialect, &state.cfg.models, err)
 }
 
@@ -182,25 +190,28 @@ where
    S: stream::Stream<Item = Result<Bytes, E>> + Send + 'static,
 {
    const EVERY: Duration = Duration::from_secs(15);
-   stream::unfold((Box::pin(stream), true), |(mut upstream, boundary)| async move {
-      loop {
-         match timeout(EVERY, upstream.next()).await {
-            Ok(item) => {
-               let ended = item.as_ref().is_some_and(|item| {
-                  item.as_ref().is_ok_and(|bytes: &Bytes| {
-                     bytes.ends_with(b"\n\n") || bytes.ends_with(b"\r\n\r\n")
-                  })
-               });
-               return item.map(|item| (item, (upstream, ended)));
-            },
-            Err(_) if boundary => {
-               let beat = Bytes::from_static(b": heartbeat\n\n");
-               return Some((Ok(beat), (upstream, true)));
-            },
-            Err(_) => {},
+   stream::unfold(
+      (Box::pin(stream), true),
+      |(mut upstream, boundary)| async move {
+         loop {
+            match timeout(EVERY, upstream.next()).await {
+               Ok(item) => {
+                  let ended = item.as_ref().is_some_and(|item| {
+                     item.as_ref().is_ok_and(|bytes: &Bytes| {
+                        bytes.ends_with(b"\n\n") || bytes.ends_with(b"\r\n\r\n")
+                     })
+                  });
+                  return item.map(|item| (item, (upstream, ended)));
+               },
+               Err(_) if boundary => {
+                  let beat = Bytes::from_static(b": heartbeat\n\n");
+                  return Some((Ok(beat), (upstream, true)));
+               },
+               Err(_) => {},
+            }
          }
-      }
-   })
+      },
+   )
 }
 
 /// Responses events rendered as another dialect's SSE. `step` gets `None`

@@ -7,7 +7,7 @@ use reqwest::header::HeaderMap;
 use serde_json::{Value, json};
 
 use super::{
-   AccountUsage, AuthPolicy, Backend, Cooldown, Pool, PoolError, Route, Slot, UsageWindow,
+   AccountUsage, AuthPolicy, Backend, Cooldown, Pool, PoolError, Route, Served, Slot, UsageWindow,
    window_seconds,
 };
 use crate::clock::unix_now;
@@ -220,13 +220,17 @@ impl Pool<CodexClient> {
       route: Route<'_>,
       body: Bytes,
       headers: HeaderMap,
-   ) -> Result<(Option<i64>, reqwest::Response), PoolError> {
+   ) -> Result<Served<reqwest::Response>, PoolError> {
       if route.explicit_tier().is_some() {
          self.catalogs(route.user, route.pinned_account).await?;
       }
-      let (account, reply) = self.execute(route, Call::Http { body, headers }).await?;
-      match reply {
-         Reply::Http(response) => Ok((account, response)),
+      let served = self.execute(route, Call::Http { body, headers }).await?;
+      match served.response {
+         Reply::Http(response) => Ok(Served {
+            account_id: served.account_id,
+            response,
+            attempts: served.attempts,
+         }),
          Reply::WebSocket(_) => Err(PoolError::Upstream("unexpected WebSocket reply".into())),
       }
    }
@@ -235,13 +239,17 @@ impl Pool<CodexClient> {
       &self,
       route: Route<'_>,
       headers: HeaderMap,
-   ) -> Result<(Option<i64>, Connection), PoolError> {
+   ) -> Result<Served<Connection>, PoolError> {
       if route.explicit_tier().is_some() {
          self.catalogs(route.user, route.pinned_account).await?;
       }
-      let (account, reply) = self.execute(route, Call::WebSocket(headers)).await?;
-      match reply {
-         Reply::WebSocket(connection) => Ok((account, *connection)),
+      let served = self.execute(route, Call::WebSocket(headers)).await?;
+      match served.response {
+         Reply::WebSocket(connection) => Ok(Served {
+            account_id: served.account_id,
+            response: *connection,
+            attempts: served.attempts,
+         }),
          Reply::Http(_) => Err(PoolError::Upstream("unexpected HTTP reply".into())),
       }
    }

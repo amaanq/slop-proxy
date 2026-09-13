@@ -438,7 +438,8 @@ impl<B: Backend> Pool<B> {
          if attempts >= B::ATTEMPTS {
             break;
          }
-         if !self.slots.try_claim(&slot).await {
+         if self.slots.model_cooling(&slot, route.model).await || !self.slots.try_claim(&slot).await
+         {
             continue;
          }
          attempts += 1;
@@ -488,6 +489,13 @@ impl<B: Backend> Pool<B> {
                   .await;
                last_err = Some(SendError::RateLimited { retry_after, body });
             },
+            Err(SendError::ModelLimited { retry_after, body }) => {
+               let secs = retry_after
+                  .unwrap_or(B::RATE_LIMIT.base)
+                  .min(B::RATE_LIMIT.max);
+               self.slots.cool_model(&slot, route.model, secs).await;
+               last_err = Some(SendError::ModelLimited { retry_after, body });
+            },
             Err(SendError::BadRequest(body)) if self.backend.retryable_bad_request(&body) => {
                tracing::warn!(
                    account = %slot.display,
@@ -514,10 +522,12 @@ impl<B: Backend> Pool<B> {
             model: route.model.into(),
             body: B::reason(body),
          }),
-         Some(SendError::RateLimited { .. }) | None => Err(PoolError::AllCoolingDown {
-            retry_after: self.slots.min_cooldown().await.max(30),
-            attempts: prior_attempts.saturating_add(attempts),
-         }),
+         Some(SendError::RateLimited { .. } | SendError::ModelLimited { .. }) | None => {
+            Err(PoolError::AllCoolingDown {
+               retry_after: self.slots.min_cooldown().await.max(30),
+               attempts: prior_attempts.saturating_add(attempts),
+            })
+         },
          Some(err) => Err(PoolError::Upstream(err.to_string())),
       }
    }

@@ -1,7 +1,8 @@
 use std::time::Duration;
 
 use axum::body::Bytes;
-use reqwest::header::CONTENT_TYPE;
+use reqwest::StatusCode;
+use reqwest::header::{CONTENT_TYPE, HeaderMap};
 
 use crate::config::AnthropicConfig;
 use crate::upstream::{Classify, SendError, classify};
@@ -16,6 +17,24 @@ const RULES: Classify = Classify {
       "anthropic-ratelimit-requests-reset",
    ],
 };
+
+/// Every claim a request counts against gets its own `anthropic-ratelimit-unified-<claim>-status` header.
+fn sub_limit_rejected(headers: &HeaderMap) -> bool {
+   let claim_rejected = |claim: &str| {
+      headers
+         .get(format!("anthropic-ratelimit-unified-{claim}-status"))
+         .is_some_and(|value| value == "rejected")
+   };
+   let sub_limit = headers.iter().any(|(name, value)| {
+      value == "rejected"
+         && name
+            .as_str()
+            .strip_prefix("anthropic-ratelimit-unified-")
+            .and_then(|rest| rest.strip_suffix("-status"))
+            .is_some_and(|claim| !matches!(claim, "5h" | "7d" | "overage"))
+   });
+   sub_limit && !claim_rejected("5h") && !claim_rejected("7d")
+}
 
 /// Rolling-window usage as the subscription reports it, without spending an
 /// inference request. `locked_reason` is set when the window is exhausted
@@ -265,7 +284,18 @@ impl AnthropicClient {
          .send()
          .await
          .map_err(|err| SendError::Network(err.to_string()))?;
-      classify(resp, RULES).await
+      let model_limited =
+         resp.status() == StatusCode::TOO_MANY_REQUESTS && sub_limit_rejected(resp.headers());
+      match classify(resp, RULES).await {
+         Err(SendError::RateLimited {
+            retry_after,
+            body: text,
+         }) if model_limited => Err(SendError::ModelLimited {
+            retry_after,
+            body: text,
+         }),
+         other => other,
+      }
    }
 }
 

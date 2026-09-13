@@ -43,6 +43,7 @@ struct SlotState {
    consecutive_fails: u32,
    usage: Option<AccountUsage>,
    limit_windows: BTreeMap<String, Vec<UsageWindow>>,
+   model_cooldowns: BTreeMap<String, i64>,
    /// Model ids and service tiers this account's own catalog lists, `None`
    /// until one is read.
    catalog: Option<Arc<ModelsResponse>>,
@@ -549,6 +550,27 @@ impl Slots {
       self.cool(slot, secs, "rate limited").await;
    }
 
+   pub async fn cool_model(&self, slot: &Slot, model: &str, secs: i64) {
+      let until = clock::unix_now() + secs;
+      slot
+         .state
+         .lock()
+         .await
+         .model_cooldowns
+         .insert(model.to_owned(), until);
+      tracing::warn!(
+         "account {} cooling down {model} for {secs}s (model rate limited)",
+         slot.display
+      );
+   }
+
+   pub async fn model_cooling(&self, slot: &Slot, model: &str) -> bool {
+      let now = clock::unix_now();
+      let mut state = slot.state.lock().await;
+      state.model_cooldowns.retain(|_, until| *until > now);
+      state.model_cooldowns.contains_key(model)
+   }
+
    pub async fn cool_failure(&self, slot: &Slot, why: &str) {
       let fails = slot.state.lock().await.consecutive_fails;
       let secs = 15_i64.saturating_mul(1 << fails.min(6)).min(900);
@@ -671,6 +693,7 @@ fn slot_from_account(account: Account) -> Slot {
          consecutive_fails: 0,
          usage: None,
          limit_windows: BTreeMap::new(),
+         model_cooldowns: BTreeMap::new(),
          catalog: None,
          catalog_at: 0,
       })),
@@ -713,6 +736,7 @@ pub fn test_slots(db: Db, provider: Provider, ids: &[(i64, bool)]) -> Slots {
                      consecutive_fails: 0,
                      usage: None,
                      limit_windows: BTreeMap::new(),
+                     model_cooldowns: BTreeMap::new(),
                      catalog: None,
                      catalog_at: 0,
                   })),
@@ -750,6 +774,7 @@ mod allowlist_tests {
             consecutive_fails: 0,
             usage: None,
             limit_windows: BTreeMap::new(),
+            model_cooldowns: BTreeMap::new(),
             catalog: None,
             catalog_at: 0,
          })),

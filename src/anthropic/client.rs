@@ -125,13 +125,13 @@ impl Usage {
          .any(|window| window.locked_reason.is_some())
    }
 
-   /// Max plans leave `weekly_all` inactive, and a dormant window reports a
-   /// flat zero however much the account spends.
    pub fn windows(&self) -> impl Iterator<Item = (&'static str, &Window)> {
       let dormant: Vec<&'static str> = self
          .limits
          .iter()
-         .filter(|limit| limit.scope.is_none() && limit.is_active == Some(false))
+         .filter(|limit| {
+            limit.scope.is_none() && limit.is_active == Some(false) && limit.percent == 0.0_f64
+         })
          .map(Limit::window_name)
          .collect();
       [("5h", &self.five_hour), ("7d", &self.seven_day)]

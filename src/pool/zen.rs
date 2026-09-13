@@ -15,6 +15,10 @@ pub type ZenPool = Pool<ZenClient>;
 pub struct Relay {
    pub path: &'static str,
    pub body: Bytes,
+   /// Zen hashes the session id's last four characters to pick the upstream
+   /// that serves a model, so a retry has to move the tail or it lands on the
+   /// same dead one. Zero keeps the stable id, and its prompt cache with it.
+   pub attempt: usize,
 }
 
 impl Backend for ZenClient {
@@ -39,7 +43,8 @@ impl Backend for ZenClient {
       route: Route<'_>,
       req: &Self::Request,
    ) -> Result<Self::Response, SendError> {
-      Self::post(self, Some(token), &session(route), req.path, &req.body).await
+      let session = session(route, req.attempt);
+      Self::post(self, Some(token), &session, req.path, &req.body).await
    }
 
    async fn send_anonymous(
@@ -47,12 +52,14 @@ impl Backend for ZenClient {
       route: Route<'_>,
       req: &Self::Request,
    ) -> Result<Self::Response, SendError> {
-      Self::post(self, None, &session(route), req.path, &req.body).await
+      let session = session(route, req.attempt);
+      Self::post(self, None, &session, req.path, &req.body).await
    }
 }
 
-fn session(route: Route<'_>) -> String {
-   const ALPHABET: &[u8; 62] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+const ALPHABET: &[u8; 62] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+fn session(route: Route<'_>, attempt: usize) -> String {
    let mut hasher = hmac_sha256::Hash::new();
    if route.session_key.is_empty() {
       hasher.update(route.user.as_bytes());
@@ -60,6 +67,10 @@ fn session(route: Route<'_>) -> String {
       hasher.update(route.model.as_bytes());
    } else {
       hasher.update(route.session_key.as_bytes());
+   }
+   if attempt > 0 {
+      hasher.update(b"\0retry\0");
+      hasher.update(attempt.to_le_bytes());
    }
    let digest = hasher.finalize();
    let body = digest

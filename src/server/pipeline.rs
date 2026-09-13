@@ -113,16 +113,43 @@ pub fn relayed<F, T>(
    guard: LogGuard,
    capture: UsageCapture,
    dialect: Dialect,
-   mut each: F,
+   each: F,
    tail: T,
 ) -> Response
 where
    F: FnMut(Bytes) -> Bytes + Send + 'static,
    T: FnOnce() -> Bytes + Send + 'static,
 {
+   relayed_stream(
+      builder,
+      resp.bytes_stream(),
+      guard,
+      capture,
+      dialect,
+      each,
+      tail,
+   )
+}
+
+/// `relayed` over a body already taken off the response, for a caller that had
+/// to read the first chunk before it could commit to this attempt.
+pub fn relayed_stream<S, E, F, T>(
+   builder: Builder,
+   body: S,
+   guard: LogGuard,
+   capture: UsageCapture,
+   dialect: Dialect,
+   mut each: F,
+   tail: T,
+) -> Response
+where
+   S: stream::Stream<Item = Result<Bytes, E>> + Send + 'static,
+   E: Into<axum::BoxError> + Send + 'static,
+   F: FnMut(Bytes) -> Bytes + Send + 'static,
+   T: FnOnce() -> Bytes + Send + 'static,
+{
    let eof = capture.clone();
-   let stream = resp
-      .bytes_stream()
+   let stream = body
       .map(move |item| {
          let _ = &guard;
          match item {

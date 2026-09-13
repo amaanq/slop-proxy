@@ -2,14 +2,16 @@ use axum::body::{Body, Bytes};
 use axum::http::HeaderMap;
 use axum::http::response::Builder;
 use axum::response::Response;
+use futures_util::{StreamExt as _, stream};
 use serde::Deserialize;
 use serde_json::value::RawValue;
 use std::io::{Result, Write};
-use std::time::Instant;
+use std::time::{Duration, Instant};
+use tokio::time::timeout;
 
 use super::auth::AuthInfo;
 use super::error::{Dialect, error_response, pool_error_response};
-use super::pipeline::{dispatch_failed, read_body, relayed};
+use super::pipeline::{dispatch_failed, read_body, relayed_stream};
 use super::{AppState, LogGuard, log_error, log_usage};
 use crate::anthropic::client::RelayHeaders;
 use crate::config::ModelsConfig;
@@ -274,6 +276,7 @@ pub async fn messages(
       prefer_trusted: false,
    };
    let body = normalized_body(&body, &peek);
+   let mut first = None;
    let result = match provider {
       Provider::Anthropic => {
          state
@@ -316,17 +319,56 @@ pub async fn messages(
             .await
       },
       Provider::Zen => {
-         state
-            .pools
-            .zen
-            .execute(
-               route,
-               ZenRelay {
-                  path: "/messages",
-                  body,
+         let mut outcome = None;
+         for attempt in 1..=ZEN_EMPTY_STREAM_ATTEMPTS {
+            let relay = ZenRelay {
+               path: "/messages",
+               body: body.clone(),
+               attempt: attempt - 1,
+            };
+            let opened = timeout(ZEN_FIRST_FRAME, async {
+               let (account_id, mut resp) = state.pools.zen.execute(route, relay).await?;
+               let opening = if is_event_stream(&resp) {
+                  resp
+                     .chunk()
+                     .await
+                     .map_err(|err| PoolError::Upstream(err.to_string()))?
+               } else {
+                  None
+               };
+               Ok((account_id, resp, opening))
+            })
+            .await;
+            match opened {
+               Ok(Ok((account_id, resp, opening))) => {
+                  if opening.is_none() && is_event_stream(&resp) {
+                     tracing::warn!(
+                        attempt,
+                        model = %peek.upstream_model,
+                        "zen answered 200 and closed the stream without a byte"
+                     );
+                     continue;
+                  }
+                  first = opening;
+                  outcome = Some(Ok((account_id, resp)));
+                  break;
                },
-            )
-            .await
+               Ok(Err(err)) => {
+                  outcome = Some(Err(err));
+                  break;
+               },
+               Err(_) => tracing::warn!(
+                  attempt,
+                  model = %peek.upstream_model,
+                  "zen sent no frame before the deadline"
+               ),
+            }
+         }
+         outcome.unwrap_or_else(|| {
+            Err(PoolError::Upstream(format!(
+               "zen opened no stream for this model on {ZEN_EMPTY_STREAM_ATTEMPTS} attempts"
+            )))
+         })
       },
       Provider::OpenAi | Provider::Gemini => Err(PoolError::BadRequest {
          provider,
@@ -352,28 +394,43 @@ pub async fn messages(
          builder = builder.header(name, value);
       }
    }
-   relay_response(state, record, resp, builder, started).await
+   relay_response(state, record, resp, first, builder, started).await
+}
+
+/// Zen has answered 200 with an event-stream content type and then closed
+/// without a byte, for 33 seconds at a time, while muse stayed up on the same
+/// egress. Nothing is on the wire until the first chunk arrives, so the turn
+/// can still be re-dispatched.
+const ZEN_EMPTY_STREAM_ATTEMPTS: usize = 3;
+
+/// A healthy turn answers and opens with `message_start` before the model has
+/// generated anything, so waiting out zen's own 33 second close on a dead one
+/// only delays the retry.
+const ZEN_FIRST_FRAME: Duration = Duration::from_secs(12);
+
+fn is_event_stream(resp: &reqwest::Response) -> bool {
+   resp
+      .headers()
+      .get("content-type")
+      .and_then(|value| value.to_str().ok())
+      .is_some_and(|content_type| content_type.contains("text/event-stream"))
 }
 
 async fn relay_response(
    state: AppState,
    mut record: UsageRecord,
    resp: reqwest::Response,
+   first: Option<Bytes>,
    builder: Builder,
    started: Instant,
 ) -> Response {
-   let streaming = resp
-      .headers()
-      .get("content-type")
-      .and_then(|value| value.to_str().ok())
-      .is_some_and(|content_type| content_type.contains("text/event-stream"));
-
-   if streaming {
+   if is_event_stream(&resp) {
       let capture = UsageCapture::default();
       let mut scan = SseScan::new(capture.clone());
-      return relayed(
+      let head = stream::iter(first.map(Ok::<Bytes, reqwest::Error>));
+      return relayed_stream(
          builder,
-         resp,
+         head.chain(resp.bytes_stream()),
          LogGuard::new(state, capture.clone(), record, started),
          capture,
          DIALECT,

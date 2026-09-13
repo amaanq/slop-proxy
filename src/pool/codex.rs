@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use axum::body::Bytes;
 use futures_util::{StreamExt as _, stream};
-use reqwest::header::HeaderMap;
+use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::{Value, json};
 
 use super::{
@@ -13,6 +13,7 @@ use super::{
 use crate::clock::unix_now;
 use crate::codex::client::CodexClient;
 use crate::codex::models::{ModelInfo, ModelsResponse, ServiceTier};
+use crate::codex::turn_state::{self, TurnState};
 use crate::codex::types::ErrorEnvelope;
 use crate::codex::websocket::Connection;
 use crate::provider::Provider;
@@ -84,16 +85,11 @@ impl Backend for CodexClient {
             )
             .await
             .map(Reply::Http),
-         Call::WebSocket(ref headers) => self
-            .connect_websocket(
-               token,
-               &slot.provider_account_id,
-               &session,
-               route.model,
-               headers,
-            )
-            .await
-            .map(|connection| Reply::WebSocket(Box::new(connection))),
+         Call::WebSocket(ref headers) => {
+            connect_pinned(self, slot, token, &session, route.model, headers)
+               .await
+               .map(|connection| Reply::WebSocket(Box::new(connection)))
+         },
       }
    }
 
@@ -114,6 +110,57 @@ impl Backend for CodexClient {
    fn is_handshake(&self, resp: &Self::Response) -> bool {
       matches!(resp, Reply::WebSocket(_))
    }
+}
+
+/// Dials with the account's cleanest turn-state in place of the caller's, and
+/// falls back to the caller's once the backend refuses it, so a stale pin
+/// costs a handshake rather than a cooled account.
+async fn connect_pinned(
+   client: &CodexClient,
+   slot: &Slot,
+   token: &str,
+   session: &str,
+   model: &str,
+   headers: &HeaderMap,
+) -> Result<Connection, SendError> {
+   let pinned = match TurnState::from_headers(headers) {
+      Some(presented) if client.pins_turn_state() => slot.preferred_turn_state(&presented).await,
+      _ => None,
+   };
+   let Some(pinned) = pinned else {
+      return dial(client, slot, token, session, model, headers).await;
+   };
+   let Ok(value) = HeaderValue::from_str(&pinned.token) else {
+      return dial(client, slot, token, session, model, headers).await;
+   };
+   let mut swapped = headers.clone();
+   swapped.insert(turn_state::HEADER, value);
+   match dial(client, slot, token, session, model, &swapped).await {
+      Ok(connection) => Ok(connection),
+      Err(err) => {
+         tracing::warn!(
+            account = %slot.display,
+            blocks = pinned.blocks,
+            error = %err,
+            "backend refused the pinned codex turn-state, dialling with the caller's"
+         );
+         slot.refuse_turn_state().await;
+         dial(client, slot, token, session, model, headers).await
+      },
+   }
+}
+
+/// One handshake, boxed, so the relay loop's future does not carry it inline.
+async fn dial(
+   client: &CodexClient,
+   slot: &Slot,
+   token: &str,
+   session: &str,
+   model: &str,
+   headers: &HeaderMap,
+) -> Result<Connection, SendError> {
+   Box::pin(client.connect_websocket(token, &slot.provider_account_id, session, model, headers))
+      .await
 }
 
 impl Pool<CodexClient> {
@@ -152,6 +199,17 @@ impl Pool<CodexClient> {
       {
          self.slots.mark_ok(&slot).await;
       }
+   }
+
+   /// Keeps the cleanest turn-state token an account's handshakes have returned.
+   pub async fn note_turn_state(&self, account_id: Option<i64>, observed: TurnState) {
+      let Some(id) = account_id else {
+         return;
+      };
+      let Some(slot) = self.slots.by_id(id).await else {
+         return;
+      };
+      self.slots.note_turn_state(&slot, observed).await;
    }
 
    pub async fn rewrite_rate_limits(

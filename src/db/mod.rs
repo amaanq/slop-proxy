@@ -100,6 +100,7 @@ impl Db {
 
 const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
    ("accounts", "http_referer", "TEXT"),
+   ("accounts", "turn_state", "TEXT"),
    ("accounts", "auth_mode", "TEXT NOT NULL DEFAULT 'oauth'"),
    ("accounts", "allowed_users", "TEXT NOT NULL DEFAULT ''"),
    ("usage_log", "provider", "TEXT NOT NULL DEFAULT ''"),

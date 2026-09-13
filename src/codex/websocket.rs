@@ -131,6 +131,10 @@ impl CodexClient {
       format!("{}/responses", self.config().base_url.trim_end_matches('/'))
    }
 
+   pub const fn pins_turn_state(&self) -> bool {
+      self.config().pin_turn_state
+   }
+
    pub fn responses_headers(
       &self,
       token: &str,

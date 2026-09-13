@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS accounts (
   access_token        TEXT    NOT NULL,
   refresh_token       TEXT    NOT NULL,
   http_referer        TEXT,
+  turn_state          TEXT,
   access_expires_at   INTEGER,
   last_refresh_at     INTEGER,
   status              TEXT    NOT NULL DEFAULT 'active',

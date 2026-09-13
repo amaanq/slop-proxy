@@ -50,6 +50,7 @@ pub struct Account {
    pub access_token: String,
    pub refresh_token: String,
    pub http_referer: Option<String>,
+   pub turn_state: Option<String>,
    pub access_expires_at: Option<i64>,
    pub status: AccountStatus,
    pub cooldown_until: Option<i64>,
@@ -78,6 +79,7 @@ fn from_row(row: &Row) -> rusqlite::Result<Account> {
       access_token: row.get("access_token")?,
       refresh_token: row.get("refresh_token")?,
       http_referer: row.get("http_referer")?,
+      turn_state: row.get("turn_state")?,
       access_expires_at: row.get("access_expires_at")?,
       status: {
          let raw: String = row.get("status")?;
@@ -89,7 +91,7 @@ fn from_row(row: &Row) -> rusqlite::Result<Account> {
    })
 }
 
-const COLS: &str = "id, provider, provider_account_id, trusted, auth_mode, email, label, plan_type, access_token, refresh_token, http_referer, access_expires_at, status, cooldown_until, disabled_reason, allowed_users";
+const COLS: &str = "id, provider, provider_account_id, trusted, auth_mode, email, label, plan_type, access_token, refresh_token, http_referer, turn_state, access_expires_at, status, cooldown_until, disabled_reason, allowed_users";
 
 pub struct NewAccount<'a> {
    pub provider: Provider,
@@ -257,6 +259,19 @@ impl Db {
             conn.execute(
                "UPDATE accounts SET http_referer = ?2, updated_at = unixepoch() WHERE id = ?1",
                params![id, referer],
+            )?;
+            Ok(())
+         })
+         .await
+   }
+
+   pub async fn set_account_turn_state(&self, id: i64, token: &str) -> Result<()> {
+      let token = token.to_owned();
+      self
+         .call(move |conn| {
+            conn.execute(
+               "UPDATE accounts SET turn_state = ?2, updated_at = unixepoch() WHERE id = ?1",
+               params![id, token],
             )?;
             Ok(())
          })

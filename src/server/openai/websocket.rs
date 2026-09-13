@@ -89,6 +89,7 @@ pub async fn responses(
       auth,
       account_id,
       attempts,
+      turn_state_blocks: turn_state_blocks(&upstream.headers),
       session_key,
       pending: BTreeMap::new(),
       upstream_failed: false,
@@ -111,6 +112,19 @@ pub async fn responses(
    response
 }
 
+/// Personal accounts are reported to get 10 AES blocks and a flagged account
+/// 11, per `gylive/ccodex-sleep-state`. Nothing from `OpenAI` confirms it.
+fn turn_state_blocks(headers: &HeaderMap) -> Option<i64> {
+   let core = headers
+      .get("x-codex-turn-state")?
+      .to_str()
+      .ok()?
+      .trim_end_matches('=');
+   let raw = core.len() * 3 / 4;
+   (core.starts_with("gAAAA") && raw >= 73 && (raw - 57).is_multiple_of(16))
+      .then(|| ((raw - 57) / 16) as i64)
+}
+
 struct Pending {
    capture: UsageCapture,
    _guard: LogGuard,
@@ -124,6 +138,7 @@ struct Relay {
    auth: AuthInfo,
    account_id: Option<i64>,
    attempts: u32,
+   turn_state_blocks: Option<i64>,
    session_key: String,
    pending: BTreeMap<String, VecDeque<Pending>>,
    upstream_failed: bool,
@@ -252,6 +267,7 @@ impl Relay {
          *upstream = redialed.response.socket;
          self.account_id = redialed.account_id;
          self.attempts = redialed.attempts;
+         self.turn_state_blocks = turn_state_blocks(&redialed.response.headers);
          self.upstream_failed = false;
       }
       req.stream = None;
@@ -281,6 +297,7 @@ impl Relay {
          .unwrap_or_default();
       record.service_tier = req.service_tier.unwrap_or_default();
       record.attempts = i64::from(self.attempts);
+      record.turn_state_blocks = self.turn_state_blocks;
       self.attempts = u32::from(self.account_id.is_some());
       let capture = UsageCapture::default();
       let guard = LogGuard::new(self.state.clone(), capture.clone(), record, started);

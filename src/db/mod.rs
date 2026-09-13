@@ -116,6 +116,7 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
    ("usage_log", "ttft_ms", "INTEGER"),
    ("usage_log", "stop_reason", "TEXT NOT NULL DEFAULT ''"),
    ("usage_log", "attempts", "INTEGER NOT NULL DEFAULT 0"),
+   ("usage_log", "turn_state_blocks", "INTEGER"),
    (
       "api_tokens",
       "allowed_providers",

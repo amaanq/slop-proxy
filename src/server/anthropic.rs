@@ -43,7 +43,9 @@ pub async fn messages(
       Provider::Anthropic | Provider::Glm | Provider::DeepSeek | Provider::Experiential => {
          return super::relay::messages(state, auth, headers, body, peek, provider).await;
       },
-      Provider::Zen if state.cfg.models.zen_dialect(&peek.upstream_model) == ZenDialect::Messages => {
+      Provider::Zen
+         if state.cfg.models.zen_dialect(&peek.upstream_model) == ZenDialect::Messages =>
+      {
          return super::relay::messages(state, auth, headers, body, peek, provider).await;
       },
       Provider::Gemini | Provider::Zen | Provider::OpenAi => {},
@@ -88,7 +90,11 @@ pub async fn messages(
       account_id,
       upstream,
       attempts,
-   } = match state.pools.responses(&state.cfg.models, provider, route, &upstream_req).await {
+   } = match state
+      .pools
+      .responses(&state.cfg.models, provider, route, &upstream_req)
+      .await
+   {
       Ok(dispatched) => dispatched,
       Err(err) => return dispatch_failed(&state, record, DIALECT, err),
    };

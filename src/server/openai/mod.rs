@@ -173,7 +173,11 @@ pub async fn chat_completions(
       account_id,
       upstream,
       attempts,
-   } = match state.pools.responses(&state.cfg.models, provider, route, &upstream_req).await {
+   } = match state
+      .pools
+      .responses(&state.cfg.models, provider, route, &upstream_req)
+      .await
+   {
       Ok(dispatched) => dispatched,
       Err(err) => return dispatch_failed(&state, record, DIALECT, err),
    };
@@ -1016,7 +1020,14 @@ pub async fn responses_passthrough(
       attempts,
    } = match state
       .pools
-      .responses_raw(&state.cfg.models, provider, route, encoded, typed.as_ref(), &headers)
+      .responses_raw(
+         &state.cfg.models,
+         provider,
+         route,
+         encoded,
+         typed.as_ref(),
+         &headers,
+      )
       .await
    {
       Ok(dispatched) => dispatched,

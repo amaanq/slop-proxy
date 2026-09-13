@@ -13,7 +13,6 @@ use super::relay::forwarded_response;
 use super::{AppState, LogGuard, log_error};
 use crate::codex::types::Usage;
 use crate::db::usage::UsageRecord;
-use crate::translate::bridge::BridgeProtocol;
 use crate::gemini::native::{NativeStream, chat_usage, response};
 use crate::gemini::sse::Frames;
 use crate::gemini::types::{GenerateContentRequest, GenerateContentResponse};
@@ -21,6 +20,7 @@ use crate::pool::Route;
 use crate::pool::gemini::Call;
 use crate::provider::Provider;
 use crate::translate::UsageCapture;
+use crate::translate::bridge::BridgeProtocol;
 use crate::translate::chat::{
    ChatChunk, ChatEnvelope, ChatError, ChatErrorBody, ChatRequest, ErrorCode, StreamOptions,
 };

@@ -120,9 +120,10 @@ pub fn response_error(event: &Value) -> Option<ResponseError> {
       Fault::Exhausted => Fault::Exhausted,
       Fault::Transient => Fault::Transient,
    };
-   (400..600)
-      .contains(&status)
-      .then_some(ResponseError { status: status as u16, fault })
+   (400..600).contains(&status).then_some(ResponseError {
+      status: status as u16,
+      fault,
+   })
 }
 
 impl CodexClient {

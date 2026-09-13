@@ -1,5 +1,6 @@
 use crate::clock;
 use crate::codex::models::ModelsResponse;
+use crate::codex::turn_state::TurnState;
 use crate::db::Db;
 use crate::db::accounts::{Account, AccountStatus};
 use crate::oauth::anthropic;
@@ -30,7 +31,26 @@ impl Slot {
    pub fn serves(&self, user: &str) -> bool {
       self.allowed_users.is_empty() || self.allowed_users.iter().any(|allowed| allowed == user)
    }
+
+   /// The token to dial with in place of `presented`, when this account holds
+   /// a cleaner one and a refused pin has gone quiet.
+   pub async fn preferred_turn_state(&self, presented: &TurnState) -> Option<TurnState> {
+      let state = self.state.lock().await;
+      let pinned = state
+         .turn_state
+         .as_ref()
+         .filter(|pinned| presented.blocks > pinned.blocks)?;
+      let quiet = state.turn_state_refused_at + TURN_STATE_SNOOZE_SECS;
+      (clock::unix_now() >= quiet).then(|| pinned.clone())
+   }
+
+   /// Records that the backend refused a handshake carrying the pinned token.
+   pub async fn refuse_turn_state(&self) {
+      self.state.lock().await.turn_state_refused_at = clock::unix_now();
+   }
 }
+
+const TURN_STATE_SNOOZE_SECS: i64 = 15 * 60;
 
 struct Credentials {
    access_token: String,
@@ -48,6 +68,10 @@ struct SlotState {
    /// until one is read.
    catalog: Option<Arc<ModelsResponse>>,
    catalog_at: i64,
+   /// The fewest-block `x-codex-turn-state` this account has produced, and
+   /// when a dial carrying it was last refused.
+   turn_state: Option<TurnState>,
+   turn_state_refused_at: i64,
 }
 
 /// Provider-reported consumption of an account's rolling limit windows.
@@ -351,6 +375,29 @@ impl Slots {
    pub async fn note_usage(&self, slot: &Slot, mut usage: AccountUsage) {
       usage.observed_at = clock::unix_now();
       slot.state.lock().await.usage = Some(usage);
+   }
+
+   /// Keeps the cleanest turn-state token an account's dials have returned,
+   /// across restarts.
+   pub async fn note_turn_state(&self, slot: &Slot, observed: TurnState) {
+      let mut state = slot.state.lock().await;
+      let supersedes = state
+         .turn_state
+         .as_ref()
+         .is_none_or(|held| observed.supersedes(held));
+      if !supersedes {
+         return;
+      }
+      state.turn_state = Some(observed.clone());
+      state.turn_state_refused_at = 0;
+      drop(state);
+      if let Err(err) = self
+         .db
+         .set_account_turn_state(slot.id, &observed.token)
+         .await
+      {
+         tracing::warn!("persisting turn-state for {} failed: {err}", slot.display);
+      }
    }
 
    pub async fn note_limit_windows(
@@ -696,6 +743,8 @@ fn slot_from_account(account: Account) -> Slot {
          model_cooldowns: BTreeMap::new(),
          catalog: None,
          catalog_at: 0,
+         turn_state: account.turn_state.as_deref().and_then(TurnState::parse),
+         turn_state_refused_at: 0,
       })),
    }
 }
@@ -737,6 +786,8 @@ pub fn test_slots(db: Db, provider: Provider, ids: &[(i64, bool)]) -> Slots {
                      model_cooldowns: BTreeMap::new(),
                      catalog: None,
                      catalog_at: 0,
+                     turn_state: None,
+                     turn_state_refused_at: 0,
                   })),
                })
             })
@@ -775,6 +826,8 @@ mod allowlist_tests {
             model_cooldowns: BTreeMap::new(),
             catalog: None,
             catalog_at: 0,
+            turn_state: None,
+            turn_state_refused_at: 0,
          })),
       }
    }

@@ -202,6 +202,9 @@ pub struct CodexConfig {
    pub instructions: Option<String>,
    pub instructions_file: Option<PathBuf>,
    pub forward_max_tokens: bool,
+   /// Dials with the cleanest `x-codex-turn-state` an account has produced,
+   /// and off means the caller's token always goes out.
+   pub pin_turn_state: bool,
    /// Fraction of a rolling window past which an account is ranked behind
    /// its peers, so traffic moves before the window rejects it.
    pub soft_utilization_limit: f64,
@@ -217,6 +220,7 @@ impl Default for CodexConfig {
          instructions: None,
          instructions_file: None,
          forward_max_tokens: true,
+         pin_turn_state: true,
          soft_utilization_limit: 0.9,
       }
    }

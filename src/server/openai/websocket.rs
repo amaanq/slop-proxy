@@ -16,6 +16,7 @@ use tokio_tungstenite::tungstenite::Message as UpstreamMessage;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame as UpstreamCloseFrame;
 
 use super::{DIALECT, PassthroughRequest, prepare_request, restore_reserved_namespace};
+use crate::codex::turn_state::TurnState;
 use crate::codex::types::{ResponsesEvent, ResponsesRequest};
 use crate::codex::websocket::{Fault, MAX_MESSAGE_SIZE, Socket, response_error as upstream_error};
 use crate::db::usage::AdmissionError;
@@ -82,6 +83,7 @@ pub async fn responses(
       Ok(served) => served,
       Err(err) => return pool_error_response(DIALECT, &state.cfg.models, err),
    };
+   let turn_state_blocks = observe_turn_state(&state, account_id, &upstream.headers).await;
    let relay = Relay {
       state,
       token: bearer_token(&headers, uri.query()).unwrap_or_default(),
@@ -89,7 +91,7 @@ pub async fn responses(
       auth,
       account_id,
       attempts,
-      turn_state_blocks: turn_state_blocks(&upstream.headers),
+      turn_state_blocks,
       session_key,
       pending: BTreeMap::new(),
       upstream_failed: false,
@@ -112,17 +114,20 @@ pub async fn responses(
    response
 }
 
-/// Personal accounts are reported to get 10 AES blocks and a flagged account
-/// 11, per `gylive/ccodex-sleep-state`. Nothing from `OpenAI` confirms it.
-fn turn_state_blocks(headers: &HeaderMap) -> Option<i64> {
-   let core = headers
-      .get("x-codex-turn-state")?
-      .to_str()
-      .ok()?
-      .trim_end_matches('=');
-   let raw = core.len() * 3 / 4;
-   (core.starts_with("gAAAA") && raw >= 73 && (raw - 57).is_multiple_of(16))
-      .then(|| ((raw - 57) / 16) as i64)
+/// Records the handshake's block count and keeps the account's cleanest token.
+async fn observe_turn_state(
+   state: &AppState,
+   account_id: Option<i64>,
+   headers: &HeaderMap,
+) -> Option<i64> {
+   let observed = TurnState::from_headers(headers)?;
+   let blocks = observed.blocks as i64;
+   state
+      .pools
+      .codex
+      .note_turn_state(account_id, observed)
+      .await;
+   Some(blocks)
 }
 
 struct Pending {
@@ -267,7 +272,12 @@ impl Relay {
          *upstream = redialed.response.socket;
          self.account_id = redialed.account_id;
          self.attempts = redialed.attempts;
-         self.turn_state_blocks = turn_state_blocks(&redialed.response.headers);
+         self.turn_state_blocks = Box::pin(observe_turn_state(
+            &self.state,
+            redialed.account_id,
+            &redialed.response.headers,
+         ))
+         .await;
          self.upstream_failed = false;
       }
       req.stream = None;

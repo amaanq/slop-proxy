@@ -47,6 +47,7 @@ pub struct UsageRecord {
    pub ttft_ms: Option<i64>,
    pub stop_reason: String,
    pub attempts: i64,
+   pub turn_state_blocks: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Default)]
@@ -648,9 +649,9 @@ fn insert_usage(conn: &mut rusqlite::Connection, record: &UsageRecord) -> Result
    txn.execute(
             "INSERT INTO usage_log (token_id, user, account_id, provider, dialect, requested_model, upstream_model, effort, service_tier,
                input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, cost_usd, list_cost_usd, status, error_kind, duration_ms,
-               session_key, turn_index, tools_declared, tools_called, thinking_budget, image_count, request_bytes, response_bytes, ttft_ms, stop_reason, attempts)
+               session_key, turn_index, tools_declared, tools_called, thinking_budget, image_count, request_bytes, response_bytes, ttft_ms, stop_reason, attempts, turn_state_blocks)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                     ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30)",
+                     ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31)",
             params![
                 record.token_id,
                 record.user,
@@ -682,6 +683,7 @@ fn insert_usage(conn: &mut rusqlite::Connection, record: &UsageRecord) -> Result
                 record.ttft_ms,
                 record.stop_reason,
                 record.attempts,
+                record.turn_state_blocks,
             ],
         )?;
    if let Some(meter_id) = record.meter_id {

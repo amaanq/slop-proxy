@@ -9,7 +9,7 @@ use super::deepseek::DeepSeekPool;
 use super::experiential::ExperientialPool;
 use super::gemini::{Call, GeminiPool};
 use super::glm::GlmPool;
-use super::zen::{Relay as ZenRelay, ZenPool};
+use super::zen::{Relay as ZenRelay, ZenPool, satisfy_tool_gate};
 use super::{AccountSnapshot, Backend, PoolError, Route, Served};
 use crate::anthropic::client::AnthropicClient;
 use crate::codex::client::CodexClient;
@@ -184,7 +184,7 @@ impl Pools {
                route,
                ZenRelay {
                   path: "/responses",
-                  body,
+                  body: satisfy_tool_gate(&body).unwrap_or(body),
                },
             )
             .await

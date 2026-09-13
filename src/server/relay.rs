@@ -20,7 +20,7 @@ use crate::pool::anthropic::Relay as AnthropicRelay;
 use crate::pool::experiential::Relay as ExperientialRelay;
 use crate::pool::glm::Relay as GlmRelay;
 use crate::pool::zen::Relay as ZenRelay;
-use crate::pool::{PoolError, Route, UsageWindow};
+use crate::pool::{PoolError, Route, Served, UsageWindow};
 use crate::provider::Provider;
 use crate::translate::UsageCapture;
 use crate::translate::anthropic_req::AnthropicRequest;
@@ -324,7 +324,8 @@ pub async fn messages(
             body,
          };
          let opened = timeout(ZEN_FIRST_FRAME, async {
-            let (account_id, mut resp) = state.pools.zen.execute(route, relay).await?;
+            let served = state.pools.zen.execute(route, relay).await?;
+            let mut resp = served.response;
             let opening = if is_event_stream(&resp) {
                resp
                   .chunk()
@@ -333,11 +334,17 @@ pub async fn messages(
             } else {
                None
             };
-            Ok((account_id, resp, opening))
+            Ok(Served {
+               account_id: served.account_id,
+               response: (resp, opening),
+               attempts: served.attempts,
+            })
          })
          .await;
          match opened {
-            Ok(Ok((_, resp, opening))) if opening.is_none() && is_event_stream(&resp) => {
+            Ok(Ok(served))
+               if served.response.1.is_none() && is_event_stream(&served.response.0) =>
+            {
                tracing::warn!(
                   model = %peek.upstream_model,
                   "zen answered 200 and closed the stream without a byte"
@@ -346,9 +353,13 @@ pub async fn messages(
                   "zen answered 200 and closed the stream without a byte".into(),
                ))
             },
-            Ok(Ok((account_id, resp, opening))) => {
-               first = opening;
-               Ok((account_id, resp))
+            Ok(Ok(served)) => {
+               first = served.response.1;
+               Ok(Served {
+                  account_id: served.account_id,
+                  response: served.response.0,
+                  attempts: served.attempts,
+               })
             },
             Ok(Err(err)) => Err(err),
             Err(_) => {
@@ -368,11 +379,13 @@ pub async fn messages(
          body: "not served over the messages api".into(),
       }),
    };
-   let (account_id, resp) = match result {
-      Ok(result) => result,
+   let served = match result {
+      Ok(served) => served,
       Err(err) => return dispatch_failed(&state, record, DIALECT, err),
    };
-   record.account_id = account_id;
+   record.account_id = served.account_id;
+   record.attempts = i64::from(served.attempts);
+   let resp = served.response;
    record.status = i64::from(resp.status().as_u16());
    let mut builder = forwarded_response(&resp);
    if provider == Provider::Anthropic {
@@ -481,7 +494,7 @@ pub async fn count_tokens(
       )
       .await
    {
-      Ok((_, resp)) => resp,
+      Ok(served) => served.response,
       Err(err) => return pool_error_response(DIALECT, &state.cfg.models, err),
    };
    let builder = forwarded_response(&resp);

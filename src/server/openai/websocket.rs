@@ -19,7 +19,7 @@ use super::{DIALECT, PassthroughRequest, prepare_request, restore_reserved_names
 use crate::codex::types::{ResponsesEvent, ResponsesRequest};
 use crate::codex::websocket::{Fault, MAX_MESSAGE_SIZE, Socket, response_error as upstream_error};
 use crate::db::usage::AdmissionError;
-use crate::pool::Route;
+use crate::pool::{Route, Served};
 use crate::provider::Provider;
 use crate::server::auth::{AuthInfo, bearer_token};
 use crate::server::error::{error_response, out_of_scope, pool_error_response, translation_error};
@@ -74,8 +74,12 @@ pub async fn responses(
       pinned_account: auth.limits.pinned_account,
       prefer_trusted: auth.limits.prefer_trusted,
    };
-   let (account_id, upstream) = match state.pools.codex.websocket(route, headers.clone()).await {
-      Ok(connection) => connection,
+   let Served {
+      account_id,
+      response: upstream,
+      attempts,
+   } = match state.pools.codex.websocket(route, headers.clone()).await {
+      Ok(served) => served,
       Err(err) => return pool_error_response(DIALECT, &state.cfg.models, err),
    };
    let relay = Relay {
@@ -84,6 +88,7 @@ pub async fn responses(
       headers,
       auth,
       account_id,
+      attempts,
       session_key,
       pending: BTreeMap::new(),
       upstream_failed: false,
@@ -118,6 +123,7 @@ struct Relay {
    headers: HeaderMap,
    auth: AuthInfo,
    account_id: Option<i64>,
+   attempts: u32,
    session_key: String,
    pending: BTreeMap<String, VecDeque<Pending>>,
    upstream_failed: bool,
@@ -235,7 +241,7 @@ impl Relay {
                "changing service tier requires a new connection with the complete input history",
             ));
          }
-         let (account_id, connection) = self
+         let redialed = self
             .state
             .pools
             .codex
@@ -243,8 +249,9 @@ impl Relay {
             .await
             .map_err(|error| pool_error_response(DIALECT, &self.state.cfg.models, error))?;
          let _ = send_upstream(upstream, UpstreamMessage::Close(None)).await;
-         *upstream = connection.socket;
-         self.account_id = account_id;
+         *upstream = redialed.response.socket;
+         self.account_id = redialed.account_id;
+         self.attempts = redialed.attempts;
          self.upstream_failed = false;
       }
       req.stream = None;
@@ -273,6 +280,8 @@ impl Relay {
          .and_then(|reasoning| reasoning.effort)
          .unwrap_or_default();
       record.service_tier = req.service_tier.unwrap_or_default();
+      record.attempts = i64::from(self.attempts);
+      self.attempts = u32::from(self.account_id.is_some());
       let capture = UsageCapture::default();
       let guard = LogGuard::new(self.state.clone(), capture.clone(), record, started);
       self.pending.entry(stream).or_default().push_back(Pending {

@@ -9,7 +9,7 @@ use super::experiential::ExperientialPool;
 use super::gemini::{Call, GeminiPool};
 use super::glm::GlmPool;
 use super::zen::{Relay as ZenRelay, ZenPool};
-use super::{AccountSnapshot, Backend, PoolError, Route};
+use super::{AccountSnapshot, Backend, PoolError, Route, Served};
 use crate::anthropic::client::AnthropicClient;
 use crate::codex::client::CodexClient;
 use crate::codex::sse;
@@ -56,6 +56,7 @@ impl Upstream {
 pub struct Dispatched {
    pub account_id: Option<i64>,
    pub upstream: Upstream,
+   pub attempts: u32,
 }
 
 pub struct Pools {
@@ -156,9 +157,10 @@ impl Pools {
       typed: Option<&ResponsesRequest>,
       headers: &HeaderMap,
    ) -> Result<Dispatched, PoolError> {
-      let raw = |(account_id, response)| Dispatched {
-         account_id,
-         upstream: Upstream::Responses(response),
+      let raw = |served: Served<reqwest::Response>| Dispatched {
+         account_id: served.account_id,
+         upstream: Upstream::Responses(served.response),
+         attempts: served.attempts,
       };
       match provider {
          Provider::OpenAi => self.codex.post(route, body, headers.clone()).await.map(raw),
@@ -183,15 +185,15 @@ impl Pools {
             };
             let custom = custom_tools(req);
             let chat = to_chat(req);
-            let (account_id, reply) = self
+            let served = self
                .gemini
                .execute(route, Call::OpenAi(Box::new(chat)))
                .await?;
             // Google answers a malformed request with a 400 body and no
             // frames, which read as an empty stream and billed as a
             // client disconnect.
-            if !reply.response.status().is_success() {
-               let error_body = reply.response.text().await.unwrap_or_default();
+            if !served.response.response.status().is_success() {
+               let error_body = served.response.response.text().await.unwrap_or_default();
                return Err(PoolError::BadRequest {
                   provider,
                   model: route.model.to_owned(),
@@ -199,10 +201,11 @@ impl Pools {
                });
             }
             Ok(Dispatched {
-               account_id,
+               account_id: served.account_id,
+               attempts: served.attempts,
                upstream: Upstream::Bridged {
-                  response: reply.response,
-                  protocol: reply.protocol,
+                  response: served.response.response,
+                  protocol: served.response.protocol,
                   custom,
                },
             })

@@ -211,6 +211,9 @@ pub struct ModelsConfig {
    pub gemini_patterns: Vec<String>,
    /// Model patterns served by `OpenCode` Zen.
    pub zen_patterns: Vec<String>,
+   /// Zen models answered on its messages endpoint instead of its responses
+   /// one. Also routes to zen, so a name belongs in one list or the other.
+   pub zen_messages_patterns: Vec<String>,
    /// Model patterns served by Z.ai's anthropic-compatible endpoint.
    pub glm_patterns: Vec<String>,
    /// Model patterns relayed verbatim to the Experiential gateway over
@@ -228,6 +231,7 @@ impl Default for ModelsConfig {
          anthropic_patterns: vec!["claude-*".into()],
          gemini_patterns: vec!["gemini-*".into()],
          zen_patterns: Vec::new(),
+         zen_messages_patterns: Vec::new(),
          glm_patterns: vec!["glm-*".into()],
          experiential_patterns: Vec::new(),
       }
@@ -259,14 +263,30 @@ impl ModelsConfig {
       best.map(|(_, provider)| provider)
    }
 
-   const fn sets(&self) -> [(Provider, &Vec<String>); 5] {
+   const fn sets(&self) -> [(Provider, &Vec<String>); 6] {
       [
          (Provider::Anthropic, &self.anthropic_patterns),
          (Provider::Gemini, &self.gemini_patterns),
          (Provider::Zen, &self.zen_patterns),
+         (Provider::Zen, &self.zen_messages_patterns),
          (Provider::Glm, &self.glm_patterns),
          (Provider::Experiential, &self.experiential_patterns),
       ]
+   }
+
+   /// Zen answers each model in exactly one dialect. `union-alpha` and the
+   /// other chat-native ones 500 on `/responses` and take `/messages`.
+   pub fn zen_speaks_messages(&self, model: &str) -> bool {
+      let best = |patterns: &Vec<String>| {
+         patterns
+            .iter()
+            .filter_map(|pattern| pattern_specificity(pattern, model))
+            .max()
+      };
+      match (best(&self.zen_messages_patterns), best(&self.zen_patterns)) {
+         (Some(messages), Some(responses)) => messages > responses,
+         (messages, _) => messages.is_some(),
+      }
    }
 
    /// The name meant when a backend prefix was dropped, `fable-5-1` for

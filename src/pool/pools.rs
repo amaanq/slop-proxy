@@ -8,7 +8,7 @@ use super::codex::CodexPool;
 use super::experiential::ExperientialPool;
 use super::gemini::{Call, GeminiPool};
 use super::glm::GlmPool;
-use super::zen::ZenPool;
+use super::zen::{Relay as ZenRelay, ZenPool};
 use super::{AccountSnapshot, Backend, PoolError, Route};
 use crate::anthropic::client::AnthropicClient;
 use crate::codex::client::CodexClient;
@@ -162,7 +162,17 @@ impl Pools {
       };
       match provider {
          Provider::OpenAi => self.codex.post(route, body, headers.clone()).await.map(raw),
-         Provider::Zen => self.zen.execute(route, body).await.map(raw),
+         Provider::Zen => self
+            .zen
+            .execute(
+               route,
+               ZenRelay {
+                  path: "/responses",
+                  body,
+               },
+            )
+            .await
+            .map(raw),
          Provider::Gemini => {
             let Some(req) = typed else {
                return Err(PoolError::BadRequest {

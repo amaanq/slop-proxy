@@ -128,6 +128,10 @@ pub async fn chat_completions(
          log_rejected(&state, &auth, "chat", &req.model);
          return translation_error(DIALECT, "this model is served over /v1/messages");
       },
+      Provider::Zen if state.cfg.models.zen_speaks_messages(&resolved.model) => {
+         log_rejected(&state, &auth, "chat", &req.model);
+         return translation_error(DIALECT, "this model is served over /v1/messages");
+      },
       Provider::Zen | Provider::OpenAi => {},
    }
    let mut upstream_req = match openai_req::to_responses(&req, &state.cfg) {
@@ -249,7 +253,9 @@ pub async fn models(
          .models()
          .await
          .into_iter()
-         .filter(|id| state.cfg.models.route(id) == Provider::Zen)
+         .filter(|id| {
+            state.cfg.models.route(id) == Provider::Zen && !state.cfg.models.zen_speaks_messages(id)
+         })
          .collect();
       return state
          .catalog(&auth.user, auth.limits.pinned_account)
@@ -800,10 +806,12 @@ fn prepare_request(
    // Scope is decided by where the model resolves, not by the endpoint. This
    // surface is the Responses API, which zen speaks as well as codex does.
    let provider = state.cfg.models.route(&resolved.model);
-   if !matches!(
-      provider,
-      Provider::OpenAi | Provider::Zen | Provider::Gemini
-   ) {
+   let responses_native = match provider {
+      Provider::OpenAi | Provider::Gemini => true,
+      Provider::Zen => !state.cfg.models.zen_speaks_messages(&resolved.model),
+      Provider::Anthropic | Provider::Glm | Provider::Experiential => false,
+   };
+   if !responses_native {
       return Err(Box::new(translation_error(
          DIALECT,
          "this model is not served over the responses api",

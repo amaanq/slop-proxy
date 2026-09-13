@@ -11,6 +11,12 @@ use crate::zen::client::ZenClient;
 /// empty pool is a working pool rather than an error.
 pub type ZenPool = Pool<ZenClient>;
 
+#[derive(Clone)]
+pub struct Relay {
+   pub path: &'static str,
+   pub body: Bytes,
+}
+
 impl Backend for ZenClient {
    const PROVIDER: Provider = Provider::Zen;
    const RATE_LIMIT: Cooldown = Cooldown {
@@ -19,7 +25,7 @@ impl Backend for ZenClient {
    };
    const ON_AUTH: AuthPolicy = AuthPolicy::CoolKey(15 * 60);
    const ANONYMOUS: bool = true;
-   type Request = Bytes;
+   type Request = Relay;
    type Response = reqwest::Response;
 
    fn reason(body: String) -> String {
@@ -33,7 +39,7 @@ impl Backend for ZenClient {
       route: Route<'_>,
       req: &Self::Request,
    ) -> Result<Self::Response, SendError> {
-      Self::post(self, Some(token), &session(route), req).await
+      Self::post(self, Some(token), &session(route), req.path, &req.body).await
    }
 
    async fn send_anonymous(
@@ -41,7 +47,7 @@ impl Backend for ZenClient {
       route: Route<'_>,
       req: &Self::Request,
    ) -> Result<Self::Response, SendError> {
-      Self::post(self, None, &session(route), req).await
+      Self::post(self, None, &session(route), req.path, &req.body).await
    }
 }
 

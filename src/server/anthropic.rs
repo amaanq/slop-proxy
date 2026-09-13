@@ -42,6 +42,9 @@ pub async fn messages(
       Provider::Anthropic | Provider::Glm | Provider::Experiential => {
          return super::relay::messages(state, auth, headers, body, peek, provider).await;
       },
+      Provider::Zen if state.cfg.models.zen_speaks_messages(&peek.upstream_model) => {
+         return super::relay::messages(state, auth, headers, body, peek, provider).await;
+      },
       Provider::Gemini | Provider::Zen | Provider::OpenAi => {},
    }
    let req = match serde_json::from_slice::<AnthropicRequest>(&body) {

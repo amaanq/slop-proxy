@@ -17,6 +17,7 @@ use crate::db::usage::UsageRecord;
 use crate::pool::anthropic::Relay as AnthropicRelay;
 use crate::pool::experiential::Relay as ExperientialRelay;
 use crate::pool::glm::Relay as GlmRelay;
+use crate::pool::zen::Relay as ZenRelay;
 use crate::pool::{PoolError, Route, UsageWindow};
 use crate::provider::Provider;
 use crate::translate::UsageCapture;
@@ -314,7 +315,20 @@ pub async fn messages(
             )
             .await
       },
-      Provider::OpenAi | Provider::Gemini | Provider::Zen => Err(PoolError::BadRequest {
+      Provider::Zen => {
+         state
+            .pools
+            .zen
+            .execute(
+               route,
+               ZenRelay {
+                  path: "/messages",
+                  body,
+               },
+            )
+            .await
+      },
+      Provider::OpenAi | Provider::Gemini => Err(PoolError::BadRequest {
          provider,
          model: peek.upstream_model.clone(),
          body: "not served over the messages api".into(),
@@ -551,6 +565,13 @@ fn apply_event(capture: &UsageCapture, event: RelayEvent) {
       RelayEvent::MessageDelta { usage, delta } => {
          if let Some(usage) = usage {
             guard.output_tokens = usage.output_tokens;
+            // Zen reports a streamed turn's input as zero in message_start
+            // and only settles it here, where anthropic sends nothing.
+            if usage.input_tokens > 0 {
+               guard.input_tokens = usage.input_tokens;
+               guard.cache_read_tokens = usage.cache_read_input_tokens;
+               guard.cache_write_tokens = usage.cache_creation_input_tokens;
+            }
          }
          if let Some(reason) = delta.and_then(|stop| stop.stop_reason) {
             guard.stop_reason = Some(reason);

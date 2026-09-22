@@ -110,6 +110,12 @@ pub enum AccountsCommand {
       #[pound(long)]
       off: bool,
    },
+   /// Reserve an account for reserved-only tokens, or release it with --off
+   Reserve {
+      account: String,
+      #[pound(long)]
+      off: bool,
+   },
    /// Restrict an account to these users, comma separated. Omit to allow all.
    Users {
       account: String,
@@ -138,6 +144,9 @@ pub enum TokenCommand {
       /// Serve this token from trusted accounts when any are available
       #[pound(long)]
       prefer_trusted: bool,
+      /// Serve this token only from reserved accounts
+      #[pound(long)]
+      reserved_only: bool,
       /// Providers this token may reach, comma separated. Empty allows all.
       #[pound(long)]
       providers: Option<String>,
@@ -162,6 +171,9 @@ pub enum TokenCommand {
       slowdown_ms: i64,
       #[pound(long)]
       prefer_trusted: bool,
+      /// Serve this token only from reserved accounts
+      #[pound(long)]
+      reserved_only: bool,
       /// Providers this token may reach, comma separated. Empty allows all.
       #[pound(long)]
       providers: Option<String>,
@@ -221,6 +233,7 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
          } => accounts_add_key(&db, provider, &key, label.as_deref(), referer.as_deref()).await,
          AccountsCommand::Remove { account } => accounts_remove(&db, &account).await,
          AccountsCommand::Trust { account, off } => accounts_trust(&db, &account, !off).await,
+         AccountsCommand::Reserve { account, off } => accounts_reserve(&db, &account, !off).await,
          AccountsCommand::Users { account, allow } => {
             accounts_users(&db, &account, allow.as_deref().unwrap_or_default()).await
          },
@@ -233,6 +246,7 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
             window_seconds,
             slowdown_ms,
             prefer_trusted,
+            reserved_only,
             providers,
             pin_account,
          } => {
@@ -242,6 +256,7 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
                window_seconds,
                slowdown_ms,
                prefer_trusted,
+               reserved_only,
                providers,
                resolve_pin(&db, pin_account).await?,
             )?;
@@ -256,6 +271,7 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
             window_seconds,
             slowdown_ms,
             prefer_trusted,
+            reserved_only,
             providers,
             pin_account,
          } => {
@@ -265,6 +281,7 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
                window_seconds,
                slowdown_ms,
                prefer_trusted,
+               reserved_only,
                providers,
                resolve_pin(&db, pin_account).await?,
             )?;
@@ -334,6 +351,7 @@ async fn accounts_list(db: &Db) -> Result<()> {
       id: i64,
       provider: &'a str,
       trusted: bool,
+      reserved: bool,
       email: Option<&'a str>,
       plan_type: Option<&'a str>,
       status: &'static str,
@@ -351,6 +369,7 @@ async fn accounts_list(db: &Db) -> Result<()> {
          id: account.id,
          provider: account.provider.as_str(),
          trusted: account.trusted,
+         reserved: account.reserved,
          email: account.email.as_deref(),
          plan_type: account.plan_type.as_deref(),
          status: account.status.as_str(),
@@ -373,6 +392,18 @@ async fn accounts_trust(db: &Db, account: &str, trusted: bool) -> Result<()> {
    println!(
       "account {account} is now {}",
       if trusted { "trusted" } else { "untrusted" }
+   );
+   Ok(())
+}
+
+async fn accounts_reserve(db: &Db, account: &str, reserved: bool) -> Result<()> {
+   let Some(found) = db.find_account(account).await? else {
+      bail!("no account matched {account:?}");
+   };
+   db.set_account_reserved(found.id, reserved).await?;
+   println!(
+      "account {account} is now {}",
+      if reserved { "reserved" } else { "unreserved" }
    );
    Ok(())
 }
@@ -428,12 +459,17 @@ async fn resolve_pin(db: &Db, account: Option<String>) -> Result<Option<i64>> {
    Ok(Some(found.id))
 }
 
+#[expect(
+   clippy::too_many_arguments,
+   reason = "both token subcommands hand over the same set of flags"
+)]
 fn token_limits(
    requests: Option<i64>,
    tokens: Option<i64>,
    window_seconds: i64,
    slowdown_ms: i64,
    prefer_trusted: bool,
+   reserved_only: bool,
    providers: Option<String>,
    pinned_account: Option<i64>,
 ) -> Result<TokenLimits> {
@@ -466,6 +502,7 @@ fn token_limits(
       window_seconds,
       slowdown_ms,
       prefer_trusted,
+      reserved_only,
       pinned_account,
       providers,
    })

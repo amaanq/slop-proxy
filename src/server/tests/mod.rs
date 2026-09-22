@@ -492,6 +492,7 @@ async fn token_request_limit_enforced() {
          slowdown_ms: 0,
          prefer_trusted: false,
          pinned_account: None,
+         reserved_only: false,
       },
    )
    .await

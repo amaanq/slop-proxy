@@ -75,6 +75,7 @@ pub async fn chat_completions(
             user: &auth.user,
             pinned_account: auth.limits.pinned_account,
             prefer_trusted: false,
+            reserved_only: auth.limits.reserved_only,
          },
          Call::OpenAi(Box::new(body)),
       )
@@ -384,6 +385,7 @@ pub async fn native(
             user: &auth.user,
             pinned_account: auth.limits.pinned_account,
             prefer_trusted: false,
+            reserved_only: auth.limits.reserved_only,
          },
          call,
       )

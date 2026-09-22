@@ -40,11 +40,11 @@ impl Backend for AnthropicClient {
    async fn send(
       &self,
       token: &str,
-      _slot: &Slot,
+      slot: &Slot,
       _route: Route<'_>,
       req: &Self::Request,
    ) -> Result<Self::Response, SendError> {
-      Self::post(self, token, req.path, &req.body, &req.hdrs).await
+      Self::post(self, token, slot.auth_mode, req.path, &req.body, &req.hdrs).await
    }
 }
 
@@ -69,7 +69,7 @@ impl Pool<AnthropicClient> {
    /// and a locked account is known before it rejects traffic.
    pub async fn poll_usage(&self) {
       for slot in self.slots.list().await {
-         if self.slots.is_disabled(&slot).await {
+         if !slot.auth_mode.refreshable() || self.slots.is_disabled(&slot).await {
             continue;
          }
          let Ok(token) = self.slots.fresh_token(&slot, false).await else {
@@ -168,6 +168,7 @@ mod tests {
             user: "",
             pinned_account: None,
             prefer_trusted: false,
+            reserved_only: false,
          })
          .await
    }

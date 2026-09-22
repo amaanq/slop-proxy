@@ -264,6 +264,7 @@ pub async fn messages(
    record.session_key = key.clone();
    if provider == Provider::Anthropic
       && state.cfg.anthropic.require_claude_code
+      && !auth.limits.reserved_only
       && !is_claude_code(&headers)
    {
       log_error(&state, record, 403, "not_claude_code");
@@ -276,6 +277,7 @@ pub async fn messages(
       user: &auth.user,
       pinned_account: auth.limits.pinned_account,
       prefer_trusted: false,
+      reserved_only: auth.limits.reserved_only,
    };
    let body = normalized_body(&body, &peek);
    let (result, first) = dispatch(&state, route, provider, body, &headers, &peek).await;
@@ -503,7 +505,10 @@ pub async fn count_tokens(
    body: Bytes,
    peek: Peek,
 ) -> Response {
-   if state.cfg.anthropic.require_claude_code && !is_claude_code(&headers) {
+   if state.cfg.anthropic.require_claude_code
+      && !auth.limits.reserved_only
+      && !is_claude_code(&headers)
+   {
       return not_claude_code(&auth.user, &headers);
    }
 
@@ -520,6 +525,7 @@ pub async fn count_tokens(
             user: &auth.user,
             pinned_account: auth.limits.pinned_account,
             prefer_trusted: false,
+            reserved_only: auth.limits.reserved_only,
          },
          AnthropicRelay {
             path: "/v1/messages/count_tokens",

@@ -3,6 +3,7 @@ CREATE TABLE IF NOT EXISTS accounts (
   provider            TEXT    NOT NULL,
   provider_account_id TEXT    NOT NULL,
   trusted             INTEGER NOT NULL DEFAULT 0,
+  reserved            INTEGER NOT NULL DEFAULT 0,
   auth_mode           TEXT    NOT NULL DEFAULT 'oauth',
   email               TEXT,
   label               TEXT,
@@ -31,6 +32,7 @@ CREATE TABLE IF NOT EXISTS api_tokens (
   window_seconds INTEGER NOT NULL DEFAULT 3600,
   slowdown_ms    INTEGER NOT NULL DEFAULT 0,
   prefer_trusted INTEGER NOT NULL DEFAULT 0,
+  reserved_only  INTEGER NOT NULL DEFAULT 0,
   allowed_providers TEXT NOT NULL DEFAULT '',
   created_at     INTEGER NOT NULL DEFAULT (unixepoch()),
   revoked_at     INTEGER

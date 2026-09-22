@@ -22,6 +22,8 @@ pub struct TokenLimits {
    pub window_seconds: i64,
    pub slowdown_ms: i64,
    pub prefer_trusted: bool,
+   /// Only this token's requests may use reserved accounts, and it uses nothing else.
+   pub reserved_only: bool,
    /// The one account this token may be served by. `None` leaves it free to
    /// use any account the pool offers.
    pub pinned_account: Option<i64>,
@@ -90,7 +92,7 @@ impl Db {
             let mut stmt = conn.prepare(
                "SELECT id, user, token_prefix, created_at, revoked_at,
                     request_limit, token_limit, window_seconds, slowdown_ms, prefer_trusted,
-                    pinned_account, allowed_providers
+                    reserved_only, pinned_account, allowed_providers
              FROM api_tokens ORDER BY id",
             )?;
             let rows = stmt.query_map([], |row| {
@@ -106,8 +108,9 @@ impl Db {
                      window_seconds: row.get(7)?,
                      slowdown_ms: row.get(8)?,
                      prefer_trusted: row.get(9)?,
-                     pinned_account: row.get(10)?,
-                     providers: TokenLimits::decode(&row.get::<_, String>(11)?),
+                     reserved_only: row.get(10)?,
+                     pinned_account: row.get(11)?,
+                     providers: TokenLimits::decode(&row.get::<_, String>(12)?),
                   },
                })
             })?;
@@ -139,7 +142,7 @@ impl Db {
             Ok(conn.execute(
                "UPDATE api_tokens
              SET request_limit = ?3, token_limit = ?4, window_seconds = ?5, slowdown_ms = ?6,
-                 prefer_trusted = ?7, pinned_account = ?8, allowed_providers = ?9
+                 prefer_trusted = ?7, reserved_only = ?8, pinned_account = ?9, allowed_providers = ?10
              WHERE id = ?1 OR token_prefix = ?2",
                params![
                   id,
@@ -149,6 +152,7 @@ impl Db {
                   limits.window_seconds,
                   limits.slowdown_ms,
                   limits.prefer_trusted,
+                  limits.reserved_only,
                   limits.pinned_account,
                   limits.encode(),
                ],
@@ -163,7 +167,7 @@ impl Db {
          .call(move |conn| {
             let mut stmt = conn.prepare(
                "SELECT id, user, request_limit, token_limit, window_seconds, slowdown_ms,
-                    prefer_trusted, pinned_account, allowed_providers
+                    prefer_trusted, reserved_only, pinned_account, allowed_providers
              FROM api_tokens WHERE token_hash = ?1 AND revoked_at IS NULL",
             )?;
             let mut rows = stmt.query_map(params![token_hash], |row| {
@@ -176,8 +180,9 @@ impl Db {
                      window_seconds: row.get(4)?,
                      slowdown_ms: row.get(5)?,
                      prefer_trusted: row.get(6)?,
-                     pinned_account: row.get(7)?,
-                     providers: TokenLimits::decode(&row.get::<_, String>(8)?),
+                     reserved_only: row.get(7)?,
+                     pinned_account: row.get(8)?,
+                     providers: TokenLimits::decode(&row.get::<_, String>(9)?),
                   },
                })
             })?;

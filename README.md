@@ -84,6 +84,18 @@ This integration supports `/v1/messages` only. Experiential models are not
 served over `/v1/responses` or `/v1/chat/completions`. Existing provider routes
 stay unchanged until you configure `experiential_patterns`.
 
+## Anthropic API keys
+
+Store a paid key with `accounts add-key --provider anthropic`. Reserving it
+keeps it out of the shared pool, so pooled Max seats never serve it and it
+never serves them. Only a token minted with `--reserved-only` can reach it.
+
+```sh
+slop-proxy accounts add-key --provider anthropic --key "$ANTHROPIC_API_KEY"
+slop-proxy accounts reserve <account>
+slop-proxy token create --user alice --reserved-only
+```
+
 ## Zen egress proxies
 
 Set `zen.proxy_urls` to send only OpenCode Zen traffic through HTTP proxies.

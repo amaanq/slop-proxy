@@ -83,6 +83,7 @@ async fn retry_after_on_request_limit_for_both_dialects() {
          slowdown_ms: 0,
          prefer_trusted: false,
          pinned_account: None,
+         reserved_only: false,
       },
    )
    .await
@@ -174,6 +175,7 @@ async fn retry_after_on_token_limit() {
          slowdown_ms: 0,
          prefer_trusted: false,
          pinned_account: None,
+         reserved_only: false,
       },
    )
    .await
@@ -307,6 +309,7 @@ async fn rate_limit_headers_present_on_success() {
          slowdown_ms: 0,
          prefer_trusted: false,
          pinned_account: None,
+         reserved_only: false,
       },
    )
    .await

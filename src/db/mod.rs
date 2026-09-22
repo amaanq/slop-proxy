@@ -104,6 +104,7 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
    ("accounts", "auth_mode", "TEXT NOT NULL DEFAULT 'oauth'"),
    ("accounts", "allowed_users", "TEXT NOT NULL DEFAULT ''"),
    ("accounts", "reserved", "INTEGER NOT NULL DEFAULT 0"),
+   ("accounts", "egress", "INTEGER NOT NULL DEFAULT 0"),
    ("usage_log", "provider", "TEXT NOT NULL DEFAULT ''"),
    ("usage_log", "list_cost_usd", "REAL NOT NULL DEFAULT 0"),
    ("usage_log", "service_tier", "TEXT NOT NULL DEFAULT ''"),

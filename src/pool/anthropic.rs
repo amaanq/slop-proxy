@@ -44,7 +44,16 @@ impl Backend for AnthropicClient {
       _route: Route<'_>,
       req: &Self::Request,
    ) -> Result<Self::Response, SendError> {
-      Self::post(self, token, slot.auth_mode, req.path, &req.body, &req.hdrs).await
+      Self::post(
+         self,
+         token,
+         slot.auth_mode,
+         slot.egress,
+         req.path,
+         &req.body,
+         &req.hdrs,
+      )
+      .await
    }
 }
 
@@ -154,7 +163,7 @@ mod tests {
       let db = Db::open(&db_path).unwrap();
       AnthropicPool {
          slots: super::super::test_slots(db, Provider::Anthropic, ids),
-         backend: AnthropicClient::new(AnthropicConfig::default()),
+         backend: AnthropicClient::new(AnthropicConfig::default()).unwrap(),
          bound: Mutex::new(HashMap::new()),
       }
    }
@@ -332,7 +341,8 @@ mod tests {
          AnthropicClient::new(AnthropicConfig {
             base_url: format!("http://{addr}"),
             ..AnthropicConfig::default()
-         }),
+         })
+         .unwrap(),
       )
       .await
       .unwrap();
@@ -430,13 +440,13 @@ mod tests {
          base_url: format!("http://{addr}"),
          ..AnthropicConfig::default()
       };
-      let pool = AnthropicPool::load(db.clone(), AnthropicClient::new(config.clone()))
+      let pool = AnthropicPool::load(db.clone(), AnthropicClient::new(config.clone()).unwrap())
          .await
          .unwrap();
       pool.poll_usage().await;
       server.abort();
 
-      let reloaded = AnthropicPool::load(db.clone(), AnthropicClient::new(config))
+      let reloaded = AnthropicPool::load(db.clone(), AnthropicClient::new(config).unwrap())
          .await
          .unwrap();
       for checked in [&pool, &reloaded] {

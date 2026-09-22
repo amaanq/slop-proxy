@@ -1,10 +1,9 @@
-use std::time::Duration;
-
 use axum::body::Bytes;
 use reqwest::StatusCode;
 use reqwest::header::{CONTENT_TYPE, HeaderMap};
 
 use crate::config::AnthropicConfig;
+use crate::egress::Egresses;
 use crate::provider::AuthMode;
 use crate::upstream::{Classify, SendError, classify};
 
@@ -186,18 +185,32 @@ pub struct RelayHeaders {
 }
 
 pub struct AnthropicClient {
-   http: reqwest::Client,
+   direct: Egresses,
+   /// `None` when no egress proxies are configured, so the direct pool is the
+   /// only one that exists.
+   proxied: Option<Egresses>,
    cfg: AnthropicConfig,
 }
 
 impl AnthropicClient {
-   pub fn new(cfg: AnthropicConfig) -> Self {
-      let http = reqwest::Client::builder()
-         .connect_timeout(Duration::from_secs(30))
-         .tcp_keepalive(Duration::from_secs(30))
-         .build()
-         .expect("building http client");
-      Self { http, cfg }
+   pub fn new(cfg: AnthropicConfig) -> eyre::Result<Self> {
+      let urls = cfg.egress.urls()?;
+      Ok(Self {
+         direct: Egresses::new(&[], "anthropic", None)?,
+         proxied: (!urls.is_empty())
+            .then(|| Egresses::new(&urls, "anthropic", None))
+            .transpose()?,
+         cfg,
+      })
+   }
+
+   /// An account marked with `accounts egress` leaves through the proxies, and
+   /// everything else, the pooled seats included, dials Anthropic directly.
+   const fn egresses(&self, via_proxy: bool) -> &Egresses {
+      if via_proxy && let Some(proxied) = self.proxied.as_ref() {
+         return proxied;
+      }
+      &self.direct
    }
 
    pub const fn soft_utilization_limit(&self) -> f64 {
@@ -206,7 +219,8 @@ impl AnthropicClient {
 
    pub async fn usage(&self, access_token: &str) -> Result<Usage, SendError> {
       let resp = self
-         .http
+         .direct
+         .http(0)
          .get(format!(
             "{}/api/oauth/usage",
             self.cfg.base_url.trim_end_matches('/')
@@ -232,7 +246,8 @@ impl AnthropicClient {
       access_token: &str,
    ) -> Result<(reqwest::StatusCode, String), SendError> {
       let resp = self
-         .http
+         .direct
+         .http(0)
          .get(format!(
             "{}/v1/models?limit=100",
             self.cfg.base_url.trim_end_matches('/')
@@ -259,6 +274,7 @@ impl AnthropicClient {
       &self,
       credential: &str,
       mode: AuthMode,
+      via_egress: bool,
       path: &str,
       body: &Bytes,
       hdrs: &RelayHeaders,
@@ -273,29 +289,37 @@ impl AnthropicClient {
          // still gate the fields it sent, `context_management` among them.
          AuthMode::ApiKey => hdrs.beta.clone(),
       };
-      let mut req = self
-         .http
-         .post(format!("{}{path}", self.cfg.base_url.trim_end_matches('/')))
-         .header(
-            "anthropic-version",
-            hdrs.version.as_deref().unwrap_or("2023-06-01"),
-         )
-         .header(CONTENT_TYPE, "application/json")
-         .body(body.clone());
-      req = match mode {
-         AuthMode::OAuth => req.bearer_auth(credential),
-         AuthMode::ApiKey => req.header("x-api-key", credential),
-      };
-      if let Some(beta) = beta {
-         req = req.header("anthropic-beta", beta);
-      }
-      if let Some(agent) = hdrs.user_agent.as_ref() {
-         req = req.header("user-agent", agent);
-      }
-      let resp = req
-         .send()
-         .await
-         .map_err(|err| SendError::Network(err.to_string()))?;
+      let url = format!("{}{path}", self.cfg.base_url.trim_end_matches('/'));
+      let resp = self
+         .egresses(via_egress)
+         .send(|http| {
+            let url = url.clone();
+            let beta = beta.clone();
+            async move {
+               let mut req = http
+                  .post(url)
+                  .header(
+                     "anthropic-version",
+                     hdrs.version.as_deref().unwrap_or("2023-06-01"),
+                  )
+                  .header(CONTENT_TYPE, "application/json")
+                  .body(body.clone());
+               req = match mode {
+                  AuthMode::OAuth => req.bearer_auth(credential),
+                  AuthMode::ApiKey => req.header("x-api-key", credential),
+               };
+               if let Some(beta) = beta {
+                  req = req.header("anthropic-beta", beta);
+               }
+               if let Some(agent) = hdrs.user_agent.as_ref() {
+                  req = req.header("user-agent", agent);
+               }
+               req.send()
+                  .await
+                  .map_err(|err| SendError::Network(err.to_string()))
+            }
+         })
+         .await?;
       let model_limited =
          resp.status() == StatusCode::TOO_MANY_REQUESTS && sub_limit_rejected(resp.headers());
       match classify(resp, RULES).await {

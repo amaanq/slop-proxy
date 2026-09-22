@@ -2,7 +2,9 @@
 //! dialect per model, so nothing here translates. The request goes up as the
 //! caller wrote it and comes back as frames that caller already understands.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use axum::body::Bytes;
@@ -19,10 +21,20 @@ use crate::upstream::{Classify, SendError, classify};
 /// this one benched and walks the next batch.
 const EGRESS_ATTEMPTS: usize = 8;
 
+const CONTEXT_REFRESH_SECS: i64 = 12 * 60 * 60;
+
 pub struct ZenClient {
    base_url: String,
+   models_dev_url: String,
    egresses: Vec<Egress>,
    next: AtomicUsize,
+   context_windows: RwLock<Arc<HashMap<String, i64>>>,
+   context_fetched_at: AtomicI64,
+}
+
+pub struct ZenModel {
+   pub id: String,
+   pub context_window: Option<i64>,
 }
 
 /// Rides the response so a stream that dies halfway can name the proxy it
@@ -80,8 +92,11 @@ impl ZenClient {
       };
       Ok(Self {
          base_url: cfg.base_url,
+         models_dev_url: cfg.models_dev_url,
          egresses,
          next: AtomicUsize::new(0),
+         context_windows: RwLock::default(),
+         context_fetched_at: AtomicI64::new(0),
       })
    }
 
@@ -181,7 +196,7 @@ impl ZenClient {
       classify(response, Classify::STRICT).await
    }
 
-   pub async fn models(&self) -> Result<Vec<String>, String> {
+   pub async fn models(&self) -> Result<Vec<ZenModel>, String> {
       #[derive(serde::Deserialize)]
       struct Entry {
          id: String,
@@ -214,7 +229,15 @@ impl ZenClient {
          match classify(response, Classify::STRICT).await {
             Ok(response) => {
                let listing: Listing = response.json().await.map_err(|error| error.to_string())?;
-               return Ok(listing.data.into_iter().map(|entry| entry.id).collect());
+               let windows = self.context_windows().await;
+               return Ok(listing
+                  .data
+                  .into_iter()
+                  .map(|entry| ZenModel {
+                     context_window: windows.get(&entry.id).copied(),
+                     id: entry.id,
+                  })
+                  .collect());
             },
             Err(SendError::RateLimited { retry_after, body }) => {
                self.cool_anonymous(index, retry_after.unwrap_or(60));
@@ -236,6 +259,23 @@ impl ZenClient {
             )
             .to_string(),
       )
+   }
+
+   async fn context_windows(&self) -> Arc<HashMap<String, i64>> {
+      let now = unix_now();
+      let fetched = self.context_fetched_at.load(Ordering::Relaxed);
+      if now - fetched >= CONTEXT_REFRESH_SECS
+         && self
+            .context_fetched_at
+            .compare_exchange(fetched, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+      {
+         match fetch_context_windows(&self.models_dev_url).await {
+            Ok(windows) => *self.context_windows.write().unwrap() = Arc::new(windows),
+            Err(error) => tracing::warn!("fetching zen context windows: {error}"),
+         }
+      }
+      self.context_windows.read().unwrap().clone()
    }
 
    fn available_egresses(&self, anonymous: bool) -> Result<Vec<usize>, SendError> {
@@ -332,6 +372,33 @@ impl ZenClient {
    }
 }
 
+async fn fetch_context_windows(url: &str) -> reqwest::Result<HashMap<String, i64>> {
+   #[derive(serde::Deserialize)]
+   struct Catalog {
+      opencode: Provider,
+   }
+   #[derive(serde::Deserialize)]
+   struct Provider {
+      models: HashMap<String, Model>,
+   }
+   #[derive(serde::Deserialize)]
+   struct Model {
+      limit: Option<Limit>,
+   }
+   #[derive(serde::Deserialize)]
+   struct Limit {
+      context: i64,
+   }
+
+   let catalog: Catalog = reqwest::get(url).await?.error_for_status()?.json().await?;
+   Ok(catalog
+      .opencode
+      .models
+      .into_iter()
+      .filter_map(|(id, model)| Some((id, model.limit?.context)))
+      .collect())
+}
+
 fn request_id() -> String {
    let counter = thread_rng().gen_range(1..=0xfff_i64);
    let timestamp = (unix_now_ms().saturating_mul(0x1000) + counter) & 0xffff_ffff_ffff;
@@ -406,6 +473,7 @@ mod tests {
       let (second_url, second_requests) = spawn_proxy(StatusCode::OK).await;
       let client = ZenClient::new(ZenConfig {
          base_url: "http://zen.invalid/v1".into(),
+         models_dev_url: "http://models.invalid".into(),
          user_agent: "opencode/1.18.31".into(),
          egress: EgressConfig {
             proxy_urls: vec![authenticated(&first_url), authenticated(&second_url)],
@@ -414,7 +482,14 @@ mod tests {
       })
       .unwrap();
 
-      assert_eq!(client.models().await.unwrap(), ["muse-test"]);
+      let listed = client.models().await.unwrap();
+      assert_eq!(
+         listed
+            .iter()
+            .map(|model| model.id.as_str())
+            .collect::<Vec<_>>(),
+         ["muse-test"]
+      );
       client
          .post(
             None,
@@ -439,6 +514,7 @@ mod tests {
       let (working_url, working_requests) = spawn_proxy(StatusCode::OK).await;
       let client = ZenClient::new(ZenConfig {
          base_url: "http://zen.invalid/v1".into(),
+         models_dev_url: "http://models.invalid".into(),
          user_agent: "opencode/1.18.31".into(),
          egress: EgressConfig {
             proxy_urls: vec![authenticated(&limited_url), authenticated(&working_url)],
@@ -501,6 +577,7 @@ mod tests {
       }
       let client = ZenClient::new(ZenConfig {
          base_url: "http://zen.invalid/v1".into(),
+         models_dev_url: "http://models.invalid".into(),
          user_agent: "opencode/1.18.31".into(),
          egress: EgressConfig {
             proxy_urls: proxies

@@ -10,7 +10,7 @@ use crate::provider::Provider;
 use crate::translate::anthropic_req::empty_schema;
 use crate::translate::chat::{ChatError, ChatRequest, ChatToolDef, FunctionDef};
 use crate::upstream::SendError;
-use crate::zen::client::ZenClient;
+use crate::zen::client::{ZenClient, ZenModel};
 
 /// Zen over whatever credentials are stored, and over none at all when the
 /// table is empty. The free models are served without a key today, so an
@@ -169,7 +169,7 @@ fn session_prefix() -> String {
 }
 
 impl Pool<ZenClient> {
-   pub async fn models(&self) -> Vec<String> {
+   pub async fn models(&self) -> Vec<ZenModel> {
       self.backend.models().await.unwrap_or_default()
    }
 }

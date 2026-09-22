@@ -3,6 +3,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::zen::client::ZenModel;
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ModelInfo {
    pub slug: String,
@@ -114,12 +116,14 @@ struct ZenEntry<'a> {
    service_tiers: [(); 0],
    additional_speed_tiers: [(); 0],
    supported_reasoning_levels: Vec<Value>,
+   #[serde(skip_serializing_if = "Option::is_none")]
+   context_window: Option<i64>,
 }
 
 const ZEN_EFFORTS: [&str; 4] = ["low", "medium", "high", "xhigh"];
 
 /// Cloned from `template` so the fields codex requires track the backend.
-pub fn with_zen_entries(raw: &str, template: &str, ids: &[String]) -> Option<String> {
+pub fn with_zen_entries(raw: &str, template: &str, zen: &[ZenModel]) -> Option<String> {
    let mut catalog: Value = serde_json::from_str(raw).ok()?;
    let models = catalog.get_mut("models")?.as_array_mut()?;
    let present: Vec<String> = models
@@ -152,7 +156,8 @@ pub fn with_zen_entries(raw: &str, template: &str, ids: &[String]) -> Option<Str
             .collect()
       })
       .unwrap_or_default();
-   for id in ids {
+   for model in zen {
+      let id = &model.id;
       if present.contains(id) {
          continue;
       }
@@ -176,6 +181,7 @@ pub fn with_zen_entries(raw: &str, template: &str, ids: &[String]) -> Option<Str
          supported_reasoning_levels: levels.clone(),
          service_tiers: [],
          additional_speed_tiers: [],
+         context_window: model.context_window,
       })
       .ok()?;
       let mut entry = base.clone();
@@ -190,6 +196,14 @@ pub fn with_zen_entries(raw: &str, template: &str, ids: &[String]) -> Option<Str
 #[cfg(test)]
 mod zen_entry_tests {
    use super::with_zen_entries;
+   use crate::zen::client::ZenModel;
+
+   fn zen(id: &str) -> ZenModel {
+      ZenModel {
+         id: id.to_owned(),
+         context_window: None,
+      }
+   }
 
    const CATALOG: &str = r#"{"models":[
       {"slug":"gpt-5.6-sol","visibility":"list","tool_mode":"code_mode_only","apply_patch_tool_type":"freeform",
@@ -202,10 +216,7 @@ mod zen_entry_tests {
 
    #[test]
    fn a_zen_model_inherits_the_template_with_function_tools_only() {
-      let ids = [
-         "muse-spark-1.3-contributor-free".to_owned(),
-         "muse-old".to_owned(),
-      ];
+      let ids = [zen("muse-spark-1.3-contributor-free"), zen("muse-old")];
       let out = with_zen_entries(CATALOG, "gpt-5.6-sol", &ids).unwrap();
       let catalog: serde_json::Value = serde_json::from_str(&out).unwrap();
       let models = catalog["models"].as_array().unwrap();
@@ -230,6 +241,6 @@ mod zen_entry_tests {
    #[test]
    fn a_catalog_without_a_listed_entry_is_left_alone() {
       let raw = r#"{"models":[{"slug":"x","visibility":"hide"}]}"#;
-      assert!(with_zen_entries(raw, "gpt-5.6-sol", &["muse".to_owned()]).is_none());
+      assert!(with_zen_entries(raw, "gpt-5.6-sol", &[zen("muse")]).is_none());
    }
 }

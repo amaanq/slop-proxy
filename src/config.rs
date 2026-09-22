@@ -178,6 +178,11 @@ pub struct AnthropicConfig {
    /// Fraction of a rolling window past which an account is ranked behind
    /// its peers, so sessions migrate before the window rejects them.
    pub soft_utilization_limit: f64,
+   /// Proxies an account marked with `accounts egress` leaves through, so a
+   /// paid key can be dialled from a chosen address while the pooled seats
+   /// stay direct.
+   #[serde(flatten)]
+   pub egress: EgressConfig,
 }
 
 impl Default for AnthropicConfig {
@@ -186,6 +191,7 @@ impl Default for AnthropicConfig {
          base_url: "https://api.anthropic.com".into(),
          require_claude_code: true,
          soft_utilization_limit: 0.9,
+         egress: EgressConfig::default(),
       }
    }
 }

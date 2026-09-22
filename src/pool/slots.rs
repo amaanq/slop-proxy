@@ -17,6 +17,8 @@ pub struct Slot {
    pub display: String,
    pub trusted: bool,
    pub reserved: bool,
+   /// Leaves through the provider's configured egress proxies.
+   pub egress: bool,
    pub allowed_users: Vec<String>,
    pub auth_mode: AuthMode,
    pub plan: Option<String>,
@@ -680,6 +682,7 @@ fn slot_matches(slot: &Slot, account: &Account) -> bool {
    (
       slot.trusted,
       slot.reserved,
+      slot.egress,
       &slot.plan,
       &slot.display,
       &slot.http_referer,
@@ -687,6 +690,7 @@ fn slot_matches(slot: &Slot, account: &Account) -> bool {
    ) == (
       account.trusted,
       account.reserved,
+      account.egress,
       &account.plan_type,
       &display_for(account),
       &account.http_referer,
@@ -701,6 +705,7 @@ fn reslot(account: &Account, prev: &Slot) -> Slot {
       provider_account_id: account.provider_account_id.clone(),
       trusted: account.trusted,
       reserved: account.reserved,
+      egress: account.egress,
       allowed_users: account.allowed_users.clone(),
       auth_mode: account.auth_mode,
       plan: account.plan_type.clone(),
@@ -726,6 +731,7 @@ fn slot_from_account(account: Account) -> Slot {
       provider_account_id: account.provider_account_id,
       trusted: account.trusted,
       reserved: account.reserved,
+      egress: account.egress,
       allowed_users: account.allowed_users,
       auth_mode: account.auth_mode,
       plan: account.plan_type,
@@ -767,6 +773,7 @@ pub fn test_slots(db: Db, provider: Provider, ids: &[(i64, bool)]) -> Slots {
                   display: format!("a{id}"),
                   trusted,
                   reserved: false,
+                  egress: false,
                   allowed_users: Vec::new(),
                   auth_mode: match provider {
                      Provider::OpenAi | Provider::Anthropic => AuthMode::OAuth,
@@ -815,6 +822,7 @@ mod allowlist_tests {
          display: "a1".into(),
          trusted: false,
          reserved: false,
+         egress: false,
          allowed_users: allowed.iter().map(|user| (*user).to_owned()).collect(),
          auth_mode: AuthMode::OAuth,
          plan: None,

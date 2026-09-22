@@ -4,6 +4,7 @@ CREATE TABLE IF NOT EXISTS accounts (
   provider_account_id TEXT    NOT NULL,
   trusted             INTEGER NOT NULL DEFAULT 0,
   reserved            INTEGER NOT NULL DEFAULT 0,
+  egress              INTEGER NOT NULL DEFAULT 0,
   auth_mode           TEXT    NOT NULL DEFAULT 'oauth',
   email               TEXT,
   label               TEXT,

@@ -101,6 +101,9 @@ pub enum AccountsCommand {
       label: Option<String>,
       #[pound(long)]
       referer: Option<String>,
+      /// Send this account through the configured egress proxies
+      #[pound(long)]
+      egress: bool,
    },
    /// Remove an account by id or email
    Remove { account: String },
@@ -112,6 +115,12 @@ pub enum AccountsCommand {
    },
    /// Reserve an account for reserved-only tokens, or release it with --off
    Reserve {
+      account: String,
+      #[pound(long)]
+      off: bool,
+   },
+   /// Send this account through the configured egress proxies, or direct with --off
+   Egress {
       account: String,
       #[pound(long)]
       off: bool,
@@ -230,10 +239,22 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
             key,
             label,
             referer,
-         } => accounts_add_key(&db, provider, &key, label.as_deref(), referer.as_deref()).await,
+            egress,
+         } => {
+            accounts_add_key(
+               &db,
+               provider,
+               &key,
+               label.as_deref(),
+               referer.as_deref(),
+               egress,
+            )
+            .await
+         },
          AccountsCommand::Remove { account } => accounts_remove(&db, &account).await,
          AccountsCommand::Trust { account, off } => accounts_trust(&db, &account, !off).await,
          AccountsCommand::Reserve { account, off } => accounts_reserve(&db, &account, !off).await,
+         AccountsCommand::Egress { account, off } => accounts_egress(&db, &account, !off).await,
          AccountsCommand::Users { account, allow } => {
             accounts_users(&db, &account, allow.as_deref().unwrap_or_default()).await
          },
@@ -312,6 +333,7 @@ async fn accounts_add_key(
    key: &str,
    label: Option<&str>,
    referer: Option<&str>,
+   egress: bool,
 ) -> Result<()> {
    if referer.is_some() && provider != Provider::Gemini {
       bail!("--referer is only supported for gemini keys");
@@ -340,6 +362,9 @@ async fn accounts_add_key(
       let referer = (!referer.is_empty()).then_some(referer);
       db.set_account_http_referer(id, referer).await?;
    }
+   if egress {
+      db.set_account_egress(id, true).await?;
+   }
    println!("stored {provider} account {id} ({account_id})");
    Ok(())
 }
@@ -352,6 +377,7 @@ async fn accounts_list(db: &Db) -> Result<()> {
       provider: &'a str,
       trusted: bool,
       reserved: bool,
+      egress: bool,
       email: Option<&'a str>,
       plan_type: Option<&'a str>,
       status: &'static str,
@@ -370,6 +396,7 @@ async fn accounts_list(db: &Db) -> Result<()> {
          provider: account.provider.as_str(),
          trusted: account.trusted,
          reserved: account.reserved,
+         egress: account.egress,
          email: account.email.as_deref(),
          plan_type: account.plan_type.as_deref(),
          status: account.status.as_str(),
@@ -404,6 +431,18 @@ async fn accounts_reserve(db: &Db, account: &str, reserved: bool) -> Result<()> 
    println!(
       "account {account} is now {}",
       if reserved { "reserved" } else { "unreserved" }
+   );
+   Ok(())
+}
+
+async fn accounts_egress(db: &Db, account: &str, egress: bool) -> Result<()> {
+   let Some(found) = db.find_account(account).await? else {
+      bail!("no account matched {account:?}");
+   };
+   db.set_account_egress(found.id, egress).await?;
+   println!(
+      "account {account} is now {}",
+      if egress { "egressed" } else { "direct" }
    );
    Ok(())
 }

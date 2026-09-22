@@ -33,7 +33,7 @@ use crate::translate::chat::ChatRequest;
 use crate::translate::openai_req;
 use crate::translate::openai_stream::{OpenAiStream, render_aggregated};
 use crate::translate::{StopKind, UsageCapture, aggregate, model_map, usable_cap};
-use crate::zen::client::egress_of;
+use crate::zen::client::{ZenModel, egress_of};
 
 pub mod websocket;
 
@@ -279,8 +279,8 @@ async fn messages_catalog(state: &AppState) -> Result<String, serde_json::Error>
          .models()
          .await
          .into_iter()
-         .filter(|id| state.cfg.models.zen_dialect(id) == ZenDialect::Messages)
-         .map(&synthetic),
+         .filter(|model| state.cfg.models.zen_dialect(&model.id) == ZenDialect::Messages)
+         .map(|model| synthetic(model.id)),
    );
 
    serde_json::to_string(&Catalog {
@@ -314,15 +314,15 @@ pub async fn models(
       };
    }
    if query.client_version.is_some() {
-      let zen: Vec<String> = state
+      let zen: Vec<ZenModel> = state
          .pools
          .zen
          .models()
          .await
          .into_iter()
-         .filter(|id| {
-            state.cfg.models.route(id) == Provider::Zen
-               && state.cfg.models.zen_dialect(id) != ZenDialect::Messages
+         .filter(|model| {
+            state.cfg.models.route(&model.id) == Provider::Zen
+               && state.cfg.models.zen_dialect(&model.id) != ZenDialect::Messages
          })
          .collect();
       return state
@@ -393,18 +393,26 @@ pub async fn models(
 
    // This catalog is what an openai-dialect client discovers from, so a zen
    // model the responses surface refuses must not appear in it.
-   data.extend(state.pools.zen.models().await.into_iter().filter_map(|id| {
-      (state.cfg.models.route(&id) == Provider::Zen
-         && state.cfg.models.zen_dialect(&id) != ZenDialect::Messages)
-         .then_some(ModelEntry {
-            id,
-            object: "model",
-            created,
-            owned_by: "opencode",
-            context_length: None,
-            input: Vec::new(),
-         })
-   }));
+   data.extend(
+      state
+         .pools
+         .zen
+         .models()
+         .await
+         .into_iter()
+         .filter_map(|model| {
+            (state.cfg.models.route(&model.id) == Provider::Zen
+               && state.cfg.models.zen_dialect(&model.id) != ZenDialect::Messages)
+               .then_some(ModelEntry {
+                  id: model.id,
+                  object: "model",
+                  created,
+                  owned_by: "opencode",
+                  context_length: model.context_window,
+                  input: Vec::new(),
+               })
+         }),
+   );
 
    data.extend(gemini_entries(&state).await);
 

@@ -152,6 +152,9 @@ impl Default for DeepSeekConfig {
 #[serde(default)]
 pub struct ZenConfig {
    pub base_url: String,
+   /// Zen's own `/models` names ids and nothing else. models.dev publishes
+   /// zen as its `opencode` provider, which is where opencode reads limits.
+   pub models_dev_url: String,
    pub user_agent: String,
    #[serde(flatten)]
    pub egress: EgressConfig,
@@ -161,6 +164,7 @@ impl Default for ZenConfig {
    fn default() -> Self {
       Self {
          base_url: "https://opencode.ai/zen/v1".into(),
+         models_dev_url: "https://models.dev/api.json".into(),
          user_agent: "opencode/1.18.31 ai-sdk/provider-utils/4.0.46 runtime/bun/1.3.13".into(),
          egress: EgressConfig::default(),
       }

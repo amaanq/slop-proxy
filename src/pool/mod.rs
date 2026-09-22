@@ -76,6 +76,7 @@ pub struct Route<'route> {
    pub user: &'route str,
    pub pinned_account: Option<i64>,
    pub prefer_trusted: bool,
+   pub reserved_only: bool,
 }
 
 impl<'route> Route<'route> {
@@ -318,6 +319,9 @@ impl<B: Backend> Pool<B> {
          if pinned.is_some_and(|id| slot.id != id) || !slot.serves(route.user) {
             continue;
          }
+         if slot.reserved != route.reserved_only {
+            continue;
+         }
          if B::PROVIDER == Provider::OpenAi
             && let Some(tier) = route.explicit_tier()
             && !self.slots.serves_tier(&slot, route.model, tier).await
@@ -460,7 +464,7 @@ impl<B: Backend> Pool<B> {
                   self.slots.cool(&slot, secs, "key rejected").await;
                   last_err = Some(SendError::Auth(text));
                },
-               AuthPolicy::RefreshOnce => {
+               AuthPolicy::RefreshOnce if slot.auth_mode.refreshable() => {
                   tracing::warn!("account {} got 401, forcing refresh", slot.display);
                   if let Ok(fresh) = self.slots.fresh_token(&slot, true).await {
                      match self.backend.send(&fresh, &slot, route, req).await {
@@ -480,6 +484,10 @@ impl<B: Backend> Pool<B> {
                   } else {
                      last_err = Some(SendError::Auth(text));
                   }
+               },
+               AuthPolicy::RefreshOnce => {
+                  self.slots.cool(&slot, 60, "key rejected").await;
+                  last_err = Some(SendError::Auth(text));
                },
             },
             Err(SendError::RateLimited { retry_after, body }) => {
@@ -599,6 +607,7 @@ mod retry_tests {
          user: "u",
          pinned_account: None,
          prefer_trusted: false,
+         reserved_only: false,
       }
    }
 

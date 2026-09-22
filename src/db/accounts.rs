@@ -42,6 +42,8 @@ pub struct Account {
    pub provider: Provider,
    pub provider_account_id: String,
    pub trusted: bool,
+   /// Only served to tokens with `reserved_only`; never to the shared pool.
+   pub reserved: bool,
    pub allowed_users: Vec<String>,
    pub auth_mode: AuthMode,
    pub email: Option<String>,
@@ -71,6 +73,7 @@ fn from_row(row: &Row) -> rusqlite::Result<Account> {
       provider: row.get("provider")?,
       provider_account_id: row.get("provider_account_id")?,
       trusted: row.get("trusted")?,
+      reserved: row.get("reserved")?,
       allowed_users: parse_users(&row.get::<_, String>("allowed_users")?),
       auth_mode: row.get("auth_mode")?,
       email: row.get("email")?,
@@ -91,7 +94,7 @@ fn from_row(row: &Row) -> rusqlite::Result<Account> {
    })
 }
 
-const COLS: &str = "id, provider, provider_account_id, trusted, auth_mode, email, label, plan_type, access_token, refresh_token, http_referer, turn_state, access_expires_at, status, cooldown_until, disabled_reason, allowed_users";
+const COLS: &str = "id, provider, provider_account_id, trusted, reserved, auth_mode, email, label, plan_type, access_token, refresh_token, http_referer, turn_state, access_expires_at, status, cooldown_until, disabled_reason, allowed_users";
 
 pub struct NewAccount<'a> {
    pub provider: Provider,
@@ -259,6 +262,18 @@ impl Db {
             conn.execute(
                "UPDATE accounts SET http_referer = ?2, updated_at = unixepoch() WHERE id = ?1",
                params![id, referer],
+            )?;
+            Ok(())
+         })
+         .await
+   }
+
+   pub async fn set_account_reserved(&self, id: i64, reserved: bool) -> Result<()> {
+      self
+         .call(move |conn| {
+            conn.execute(
+               "UPDATE accounts SET reserved = ?2, updated_at = unixepoch() WHERE id = ?1",
+               params![id, reserved],
             )?;
             Ok(())
          })

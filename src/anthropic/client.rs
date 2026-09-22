@@ -5,6 +5,7 @@ use reqwest::StatusCode;
 use reqwest::header::{CONTENT_TYPE, HeaderMap};
 
 use crate::config::AnthropicConfig;
+use crate::provider::AuthMode;
 use crate::upstream::{Classify, SendError, classify};
 
 const OAUTH_BETA: &str = "oauth-2025-04-20";
@@ -256,27 +257,32 @@ impl AnthropicClient {
    /// account become errors.
    pub async fn post(
       &self,
-      access_token: &str,
+      credential: &str,
+      mode: AuthMode,
       path: &str,
       body: &Bytes,
       hdrs: &RelayHeaders,
    ) -> Result<reqwest::Response, SendError> {
-      let beta = match hdrs.beta.as_ref() {
-         Some(beta) if beta.split(',').any(|part| part.trim() == OAUTH_BETA) => beta.clone(),
-         Some(beta) => format!("{OAUTH_BETA},{beta}"),
-         None => OAUTH_BETA.into(),
-      };
       let mut req = self
          .http
          .post(format!("{}{path}", self.cfg.base_url.trim_end_matches('/')))
-         .bearer_auth(access_token)
          .header(
             "anthropic-version",
             hdrs.version.as_deref().unwrap_or("2023-06-01"),
          )
-         .header("anthropic-beta", beta)
          .header(CONTENT_TYPE, "application/json")
          .body(body.clone());
+      req = match mode {
+         AuthMode::OAuth => {
+            let beta = match hdrs.beta.as_ref() {
+               Some(beta) if beta.split(',').any(|part| part.trim() == OAUTH_BETA) => beta.clone(),
+               Some(beta) => format!("{OAUTH_BETA},{beta}"),
+               None => OAUTH_BETA.into(),
+            };
+            req.bearer_auth(credential).header("anthropic-beta", beta)
+         },
+         AuthMode::ApiKey => req.header("x-api-key", credential),
+      };
       if let Some(agent) = hdrs.user_agent.as_ref() {
          req = req.header("user-agent", agent);
       }

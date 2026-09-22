@@ -103,6 +103,7 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
    ("accounts", "turn_state", "TEXT"),
    ("accounts", "auth_mode", "TEXT NOT NULL DEFAULT 'oauth'"),
    ("accounts", "allowed_users", "TEXT NOT NULL DEFAULT ''"),
+   ("accounts", "reserved", "INTEGER NOT NULL DEFAULT 0"),
    ("usage_log", "provider", "TEXT NOT NULL DEFAULT ''"),
    ("usage_log", "list_cost_usd", "REAL NOT NULL DEFAULT 0"),
    ("usage_log", "service_tier", "TEXT NOT NULL DEFAULT ''"),
@@ -124,6 +125,7 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
       "TEXT NOT NULL DEFAULT ''",
    ),
    ("api_tokens", "pinned_account", "INTEGER"),
+   ("api_tokens", "reserved_only", "INTEGER NOT NULL DEFAULT 0"),
 ];
 
 /// Indexes over columns `ADDED_COLUMNS` introduces, so they are built after

@@ -168,6 +168,7 @@ pub async fn chat_completions(
       user: &auth.user,
       pinned_account: auth.limits.pinned_account,
       prefer_trusted: auth.limits.prefer_trusted,
+      reserved_only: auth.limits.reserved_only,
    };
    let Dispatched {
       account_id,
@@ -1013,6 +1014,7 @@ pub async fn responses_passthrough(
       user: &auth.user,
       pinned_account: auth.limits.pinned_account,
       prefer_trusted: auth.limits.prefer_trusted,
+      reserved_only: auth.limits.reserved_only,
    };
    let Dispatched {
       account_id,

@@ -55,8 +55,6 @@ impl Default for GeminiConfig {
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(default)]
 pub struct PricingConfig {
-   /// `LiteLLM` lands price additions on a staging branch and promotes them to
-   /// main on a release cut, so a day-0 model is priced there first.
    pub url: String,
 }
 

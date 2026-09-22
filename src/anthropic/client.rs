@@ -263,6 +263,16 @@ impl AnthropicClient {
       body: &Bytes,
       hdrs: &RelayHeaders,
    ) -> Result<reqwest::Response, SendError> {
+      let beta = match mode {
+         AuthMode::OAuth => Some(match hdrs.beta.as_ref() {
+            Some(beta) if beta.split(',').any(|part| part.trim() == OAUTH_BETA) => beta.clone(),
+            Some(beta) => format!("{OAUTH_BETA},{beta}"),
+            None => OAUTH_BETA.into(),
+         }),
+         // A key cannot claim the subscription beta, but the caller's own flags
+         // still gate the fields it sent, `context_management` among them.
+         AuthMode::ApiKey => hdrs.beta.clone(),
+      };
       let mut req = self
          .http
          .post(format!("{}{path}", self.cfg.base_url.trim_end_matches('/')))
@@ -273,16 +283,12 @@ impl AnthropicClient {
          .header(CONTENT_TYPE, "application/json")
          .body(body.clone());
       req = match mode {
-         AuthMode::OAuth => {
-            let beta = match hdrs.beta.as_ref() {
-               Some(beta) if beta.split(',').any(|part| part.trim() == OAUTH_BETA) => beta.clone(),
-               Some(beta) => format!("{OAUTH_BETA},{beta}"),
-               None => OAUTH_BETA.into(),
-            };
-            req.bearer_auth(credential).header("anthropic-beta", beta)
-         },
+         AuthMode::OAuth => req.bearer_auth(credential),
          AuthMode::ApiKey => req.header("x-api-key", credential),
       };
+      if let Some(beta) = beta {
+         req = req.header("anthropic-beta", beta);
+      }
       if let Some(agent) = hdrs.user_agent.as_ref() {
          req = req.header("user-agent", agent);
       }

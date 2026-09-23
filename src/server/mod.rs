@@ -166,6 +166,7 @@ pub fn router(state: AppState) -> Router {
       .route("/v1beta/models/{spec}", post(gemini::native))
       .route("/config/codex/auth.json", get(clientcfg::codex_auth))
       .route("/config/codex/config.toml", get(clientcfg::codex_config))
+      .route("/backend-api/wham/accounts/check", get(clientcfg::codex_accounts))
       .route(
          "/v1/responses",
          post(openai::responses_passthrough).get(openai::websocket::responses),

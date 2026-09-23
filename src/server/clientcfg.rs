@@ -11,6 +11,8 @@ use crate::clock;
 /// far enough ahead that it never fires.
 const LIFETIME_SECS: i64 = 10 * 365 * 24 * 3600;
 
+const ACCOUNT_ID: &str = "slop-proxy";
+
 #[derive(Serialize)]
 struct Claims {
    #[serde(rename = "https://api.openai.com/auth")]
@@ -43,6 +45,18 @@ struct Tokens {
 }
 
 #[derive(Serialize)]
+struct AccountsCheck {
+   accounts: [AccountEntry; 1],
+}
+
+#[derive(Serialize)]
+struct AccountEntry {
+   id: &'static str,
+   workspace_backend_origin: &'static str,
+   account_routing_override: &'static str,
+}
+
+#[derive(Serialize)]
 struct Header {
    alg: &'static str,
    typ: &'static str,
@@ -63,7 +77,7 @@ pub async fn codex_auth(headers: HeaderMap) -> Response {
    let now = clock::unix_now();
    let claims = Claims {
       auth: AuthClaim {
-         chatgpt_account_id: "slop-proxy",
+         chatgpt_account_id: ACCOUNT_ID,
          chatgpt_plan_type: "pro",
       },
       email: "slop-proxy",
@@ -77,9 +91,23 @@ pub async fn codex_auth(headers: HeaderMap) -> Response {
          id_token: jwt(&claims),
          access_token: token.clone(),
          refresh_token: token,
-         account_id: "slop-proxy",
+         account_id: ACCOUNT_ID,
       },
       last_refresh: clock::rfc3339(now),
+   })
+   .into_response()
+}
+
+/// Codex 0.156 refuses to start a ChatGPT-auth session until this workspace
+/// discovery succeeds for the `auth.json` account id. `NO_CONSTRAINT` keeps
+/// requests on the `chatgpt_base_url` origin, which is the proxy.
+pub async fn codex_accounts() -> Response {
+   Json(AccountsCheck {
+      accounts: [AccountEntry {
+         id: ACCOUNT_ID,
+         workspace_backend_origin: "NO_CONSTRAINT",
+         account_routing_override: "NO_CONSTRAINT",
+      }],
    })
    .into_response()
 }
@@ -101,6 +129,7 @@ pub async fn codex_config(headers: HeaderMap) -> Response {
 
    let body = format!(
       "openai_base_url = \"{scheme}://{host}/v1\"\n\
+         chatgpt_base_url = \"{scheme}://{host}/backend-api\"\n\
          \n\
          [features]\n\
          apps = false\n"

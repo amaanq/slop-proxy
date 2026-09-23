@@ -1,3 +1,6 @@
+use std::mem;
+
+use axum::http::Response;
 use reqwest::header::HeaderMap;
 use thiserror::Error;
 
@@ -52,27 +55,63 @@ pub struct Classify {
    pub pass: fn(u16) -> bool,
    pub auth: &'static [u16],
    pub reset_headers: &'static [&'static str],
+   /// Substrings of a 400 body that say this account cannot serve anyone,
+   /// so it is benched like a rate limit instead of failing the caller.
+   pub account_faults: &'static [&'static str],
 }
+
+/// A fault like an empty balance ends when a human acts, which no header
+/// predicts, so the account is re-probed on this schedule until it serves.
+const ACCOUNT_FAULT_RETRY_SECS: i64 = 3600;
 
 impl Classify {
    pub const STRICT: Self = Self {
       pass: |_| false,
       auth: &[401, 403],
       reset_headers: &[],
+      account_faults: &[],
    };
 }
 
 pub async fn classify(
-   resp: reqwest::Response,
+   mut resp: reqwest::Response,
    rules: Classify,
 ) -> Result<reqwest::Response, SendError> {
    let status = resp.status().as_u16();
-   if resp.status().is_success() || (rules.pass)(status) {
+   let passed = (rules.pass)(status);
+   let inspect = status == 400 && !rules.account_faults.is_empty();
+   if resp.status().is_success() || (passed && !inspect) {
       return Ok(resp);
    }
+
    let retry_after = retry_after_secs(resp.headers(), rules.reset_headers);
-   let body = resp.text().await.unwrap_or_default();
-   let body = body.chars().take(2000).collect::<String>();
+   let status_code = resp.status();
+   let headers = resp.headers().clone();
+   let extensions = mem::take(resp.extensions_mut());
+   let bytes = resp.bytes().await.unwrap_or_default();
+   let body = String::from_utf8_lossy(&bytes)
+      .chars()
+      .take(2000)
+      .collect::<String>();
+   if inspect
+      && rules
+         .account_faults
+         .iter()
+         .any(|fault| body.contains(fault))
+   {
+      return Err(SendError::RateLimited {
+         retry_after: Some(ACCOUNT_FAULT_RETRY_SECS),
+         body,
+      });
+   }
+   if passed {
+      let mut rebuilt = Response::new(bytes);
+      *rebuilt.status_mut() = status_code;
+      *rebuilt.headers_mut() = headers;
+      *rebuilt.extensions_mut() = extensions;
+      return Ok(rebuilt.into());
+   }
+
    Err(if rules.auth.contains(&status) {
       SendError::Auth(body)
    } else {
@@ -88,7 +127,6 @@ pub async fn classify(
 #[cfg(test)]
 mod tests {
    use super::*;
-   use axum::http::Response;
 
    fn response(status: u16, body: &'static str) -> reqwest::Response {
       Response::builder()

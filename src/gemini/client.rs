@@ -19,6 +19,7 @@ const RULES: Classify = Classify {
    // 403, and no retry on another account makes that key work.
    auth: &[401, 403],
    reset_headers: &["x-ratelimit-reset-requests", "x-ratelimit-reset-tokens"],
+   account_faults: &[],
 };
 
 async fn cool_a_dead_key(resp: reqwest::Response) -> Result<reqwest::Response, SendError> {

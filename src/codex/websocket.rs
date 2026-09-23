@@ -268,6 +268,7 @@ impl CodexClient {
                   pass: |_| false,
                   auth: &[401],
                   reset_headers: &["x-codex-primary-reset-at"],
+                  account_faults: &[],
                },
             )
             .await;

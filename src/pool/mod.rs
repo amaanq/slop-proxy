@@ -511,6 +511,10 @@ impl<B: Backend> Pool<B> {
                );
                last_err = Some(SendError::BadRequest(body));
             },
+            Err(SendError::Network(text)) => {
+               tracing::warn!(account = %slot.display, "network error, account not cooled: {text}");
+               last_err = Some(SendError::Network(text));
+            },
             Err(SendError::BadRequest(body)) => {
                return Err(PoolError::BadRequest {
                   provider: B::PROVIDER,

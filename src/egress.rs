@@ -123,7 +123,9 @@ impl Egresses {
             },
             Err(SendError::Network(error)) => {
                tracing::warn!(egress = index, "{} egress unreachable: {error}", self.label);
-               self.cool(index, UNREACHABLE_COOLDOWN);
+               if self.entries.len() > 1 {
+                  self.cool(index, UNREACHABLE_COOLDOWN);
+               }
                unreachable = Some(error);
             },
             other => return other,

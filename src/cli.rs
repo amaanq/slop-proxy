@@ -131,6 +131,14 @@ pub enum AccountsCommand {
       #[pound(long)]
       allow: Option<String>,
    },
+   /// Take an account out of service until `enable`
+   Disable {
+      account: String,
+      #[pound(long)]
+      reason: Option<String>,
+   },
+   /// Return a disabled account to service
+   Enable { account: String },
 }
 
 #[derive(Parse)]
@@ -257,6 +265,12 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
          AccountsCommand::Egress { account, off } => accounts_egress(&db, &account, !off).await,
          AccountsCommand::Users { account, allow } => {
             accounts_users(&db, &account, allow.as_deref().unwrap_or_default()).await
+         },
+         AccountsCommand::Disable { account, reason } => {
+            accounts_status(&db, &account, AccountStatus::Disabled, reason.as_deref()).await
+         },
+         AccountsCommand::Enable { account } => {
+            accounts_status(&db, &account, AccountStatus::Active, None).await
          },
       },
       Command::Token { command } => match command {
@@ -444,6 +458,21 @@ async fn accounts_egress(db: &Db, account: &str, egress: bool) -> Result<()> {
       "account {account} is now {}",
       if egress { "egressed" } else { "direct" }
    );
+   Ok(())
+}
+
+async fn accounts_status(
+   db: &Db,
+   account: &str,
+   status: AccountStatus,
+   reason: Option<&str>,
+) -> Result<()> {
+   let Some(found) = db.find_account(account).await? else {
+      bail!("no account matched {account:?}");
+   };
+   db.set_account_status(found.id, status, None, reason)
+      .await?;
+   println!("account {account} is now {}", status.as_str());
    Ok(())
 }
 

@@ -16,6 +16,7 @@ const RULES: Classify = Classify {
       "anthropic-ratelimit-unified-reset",
       "anthropic-ratelimit-requests-reset",
    ],
+   account_faults: &["Your credit balance is too low"],
 };
 
 /// Every claim a request counts against gets its own `anthropic-ratelimit-unified-<claim>-status` header.

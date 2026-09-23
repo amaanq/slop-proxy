@@ -17,6 +17,7 @@ const RULES: Classify = Classify {
    pass: |_| false,
    auth: &[401],
    reset_headers: &["x-codex-primary-reset-at"],
+   account_faults: &[],
 };
 
 /// One rolling limit window as the usage endpoint reports it.

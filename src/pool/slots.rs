@@ -259,16 +259,27 @@ impl Slots {
                }
             }
          }
-         match existing {
+         let disabled = account.status == AccountStatus::Disabled;
+         let slot = match existing {
             // Swapping an unchanged slot would strand an in-flight
             // cooldown write on the orphaned Arc.
-            Some(slot) if slot_matches(slot, &account) => next.push(Arc::clone(slot)),
-            Some(slot) => next.push(Arc::new(reslot(&account, slot))),
+            Some(slot) if slot_matches(slot, &account) => Arc::clone(slot),
+            Some(slot) => Arc::new(reslot(&account, slot)),
             None => {
                added += 1_usize;
-               next.push(Arc::new(slot_from_account(account)));
+               Arc::new(slot_from_account(account))
             },
+         };
+
+         {
+            let mut state = slot.state.lock().await;
+            match (state.status == Status::Disabled, disabled) {
+               (false, true) => state.status = Status::Disabled,
+               (true, false) => state.status = Status::Active,
+               (true, true) | (false, false) => {},
+            }
          }
+         next.push(slot);
       }
       let removed = slots
          .iter()

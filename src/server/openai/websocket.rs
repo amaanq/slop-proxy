@@ -23,7 +23,9 @@ use crate::db::usage::AdmissionError;
 use crate::pool::{Route, Served};
 use crate::provider::Provider;
 use crate::server::auth::{AuthInfo, bearer_token};
-use crate::server::error::{error_response, out_of_scope, pool_error_response, translation_error};
+use crate::server::error::{
+   blocked_model, error_response, out_of_scope, pool_error_response, translation_error,
+};
 use crate::server::facts::RequestFacts;
 use crate::server::{AppState, LogGuard, pipeline};
 use crate::translate::{UsageCapture, model_map};
@@ -48,6 +50,9 @@ pub async fn responses(
       })
       .unwrap_or(&state.cfg.models.default);
    let resolved = model_map::resolve(&state.cfg.models, requested);
+   if state.cfg.models.blocked(&resolved.model) {
+      return blocked_model(DIALECT, &resolved.model);
+   }
    let provider = state.cfg.models.route(&resolved.model);
    if !auth.may_use(provider) {
       return out_of_scope(DIALECT, provider);

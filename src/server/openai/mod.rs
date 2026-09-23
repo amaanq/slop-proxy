@@ -108,6 +108,10 @@ pub async fn chat_completions(
    };
    let facts = super::facts::RequestFacts::from_chat(&req, &headers);
    let resolved = model_map::resolve(&state.cfg.models, &req.model);
+   if state.cfg.models.blocked(&resolved.model) {
+      log_rejected(&state, &auth, "chat", &req.model);
+      return super::error::blocked_model(DIALECT, &resolved.model);
+   }
    let provider = state.cfg.models.route(&resolved.model);
    if !auth.may_use(provider) {
       log_rejected(&state, &auth, "chat", &req.model);
@@ -878,6 +882,12 @@ fn prepare_request(
       .model
       .unwrap_or_else(|| state.cfg.models.default.clone());
    let resolved = model_map::resolve(&state.cfg.models, &requested_model);
+   if state.cfg.models.blocked(&resolved.model) {
+      return Err(Box::new(super::error::blocked_model(
+         DIALECT,
+         &resolved.model,
+      )));
+   }
    // Scope is decided by where the model resolves, not by the endpoint. This
    // surface is the Responses API, which zen speaks as well as codex does.
    let provider = state.cfg.models.route(&resolved.model);

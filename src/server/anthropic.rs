@@ -29,6 +29,10 @@ pub async fn messages(
 ) -> Response {
    let started = Instant::now();
    let peek = super::relay::Peek::from_slice(&body, &state.cfg.models);
+   if state.cfg.models.blocked(&peek.upstream_model) {
+      log_rejected(&state, &auth, "messages", &peek.model);
+      return super::error::blocked_model(DIALECT, &peek.upstream_model);
+   }
    // An effort suffix is part of what the caller typed, not part of the model
    // name a pattern matches, so routing the raw string sent muse:high to
    // codex and burned the pool on a model it cannot serve.
@@ -153,6 +157,9 @@ pub async fn count_tokens(
    }
 
    let peek = super::relay::Peek::from_slice(&body, &state.cfg.models);
+   if state.cfg.models.blocked(&peek.upstream_model) {
+      return super::error::blocked_model(DIALECT, &peek.upstream_model);
+   }
    let provider = state.cfg.models.route(&peek.upstream_model);
    if !auth.may_use(provider) {
       return super::error::out_of_scope(DIALECT, provider);

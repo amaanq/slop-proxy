@@ -331,6 +331,9 @@ pub async fn native(
       );
    }
    let resolved = resolve(&state.cfg.models, raw_model);
+   if state.cfg.models.blocked(&resolved.model) {
+      return super::error::blocked_model(DIALECT, &resolved.model);
+   }
    if state.cfg.models.route(&resolved.model) != Provider::Gemini {
       return error_response(
          DIALECT,

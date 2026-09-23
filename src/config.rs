@@ -275,6 +275,8 @@ pub struct ModelsConfig {
    /// Model patterns relayed verbatim to the Experiential gateway over
    /// /v1/messages only. Empty by default, set to opt in.
    pub experiential_patterns: Vec<String>,
+   /// Model patterns refused on every surface, whichever backend serves them.
+   pub blocked_patterns: Vec<String>,
 }
 
 impl Default for ModelsConfig {
@@ -292,6 +294,7 @@ impl Default for ModelsConfig {
          glm_patterns: vec!["glm-*".into()],
          deepseek_patterns: vec!["deepseek-*".into()],
          experiential_patterns: Vec::new(),
+         blocked_patterns: Vec::new(),
       }
    }
 }
@@ -304,6 +307,13 @@ pub enum ZenDialect {
 }
 
 impl ModelsConfig {
+   pub fn blocked(&self, model: &str) -> bool {
+      self
+         .blocked_patterns
+         .iter()
+         .any(|pattern| pattern_specificity(pattern, model).is_some())
+   }
+
    /// Which backend serves this model. The most specific pattern wins, and a
    /// tie goes to whichever backend is listed first here.
    pub fn route(&self, model: &str) -> Provider {

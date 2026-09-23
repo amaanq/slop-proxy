@@ -142,6 +142,15 @@ pub const fn pool_error_kind(err: &PoolError) -> &'static str {
    }
 }
 
+pub fn blocked_model(dialect: Dialect, model: &str) -> Response {
+   error_response(
+      dialect,
+      403,
+      "permission_error",
+      &format!("{model} is blocked on this proxy"),
+   )
+}
+
 /// A 403 that says which provider the token lacks, so a scoped key does not
 /// read as the model being broken for everyone.
 pub fn out_of_scope(dialect: Dialect, provider: Provider) -> Response {

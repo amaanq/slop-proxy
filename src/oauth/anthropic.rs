@@ -75,13 +75,13 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
       .send()
       .await
       .wrap_err("token exchange request failed")?;
-   let parsed = super::exchanged(resp).await?;
+   let mut parsed = super::exchanged(resp).await?;
 
-   let account = parsed.account.as_ref();
+   let account = parsed.account.take().unwrap_or_default();
    let account_id = account
-      .and_then(|acct| acct.uuid.clone())
+      .uuid
       .ok_or_else(|| eyre!("token response has no account uuid"))?;
-   let email = account.and_then(|acct| acct.email_address.clone());
+   let email = account.email_address;
    let plan = subscription_tier(&parsed.access_token).await;
    let tokens = parsed
       .into_token_set(None)

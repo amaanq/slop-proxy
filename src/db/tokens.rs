@@ -102,16 +102,7 @@ impl Db {
                   token_prefix: row.get(2)?,
                   created_at: row.get(3)?,
                   revoked_at: row.get(4)?,
-                  limits: TokenLimits {
-                     requests: row.get(5)?,
-                     tokens: row.get(6)?,
-                     window_seconds: row.get(7)?,
-                     slowdown_ms: row.get(8)?,
-                     prefer_trusted: row.get(9)?,
-                     reserved_only: row.get(10)?,
-                     pinned_account: row.get(11)?,
-                     providers: TokenLimits::decode(&row.get::<_, String>(12)?),
-                  },
+                  limits: limits_from_row(row, 5)?,
                })
             })?;
             Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -174,22 +165,26 @@ impl Db {
                Ok(AuthenticatedToken {
                   id: row.get(0)?,
                   user: row.get(1)?,
-                  limits: TokenLimits {
-                     requests: row.get(2)?,
-                     tokens: row.get(3)?,
-                     window_seconds: row.get(4)?,
-                     slowdown_ms: row.get(5)?,
-                     prefer_trusted: row.get(6)?,
-                     reserved_only: row.get(7)?,
-                     pinned_account: row.get(8)?,
-                     providers: TokenLimits::decode(&row.get::<_, String>(9)?),
-                  },
+                  limits: limits_from_row(row, 2)?,
                })
             })?;
             Ok(rows.next().transpose()?)
          })
          .await
    }
+}
+
+fn limits_from_row(row: &rusqlite::Row<'_>, base: usize) -> rusqlite::Result<TokenLimits> {
+   Ok(TokenLimits {
+      requests: row.get(base)?,
+      tokens: row.get(base + 1)?,
+      window_seconds: row.get(base + 2)?,
+      slowdown_ms: row.get(base + 3)?,
+      prefer_trusted: row.get(base + 4)?,
+      reserved_only: row.get(base + 5)?,
+      pinned_account: row.get(base + 6)?,
+      providers: TokenLimits::decode(&row.get::<_, String>(base + 7)?),
+   })
 }
 
 #[cfg(test)]

@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use eyre::{Result, WrapErr as _, bail, eyre};
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use tokio::time;
 
 use crate::db::Db;
@@ -93,15 +94,7 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
          "device login is not enabled for this account. A workspace admin must enable Codex device auth."
       );
    }
-   if !resp.status().is_success() {
-      let status = resp.status();
-      let body = resp.text().await.unwrap_or_default();
-      bail!("device user code request failed: {status}: {body}");
-   }
-   let user_code = resp
-      .json::<UserCodeResp>()
-      .await
-      .wrap_err("parsing user code response")?;
+   let user_code: UserCodeResp = ok_json(resp, "device user code request").await?;
    let interval = parse_interval(user_code.interval.as_ref());
 
    println!(
@@ -110,13 +103,36 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
    );
    println!("Waiting for authorization (up to 15 minutes)...");
 
-   let success = poll_for_code(
-      http(),
-      &user_code.device_auth_id,
-      &user_code.user_code,
-      interval,
-   )
-   .await?;
+   let started = Instant::now();
+   let success = loop {
+      let poll = http()
+         .post(DEVICE_TOKEN_URL)
+         .json(&DevicePollRequest {
+            device_auth_id: &user_code.device_auth_id,
+            user_code: &user_code.user_code,
+         })
+         .send()
+         .await
+         .wrap_err("polling device token")?;
+      match poll.status().as_u16() {
+         200 => {
+            break poll
+               .json::<DeviceTokenResp>()
+               .await
+               .wrap_err("parsing device token response")?;
+         },
+         // 403/404 mean the user has not finished authorizing yet.
+         403 | 404 => {},
+         other => {
+            let body = poll.text().await.unwrap_or_default();
+            bail!("device token poll failed: {other}: {body}");
+         },
+      }
+      if started.elapsed() > Duration::from_secs(DEVICE_TIMEOUT_SECS) {
+         bail!("device authorization timed out after 15 minutes");
+      }
+      time::sleep(Duration::from_secs(interval)).await;
+   };
 
    let token_resp = http()
       .post(TOKEN_URL)
@@ -130,7 +146,7 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
       .send()
       .await
       .wrap_err("token exchange request failed")?;
-   let tokens = exchanged(token_resp)
+   let tokens = ok_json::<TokenResponse>(token_resp, "token exchange")
       .await?
       .into_token_set(None)
       .ok_or_else(|| eyre!("no refresh_token in token response"))?;
@@ -155,13 +171,19 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
    .await
 }
 
-async fn exchanged(resp: reqwest::Response) -> Result<TokenResponse> {
+pub async fn ok_json<T>(resp: reqwest::Response, what: &str) -> Result<T>
+where
+   T: DeserializeOwned,
+{
    if !resp.status().is_success() {
       let status = resp.status();
       let body = resp.text().await.unwrap_or_default();
-      bail!("token exchange failed: {status}: {body}");
+      bail!("{what} failed: {status}: {body}");
    }
-   resp.json().await.wrap_err("parsing token response")
+   resp
+      .json()
+      .await
+      .wrap_err_with(|| format!("parsing {what} response"))
 }
 
 async fn finish_login(
@@ -192,45 +214,6 @@ async fn finish_login(
       email.unwrap_or("unknown email")
    );
    Ok(())
-}
-
-async fn poll_for_code(
-   client: &reqwest::Client,
-   device_auth_id: &str,
-   user_code: &str,
-   interval: u64,
-) -> Result<DeviceTokenResp> {
-   let started = Instant::now();
-   let max = Duration::from_secs(DEVICE_TIMEOUT_SECS);
-   loop {
-      let resp = client
-         .post(DEVICE_TOKEN_URL)
-         .json(&DevicePollRequest {
-            device_auth_id,
-            user_code,
-         })
-         .send()
-         .await
-         .wrap_err("polling device token")?;
-      match resp.status().as_u16() {
-         200 => {
-            return resp
-               .json::<DeviceTokenResp>()
-               .await
-               .wrap_err("parsing device token response");
-         },
-         // 403/404 mean the user has not finished authorizing yet.
-         403 | 404 => {},
-         other => {
-            let body = resp.text().await.unwrap_or_default();
-            bail!("device token poll failed: {other}: {body}");
-         },
-      }
-      if started.elapsed() > max {
-         bail!("device authorization timed out after 15 minutes");
-      }
-      time::sleep(Duration::from_secs(interval)).await;
-   }
 }
 
 fn parse_interval(value: Option<&Interval>) -> u64 {

@@ -6,8 +6,8 @@ use reqwest::Url;
 use serde::Deserialize;
 
 use crate::db::Db;
-use crate::oauth::refresh::{RefreshError, RefreshRequest, post_token, token_set};
-use crate::oauth::{TokenSet, exchanged, finish_login, http};
+use crate::oauth::refresh::TokenResponse;
+use crate::oauth::{finish_login, http, ok_json};
 use crate::provider::Provider;
 
 pub const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
@@ -75,7 +75,7 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
       .send()
       .await
       .wrap_err("token exchange request failed")?;
-   let mut parsed = exchanged(resp).await?;
+   let mut parsed: TokenResponse = ok_json(resp, "token exchange").await?;
 
    let account = parsed.account.take().unwrap_or_default();
    let account_id = account
@@ -122,17 +122,4 @@ async fn subscription_tier(access_token: &str) -> Option<String> {
       .ok()?
       .organization?
       .rate_limit_tier
-}
-
-pub async fn refresh(refresh_token: &str) -> Result<TokenSet, RefreshError> {
-   let (status, body) = post_token(
-      TOKEN_URL,
-      &RefreshRequest {
-         client_id: CLIENT_ID,
-         grant_type: "refresh_token",
-         refresh_token,
-      },
-   )
-   .await?;
-   token_set(status, &body, Some(refresh_token))
 }

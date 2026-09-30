@@ -3,10 +3,10 @@ use crate::codex::models::ModelsResponse;
 use crate::codex::turn_state::TurnState;
 use crate::db::Db;
 use crate::db::accounts::{Account, AccountField, AccountStatus};
+use crate::oauth;
 use crate::oauth::anthropic;
 use crate::oauth::copilot;
-use crate::oauth::refresh;
-use crate::oauth::refresh::RefreshError;
+use crate::oauth::refresh::{RefreshError, refresh_at};
 use crate::provider::{AuthMode, Provider};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -553,10 +553,19 @@ impl Slots {
          self.provider,
          slot.display
       );
+      let token = credentials.refresh_token.as_str();
       let refreshed = match self.provider {
-         Provider::OpenAi => refresh::refresh(&credentials.refresh_token).await,
-         Provider::Anthropic => anthropic::refresh(&credentials.refresh_token).await,
-         Provider::Copilot => copilot::mint(&credentials.refresh_token).await,
+         Provider::OpenAi => refresh_at(oauth::TOKEN_URL, oauth::CLIENT_ID, token, None).await,
+         Provider::Anthropic => {
+            refresh_at(
+               anthropic::TOKEN_URL,
+               anthropic::CLIENT_ID,
+               token,
+               Some(token),
+            )
+            .await
+         },
+         Provider::Copilot => copilot::mint(token).await,
          Provider::Gemini
          | Provider::Glm
          | Provider::DeepSeek

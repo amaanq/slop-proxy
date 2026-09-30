@@ -4,7 +4,7 @@ use super::{
    AccountUsage, AuthPolicy, Backend, Cooldown, ModelWindow, Pool, PoolError, Route, Slot,
    UsageWindow,
 };
-use crate::anthropic::client::{AnthropicClient, RelayHeaders};
+use crate::anthropic::{AnthropicClient, RelayHeaders};
 use crate::provider::Provider;
 use crate::upstream::SendError;
 

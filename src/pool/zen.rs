@@ -10,7 +10,7 @@ use crate::provider::Provider;
 use crate::translate::anthropic_req::empty_schema;
 use crate::translate::chat::{ChatRequest, ChatToolDef, FunctionDef};
 use crate::upstream::SendError;
-use crate::zen::client::{ZenClient, ZenModel};
+use crate::zen::{ZenClient, ZenModel};
 
 /// Zen over whatever credentials are stored, and over none at all when the
 /// table is empty. The free models are served without a key today, so an

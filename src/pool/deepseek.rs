@@ -1,5 +1,5 @@
 use super::{Backend, Pool, Relay, Route, Slot};
-use crate::deepseek::client::DeepSeekClient;
+use crate::deepseek::DeepSeekClient;
 use crate::provider::Provider;
 use crate::upstream::SendError;
 

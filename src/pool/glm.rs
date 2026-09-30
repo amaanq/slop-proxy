@@ -1,6 +1,6 @@
 use super::{Backend, Pool, Relay, Route, Slot};
 use crate::anthropic::Model;
-use crate::glm::client::GlmClient;
+use crate::glm::GlmClient;
 use crate::provider::Provider;
 use crate::upstream::SendError;
 

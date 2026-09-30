@@ -15,7 +15,7 @@ use super::auth::AuthInfo;
 use super::error::{Dialect, error_response, pool_error_response};
 use super::pipeline::{dispatch_failed, read_body, relayed_stream};
 use super::{AppState, LogGuard, log_error, log_usage};
-use crate::anthropic::client::RelayHeaders;
+use crate::anthropic::RelayHeaders;
 use crate::config::ModelsConfig;
 use crate::db::usage::UsageRecord;
 use crate::egress::egress_of;

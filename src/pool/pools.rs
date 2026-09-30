@@ -12,25 +12,25 @@ use super::gemini::{Call, GeminiPool};
 use super::glm::GlmPool;
 use super::zen::{ZenPool, satisfy_chat_tool_gate, satisfy_tool_gate};
 use super::{AccountSnapshot, Backend, PoolError, Relay, Route, Served};
-use crate::anthropic::client::AnthropicClient;
+use crate::anthropic::AnthropicClient;
 use crate::codex::client::CodexClient;
 use crate::codex::sse;
 use crate::codex::sse::EventStream;
 use crate::codex::types::ResponsesRequest;
 use crate::config::{Config, ModelsConfig, ZenDialect};
-use crate::copilot::client::CopilotClient;
+use crate::copilot::CopilotClient;
 use crate::db::Db;
-use crate::deepseek::client::DeepSeekClient;
+use crate::deepseek::DeepSeekClient;
 use crate::egress::egress_of;
-use crate::experiential::client::ExperientialClient;
+use crate::experiential::ExperientialClient;
 use crate::gemini::client::GeminiClient;
-use crate::glm::client::GlmClient;
+use crate::glm::GlmClient;
 use crate::provider::Provider;
 use crate::translate::UsageCapture;
 use crate::translate::bridge;
 use crate::translate::bridge::BridgeProtocol;
 use crate::translate::chat_req::{custom_tools, to_chat};
-use crate::zen::client::ZenClient;
+use crate::zen::ZenClient;
 
 /// A backend's reply to a Responses request, before anything reads it.
 pub enum Upstream {

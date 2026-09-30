@@ -3,17 +3,13 @@ use std::time::Instant;
 use axum::body::Bytes;
 use axum::response::Response;
 
-use crate::pool::Route;
 use crate::pool::copilot::Call;
 use crate::provider::Provider;
 use crate::server::auth::AuthInfo;
-use crate::server::chat::{
-   force_usage, relay_chat_body, relay_chat_stream, session_key, upstream_rejected,
-};
+use crate::server::chat::{ChatUsageScan, first_turn_key, force_usage};
 use crate::server::error::{Dialect, error_response};
 use crate::server::facts::RequestFacts;
-use crate::server::pipeline::{self, dispatch_failed, read_body};
-use crate::server::relay::forwarded_response;
+use crate::server::pipeline;
 use crate::server::{AppState, log_rejected};
 use crate::translate::chat::{ChatContent, ChatPart, ChatRequest};
 
@@ -39,7 +35,7 @@ pub async fn chat_completions(
       body.model.clone(),
       facts,
    );
-   record.session_key = session_key(&auth.user, &body);
+   record.session_key = first_turn_key(&auth.user, body.messages.first());
    record.effort = body.reasoning_effort.clone().unwrap_or_default();
 
    let agent = body
@@ -57,44 +53,26 @@ pub async fn chat_completions(
          return error_response(DIALECT, 400, "invalid_request_error", &err.to_string());
       },
    };
-   let served = match state
+   let served = state
       .pools
       .copilot
       .execute(
-         Route {
-            session_key: &record.session_key,
-            model: &record.upstream_model,
-            service_tier: None,
-            user: &auth.user,
-            pinned_account: auth.limits.pinned_account,
-            prefer_trusted: false,
-            reserved_only: auth.limits.reserved_only,
-         },
+         auth.route(&record.session_key, &record.upstream_model),
          Call {
             body: encoded,
             agent,
             vision,
          },
       )
-      .await
-   {
-      Ok(served) => served,
-      Err(err) => return dispatch_failed(&state, record, DIALECT, err),
-   };
-   let resp = served.response;
-   record.account_id = served.account_id;
-   record.attempts = i64::from(served.attempts);
-   record.status = i64::from(resp.status().as_u16());
-
-   let builder = forwarded_response(&resp);
-   if !resp.status().is_success() {
-      return upstream_rejected(&state, record, builder, resp, started, Provider::Copilot).await;
-   }
-   if streaming {
-      return relay_chat_stream(state, record, builder, resp, started, Provider::Copilot);
-   }
-   match read_body(&state, &record, DIALECT, resp).await {
-      Ok(bytes) => relay_chat_body(&state, record, builder, bytes, started),
-      Err(resp) => resp,
-   }
+      .await;
+   pipeline::forward(
+      state,
+      record,
+      served,
+      Vec::new(),
+      started,
+      streaming,
+      |capture| ChatUsageScan::new(capture, Provider::Copilot),
+   )
+   .await
 }

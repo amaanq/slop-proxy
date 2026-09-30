@@ -104,16 +104,7 @@ mod unpaired_tool_tests {
          "tools".into(),
          serde_json::json!([{"type": "function", "name": "shell"}]),
       );
-      let fixes = zen_input_fixups(&mut rest);
-      assert_eq!(
-         (
-            fixes.hoisted,
-            fixes.rewritten,
-            fixes.dropped,
-            fixes.unpaired
-         ),
-         (2, 1, 3, 1)
-      );
+      zen_input_fixups(&mut rest, "u1");
       let names: Vec<_> = rest["tools"]
          .as_array()
          .unwrap()
@@ -212,13 +203,6 @@ mod unpaired_tool_tests {
    }
 
    #[test]
-   fn the_rejected_index_is_read_from_zens_body() {
-      let body = r#"{"error":{"param":"input[4]","type":"invalid_request_error"}}"#;
-      assert_eq!(rejected_index(body), Some(4));
-      assert_eq!(rejected_index(r#"{"error":{"param":"call_id"}}"#), None);
-   }
-
-   #[test]
    fn a_paired_history_is_untouched() {
       let items = serde_json::json!([
           {"type": "apply_patch_call", "call_id": "p1", "status": "completed"},
@@ -239,7 +223,7 @@ mod terminal_event_tests {
    fn the_final_response_survives_the_terminal_frame() {
       let frame = r#"{"type":"response.completed","sequence_number":9,"response":{"id":"resp_1","usage":{"input_tokens":1}}}"#;
       let event: TerminalEvent = serde_json::from_str(frame).unwrap();
-      assert!(TerminalEvent::is_terminal(&event.kind));
+      assert_eq!(event.kind, "response.completed");
       assert_eq!(
          event.response.unwrap().get(),
          r#"{"id":"resp_1","usage":{"input_tokens":1}}"#
@@ -261,16 +245,15 @@ mod rate_limit_header_tests {
 
    #[test]
    fn the_shorter_window_is_primary() {
-      let out = rate_limit_headers(&[
-         window("7d", 0.42, Some(1000)),
-         window("5h", 0.11, Some(500)),
-      ]);
-      let get = |key: &str| {
-         out.iter()
-            .find(|&&(ref name, _)| name == key)
-            .map(|&(_, ref value)| value.as_str())
-            .unwrap()
-      };
+      let mut out = HeaderMap::new();
+      rate_limit_headers(
+         &[
+            window("7d", 0.42, Some(1000)),
+            window("5h", 0.11, Some(500)),
+         ],
+         &mut out,
+      );
+      let get = |key: &str| out[key].to_str().unwrap();
       assert_eq!(get("x-codex-primary-window-minutes"), "300");
       assert_eq!(get("x-codex-primary-used-percent"), "11");
       assert_eq!(get("x-codex-secondary-window-minutes"), "10080");
@@ -279,15 +262,9 @@ mod rate_limit_header_tests {
 
    #[test]
    fn a_window_without_a_reset_still_reports() {
-      let out = rate_limit_headers(&[window("7d", 0.8, None)]);
-      assert!(
-         out.iter()
-            .any(|&(ref name, ref value)| name == "x-codex-primary-used-percent" && value == "80")
-      );
-      assert!(
-         !out
-            .iter()
-            .any(|&(ref name, _)| name == "x-codex-primary-reset-at")
-      );
+      let mut out = HeaderMap::new();
+      rate_limit_headers(&[window("7d", 0.8, None)], &mut out);
+      assert_eq!(out["x-codex-primary-used-percent"], "80");
+      assert!(!out.contains_key("x-codex-primary-reset-at"));
    }
 }

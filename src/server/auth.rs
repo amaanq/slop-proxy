@@ -7,8 +7,8 @@ use axum::response::Response;
 use tokio::time;
 
 use crate::db::tokens::TokenLimits;
-use crate::db::usage::AdmissionError;
-use crate::provider::Provider;
+use crate::db::usage::{Admission, AdmissionError};
+use crate::pool::Route;
 use crate::server::AppState;
 use crate::server::error::{Dialect, error_response};
 
@@ -21,8 +21,20 @@ pub struct AuthInfo {
 }
 
 impl AuthInfo {
-   pub fn may_use(&self, provider: Provider) -> bool {
-      self.limits.may_use(provider)
+   pub fn route<'route>(
+      &'route self,
+      session_key: &'route str,
+      model: &'route str,
+   ) -> Route<'route> {
+      Route {
+         session_key,
+         model,
+         service_tier: None,
+         user: &self.user,
+         pinned_account: self.limits.pinned_account,
+         prefer_trusted: self.limits.prefer_trusted,
+         reserved_only: self.limits.reserved_only,
+      }
    }
 }
 
@@ -37,9 +49,7 @@ pub async fn require_token(
       Dialect::OpenAi
    };
 
-   let raw = bearer_token(req.headers(), req.uri().query());
-
-   let Some(raw) = raw else {
+   let Some(raw) = bearer_token(req.headers(), req.uri().query()) else {
       return error_response(
          dialect,
          401,
@@ -48,83 +58,98 @@ pub async fn require_token(
       );
    };
 
-   match state.db.auth_token(&raw).await {
-      Ok(Some(token)) => {
-         if req.method() == Method::GET && req.uri().path() == "/v1/responses" {
-            req.extensions_mut().insert(AuthInfo {
-               token_id: token.id,
-               user: token.user,
-               meter_id: None,
-               limits: token.limits,
-            });
-            return next.run(req).await;
-         }
-         let admission = match state.db.admit_token(token.id, &token.limits).await {
-            Ok(Ok(admission)) => admission,
-            Ok(Err(err)) => {
-               let (message, retry_after) = match err {
-                  AdmissionError::RequestLimit { retry_after } => {
-                     ("API token request limit exceeded", retry_after)
-                  },
-                  AdmissionError::TokenLimit { retry_after } => {
-                     ("API token token limit exceeded", retry_after)
-                  },
-               };
-               let mut response = error_response(dialect, 429, "rate_limit_error", message);
-               insert_header(&mut response, "retry-after", retry_after);
-               return response;
-            },
-            Err(err) => {
-               tracing::error!("token metering failed: {err}");
-               return error_response(dialect, 500, "api_error", "internal error");
-            },
-         };
-         if admission.slowdown_ms > 0 {
-            time::sleep(Duration::from_millis(admission.slowdown_ms as u64)).await;
-         }
-         req.extensions_mut().insert(AuthInfo {
-            token_id: token.id,
-            user: token.user.clone(),
-            meter_id: Some(admission.meter_id),
-            limits: token.limits.clone(),
-         });
-         let mut response = next.run(req).await;
-         if let Some(limit) = admission.request_limit {
-            insert_header(&mut response, "x-ratelimit-limit-requests", limit);
-         }
-         if let Some(remaining) = admission.requests_remaining {
-            insert_header(&mut response, "x-ratelimit-remaining-requests", remaining);
-         }
-         if let Some(limit) = admission.token_limit {
-            insert_header(&mut response, "x-ratelimit-limit-tokens", limit);
-         }
-         if let Some(remaining) = admission.tokens_remaining {
-            insert_header(&mut response, "x-ratelimit-remaining-tokens", remaining);
-         }
-         insert_header(&mut response, "x-ratelimit-reset", admission.reset_after);
-         if admission.slowdown_ms > 0 {
-            insert_header(&mut response, "x-slop-slowdown-ms", admission.slowdown_ms);
-         }
-         response
-      },
+   if req.method() == Method::GET && req.uri().path() == "/v1/responses" {
+      return match authenticate(&state, dialect, &raw).await {
+         Ok(auth) => {
+            req.extensions_mut().insert(auth);
+            next.run(req).await
+         },
+         Err(response) => response,
+      };
+   }
+   let (auth, admission) = match admit_token(&state, dialect, &raw).await {
+      Ok(admitted) => admitted,
+      Err(response) => return response,
+   };
+   req.extensions_mut().insert(auth);
+   let mut response = next.run(req).await;
+   if let Some(limit) = admission.request_limit {
+      insert_header(&mut response, "x-ratelimit-limit-requests", limit);
+   }
+   if let Some(remaining) = admission.requests_remaining {
+      insert_header(&mut response, "x-ratelimit-remaining-requests", remaining);
+   }
+   if let Some(limit) = admission.token_limit {
+      insert_header(&mut response, "x-ratelimit-limit-tokens", limit);
+   }
+   if let Some(remaining) = admission.tokens_remaining {
+      insert_header(&mut response, "x-ratelimit-remaining-tokens", remaining);
+   }
+   insert_header(&mut response, "x-ratelimit-reset", admission.reset_after);
+   if admission.slowdown_ms > 0 {
+      insert_header(&mut response, "x-slop-slowdown-ms", admission.slowdown_ms);
+   }
+   response
+}
+
+async fn authenticate(state: &AppState, dialect: Dialect, raw: &str) -> Result<AuthInfo, Response> {
+   match state.db.auth_token(raw).await {
+      Ok(Some(token)) => Ok(AuthInfo {
+         token_id: token.id,
+         user: token.user,
+         meter_id: None,
+         limits: token.limits,
+      }),
       Ok(None) => {
          tracing::warn!(
             prefix = %raw.chars().take(12).collect::<String>(),
-            path = %req.uri().path(),
             "rejected an unknown API token"
          );
-         error_response(
+         Err(error_response(
             dialect,
             401,
             "authentication_error",
             "invalid or revoked API token",
-         )
+         ))
       },
       Err(err) => {
          tracing::error!("token lookup failed: {err}");
-         error_response(dialect, 500, "api_error", "internal error")
+         Err(error_response(dialect, 500, "api_error", "internal error"))
       },
    }
+}
+
+pub async fn admit_token(
+   state: &AppState,
+   dialect: Dialect,
+   raw: &str,
+) -> Result<(AuthInfo, Admission), Response> {
+   let mut auth = authenticate(state, dialect, raw).await?;
+   let admission = match state.db.admit_token(auth.token_id, &auth.limits).await {
+      Ok(Ok(admission)) => admission,
+      Ok(Err(err)) => {
+         let (message, retry_after) = match err {
+            AdmissionError::RequestLimit { retry_after } => {
+               ("API token request limit exceeded", retry_after)
+            },
+            AdmissionError::TokenLimit { retry_after } => {
+               ("API token token limit exceeded", retry_after)
+            },
+         };
+         let mut response = error_response(dialect, 429, "rate_limit_error", message);
+         insert_header(&mut response, "retry-after", retry_after);
+         return Err(response);
+      },
+      Err(err) => {
+         tracing::error!("token metering failed: {err}");
+         return Err(error_response(dialect, 500, "api_error", "internal error"));
+      },
+   };
+   if admission.slowdown_ms > 0 {
+      time::sleep(Duration::from_millis(admission.slowdown_ms as u64)).await;
+   }
+   auth.meter_id = Some(admission.meter_id);
+   Ok((auth, admission))
 }
 
 fn insert_header(response: &mut Response, name: &'static str, value: i64) {

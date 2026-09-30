@@ -13,20 +13,23 @@ use axum::response::Response;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures_util::StreamExt as _;
 use futures_util::stream;
+use serde::Serialize;
 use tokio::time::timeout;
 
 use crate::codex::sse::EventStream;
-use crate::codex::types::ResponsesEvent;
+use crate::codex::types::{ResponsesEvent, ResponsesRequest};
 use crate::db::usage::UsageRecord;
-use crate::pool::PoolError;
+use crate::egress::egress_of;
+use crate::pool::{PoolError, Route, Served};
 use crate::provider::Provider;
 use crate::server::auth::AuthInfo;
 use crate::server::error::{
-   Dialect, error_response, pool_error_kind, pool_error_response, pool_error_status,
+   Dialect, blocked_model, error_response, out_of_scope, pool_error_kind, pool_error_response,
 };
 use crate::server::facts::RequestFacts;
-use crate::server::{AppState, LogGuard, log_error, log_usage};
-use crate::translate::{CapturedUsage, UsageCapture};
+use crate::server::relay::forwarded_response;
+use crate::server::{AppState, LogGuard, log_error, log_rejected, log_usage};
+use crate::translate::{Aggregated, CapturedUsage, StopKind, UsageCapture, aggregate};
 
 pub fn record(
    auth: &AuthInfo,
@@ -54,6 +57,26 @@ pub fn record(
    }
 }
 
+pub fn admit(
+   state: &AppState,
+   auth: &AuthInfo,
+   dialect: Dialect,
+   endpoint: &'static str,
+   requested: &str,
+   model: &str,
+) -> Result<Provider, Box<Response>> {
+   if state.cfg.models.blocked(model) {
+      log_rejected(state, auth, endpoint, requested);
+      return Err(Box::new(blocked_model(dialect, model)));
+   }
+   let provider = state.cfg.models.route(model);
+   if !auth.limits.may_use(provider) {
+      log_rejected(state, auth, endpoint, requested);
+      return Err(Box::new(out_of_scope(dialect, provider)));
+   }
+   Ok(provider)
+}
+
 pub fn dispatch_failed(
    state: &AppState,
    mut record: UsageRecord,
@@ -61,13 +84,10 @@ pub fn dispatch_failed(
    err: PoolError,
 ) -> Response {
    record.attempts = i64::from(err.attempts());
-   log_error(
-      state,
-      record,
-      pool_error_status(&err),
-      pool_error_kind(&err),
-   );
-   pool_error_response(dialect, &state.cfg.models, err)
+   let kind = pool_error_kind(&err);
+   let response = pool_error_response(dialect, &state.cfg.models, err);
+   log_error(state, record, i64::from(response.status().as_u16()), kind);
+   response
 }
 
 pub async fn read_body(
@@ -80,6 +100,12 @@ pub async fn read_body(
       log_error(state, record.clone(), 502, "upstream_read");
       error_response(dialect, 502, "api_error", &err.to_string())
    })
+}
+
+pub fn respond(builder: Builder, dialect: Dialect, body: Body) -> Response {
+   builder
+      .body(body)
+      .unwrap_or_else(|err| error_response(dialect, 502, "api_error", &err.to_string()))
 }
 
 pub fn apply_snapshot(record: &mut UsageRecord, snap: &CapturedUsage, started: Instant) {
@@ -104,7 +130,7 @@ pub fn apply_snapshot(record: &mut UsageRecord, snap: &CapturedUsage, started: I
 
 pub fn logged_json<T>(state: &AppState, mut record: UsageRecord, value: T) -> Response
 where
-   T: serde::Serialize,
+   T: Serialize,
 {
    let response = axum::Json(value).into_response();
    record.status = i64::from(response.status().as_u16());
@@ -113,74 +139,144 @@ where
    response
 }
 
-/// Upstream bytes to the client, `each` seeing every chunk on the way (and
-/// free to rewrite it), `tail` appended once upstream closes.
-pub fn relayed<F, T>(
-   builder: Builder,
-   resp: reqwest::Response,
-   guard: LogGuard,
-   capture: UsageCapture,
-   dialect: Dialect,
-   each: F,
-   tail: T,
-) -> Response
-where
-   F: FnMut(Bytes) -> Bytes + Send + 'static,
-   T: FnOnce() -> Bytes + Send + 'static,
-{
-   relayed_stream(
-      builder,
-      resp.bytes_stream(),
-      guard,
-      capture,
-      dialect,
-      each,
-      tail,
-   )
+/// Reads usage out of a reply relayed in the dialect it arrived in.
+pub trait Scan: Send + 'static {
+   const DIALECT: Dialect;
+   const REJECTED: &'static str;
+
+   fn chunk(&mut self, bytes: Bytes) -> Bytes;
+
+   fn body(&mut self, bytes: Bytes) -> Result<Bytes, String>;
+
+   fn tail(&mut self) -> Bytes {
+      Bytes::new()
+   }
+
+   fn head(&mut self) -> Option<Bytes> {
+      None
+   }
 }
 
-/// `relayed` over a body already taken off the response, for a caller that had
-/// to read the first chunk before it could commit to this attempt.
-pub fn relayed_stream<S, E, F, T>(
-   builder: Builder,
-   body: S,
-   guard: LogGuard,
-   capture: UsageCapture,
-   dialect: Dialect,
-   mut each: F,
-   tail: T,
+pub async fn forward<S, F>(
+   state: AppState,
+   mut record: UsageRecord,
+   served: Result<Served<reqwest::Response>, PoolError>,
+   headers: Vec<(String, String)>,
+   started: Instant,
+   streaming: bool,
+   scan: F,
 ) -> Response
 where
-   S: stream::Stream<Item = Result<Bytes, E>> + Send + 'static,
-   E: Into<axum::BoxError> + Send + 'static,
-   F: FnMut(Bytes) -> Bytes + Send + 'static,
-   T: FnOnce() -> Bytes + Send + 'static,
+   S: Scan,
+   F: FnOnce(UsageCapture) -> S + Send,
 {
-   let eof = capture.clone();
+   let served = match served {
+      Ok(served) => served,
+      Err(err) => return dispatch_failed(&state, record, S::DIALECT, err),
+   };
+   let resp = served.response;
+   record.account_id = served.account_id;
+   record.attempts = i64::from(served.attempts);
+   record.status = i64::from(resp.status().as_u16());
+   let mut builder = forwarded_response(&resp);
+   for (name, value) in headers {
+      builder = builder.header(name, value);
+   }
+   let capture = UsageCapture::default();
+   if let Some(index) = egress_of(&resp) {
+      capture.note_egress(index);
+   }
+   let mut scan = scan(capture.clone());
+
+   // A non-2xx carries no SSE frames, so the usage scanner would log a
+   // phantom `client_disconnect` and drop the body.
+   if !resp.status().is_success() {
+      let mut bytes = resp.bytes().await.unwrap_or_default();
+      if let Some(head) = scan.head() {
+         bytes = Bytes::from([head, bytes].concat());
+      }
+      tracing::warn!(
+          user = %record.user,
+          model = %record.requested_model,
+          dialect = record.dialect,
+          status = record.status,
+          body = %String::from_utf8_lossy(&bytes).chars().take(2000).collect::<String>(),
+          "{} rejected the request",
+          record.provider.map_or("upstream", Provider::as_str)
+      );
+      record.error_kind = Some(S::REJECTED.into());
+      record.response_bytes = bytes.len() as i64;
+      record.duration_ms = Some(started.elapsed().as_millis() as i64);
+      log_usage(&state, record);
+      return respond(builder, S::DIALECT, Body::from(bytes));
+   }
+   if streaming {
+      let head = stream::iter(scan.head().map(Ok::<Bytes, reqwest::Error>));
+      let guard = LogGuard::new(state, capture.clone(), record, started);
+      return relayed(
+         builder,
+         head.chain(resp.bytes_stream()),
+         guard,
+         capture,
+         scan,
+      );
+   }
+
+   let bytes = match read_body(&state, &record, S::DIALECT, resp).await {
+      Ok(bytes) => bytes,
+      Err(resp) => return resp,
+   };
+   let bytes = match scan.body(bytes) {
+      Ok(bytes) => bytes,
+      Err(error) => {
+         log_error(&state, record, 502, "upstream_decode");
+         return error_response(S::DIALECT, 502, "api_error", &error);
+      },
+   };
+   apply_snapshot(&mut record, &capture.snapshot(), started);
+   record.response_bytes = bytes.len() as i64;
+   log_usage(&state, record);
+   respond(builder, S::DIALECT, Body::from(bytes))
+}
+
+/// Upstream bytes to the client, the scan seeing every chunk on the way (and
+/// free to rewrite it) and its tail appended once upstream closes.
+fn relayed<B, E, S>(
+   builder: Builder,
+   body: B,
+   guard: LogGuard,
+   capture: UsageCapture,
+   mut scan: S,
+) -> Response
+where
+   B: stream::Stream<Item = Result<Bytes, E>> + Send + 'static,
+   E: Into<axum::BoxError> + Send + 'static,
+   S: Scan,
+{
    let stream = body
+      .map(Some)
+      .chain(stream::once(async { None }))
       .map(move |item| {
          let _ = &guard;
          match item {
-            Ok(bytes) => {
-               let bytes = each(bytes);
+            Some(Ok(bytes)) => {
+               let bytes = scan.chunk(bytes);
                capture.note_bytes(bytes.len());
                Ok(bytes)
             },
-            Err(err) => {
+            Some(Err(err)) => {
                capture.fail("upstream_stream_error");
                Err(err)
             },
+            None => {
+               capture.note_upstream_eof();
+               let bytes = scan.tail();
+               capture.note_bytes(bytes.len());
+               Ok(bytes)
+            },
          }
-      })
-      .chain(stream::once(async move {
-         eof.note_upstream_eof();
-         let bytes = tail();
-         eof.note_bytes(bytes.len());
-         Ok(bytes)
-      }));
-   builder
-      .body(Body::from_stream(kept_alive(stream)))
-      .unwrap_or_else(|err| error_response(dialect, 502, "api_error", &err.to_string()))
+      });
+   respond(builder, S::DIALECT, Body::from_stream(kept_alive(stream)))
 }
 
 /// Cloudflare 524s an origin silent for 100s. Upstream chunks split anywhere,
@@ -212,6 +308,71 @@ where
          }
       },
    )
+}
+
+pub struct Reply<F, R> {
+   pub dialect: Dialect,
+   pub stream: Option<F>,
+   pub render: R,
+}
+
+pub async fn serve_translated<F, S, R, T>(
+   state: AppState,
+   auth: &AuthInfo,
+   mut record: UsageRecord,
+   provider: Provider,
+   upstream_req: &ResponsesRequest,
+   started: Instant,
+   reply: Reply<F, R>,
+) -> Response
+where
+   F: FnOnce(UsageCapture) -> S + Send,
+   S: FnMut(Option<ResponsesEvent>) -> Vec<Event> + Send + 'static,
+   R: FnOnce(&Aggregated) -> T + Send,
+   T: Serialize,
+{
+   record.effort = upstream_req
+      .reasoning
+      .as_ref()
+      .map(|reasoning| reasoning.effort.clone())
+      .unwrap_or_default();
+   record.session_key = upstream_req.prompt_cache_key.clone().unwrap_or_default();
+   let route = Route {
+      service_tier: upstream_req.service_tier.as_deref(),
+      ..auth.route(&record.session_key, &upstream_req.model)
+   };
+   let dispatched = match state
+      .pools
+      .responses(&state.cfg.models, provider, route, upstream_req)
+      .await
+   {
+      Ok(dispatched) => dispatched,
+      Err(err) => return dispatch_failed(&state, record, reply.dialect, err),
+   };
+   record.account_id = dispatched.account_id;
+   record.attempts = i64::from(dispatched.attempts);
+
+   let capture = UsageCapture::default();
+   let events = dispatched
+      .upstream
+      .events(&upstream_req.model, capture.clone());
+   if let Some(stream) = reply.stream {
+      let step = stream(capture.clone());
+      return translated(events, LogGuard::new(state, capture, record, started), step);
+   }
+   let agg = aggregate(events, &capture).await;
+   let snap = capture.snapshot();
+   apply_snapshot(&mut record, &snap, started);
+   if agg.stop == StopKind::Error {
+      let msg = agg
+         .error_message
+         .unwrap_or_else(|| "upstream failure".into());
+      record.status = 502;
+      log_usage(&state, record);
+      return error_response(reply.dialect, 502, "api_error", &msg);
+   }
+   record.error_kind = snap.error_kind;
+   logged_json(&state, record, (reply.render)(&agg))
 }
 
 /// Responses events rendered as another dialect's SSE. `step` gets `None`

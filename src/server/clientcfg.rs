@@ -6,6 +6,7 @@ use serde::Serialize;
 
 use crate::clock;
 use crate::server::error::{Dialect, error_response};
+use crate::server::relay::header_str;
 
 /// Ten years out. Codex refreshes when it believes the grant is near expiry,
 /// and the refresh would go to `OpenAI` rather than here, so the claim is dated
@@ -119,14 +120,8 @@ pub async fn codex_accounts() -> Response {
 /// a `ChatGPT` session cookie the proxy has no way to mint, and fails loudly at
 /// startup with `no_biscuit_no_service`.
 pub async fn codex_config(headers: HeaderMap) -> Response {
-   let host = headers
-      .get("host")
-      .and_then(|value| value.to_str().ok())
-      .unwrap_or("localhost");
-   let scheme = headers
-      .get("x-forwarded-proto")
-      .and_then(|value| value.to_str().ok())
-      .unwrap_or("https");
+   let host = header_str(&headers, "host").unwrap_or("localhost");
+   let scheme = header_str(&headers, "x-forwarded-proto").unwrap_or("https");
 
    let body = format!(
       "openai_base_url = \"{scheme}://{host}/v1\"\n\
@@ -157,10 +152,6 @@ where
 }
 
 fn bearer(headers: &HeaderMap) -> Option<String> {
-   let raw = headers
-      .get("x-api-key")
-      .or_else(|| headers.get("authorization"))?
-      .to_str()
-      .ok()?;
+   let raw = header_str(headers, "x-api-key").or_else(|| header_str(headers, "authorization"))?;
    Some(raw.strip_prefix("Bearer ").unwrap_or(raw).to_owned())
 }

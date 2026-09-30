@@ -157,7 +157,7 @@ fn session_prefix() -> String {
 }
 
 impl Pool<ZenClient> {
-   pub async fn models(&self) -> Vec<ZenModel> {
-      self.backend.models().await.unwrap_or_default()
+   pub async fn models(&self) -> Option<Vec<ZenModel>> {
+      self.backend.models().await.ok()
    }
 }

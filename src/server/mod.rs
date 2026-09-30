@@ -68,6 +68,7 @@ impl AppState {
 
 pub async fn serve(db: Db, cfg: Config, bind: &str) -> Result<()> {
    let pools = Pools::load(&db, &cfg).await?;
+   pools.refresh_catalogs().await;
    let prices = Prices::new(&cfg.db_path, cfg.pricing.url.clone());
    prices.load().await;
    let state = AppState(Arc::new(Inner {
@@ -86,6 +87,15 @@ pub async fn serve(db: Db, cfg: Config, bind: &str) -> Result<()> {
          if price_state.prices.refresh().await.is_ok() {
             price_history(&price_state).await;
          }
+      }
+   });
+   let catalog_state = state.clone();
+   tokio::spawn(async move {
+      let mut tick = time::interval(Duration::from_mins(5));
+      tick.tick().await;
+      loop {
+         tick.tick().await;
+         catalog_state.pools.refresh_catalogs().await;
       }
    });
    let reload_state = state.clone();

@@ -93,12 +93,11 @@ impl Backend for GeminiClient {
 impl Pool<GeminiClient> {
    /// The first account that answers. Every key sees the same catalog, so
    /// there is nothing to merge across accounts.
-   pub async fn models(&self) -> Vec<ListedModel> {
+   pub async fn models(&self) -> Option<Vec<ListedModel>> {
       self
          .first_answer(async |backend, key, slot| {
             backend.models(key, slot.http_referer.as_deref()).await
          })
          .await
-         .unwrap_or_default()
    }
 }

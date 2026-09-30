@@ -22,7 +22,7 @@ use crate::codex::types::{
 use crate::config::ZenDialect;
 use crate::db::usage::UsageRecord;
 use crate::egress::egress_of;
-use crate::pool::pools::{Dispatched, Upstream};
+use crate::pool::pools::{Catalogs, Dispatched, Upstream};
 use crate::pool::{Route, UsageWindow, window_seconds};
 use crate::provider::Provider;
 use crate::server::auth::AuthInfo;
@@ -82,30 +82,23 @@ pub struct ModelList {
 
 /// The Gemini pool's chat-capable catalog, shared by `/v1/models` and the
 /// `/v1beta` surface a native-dialect caller discovers from.
-pub async fn gemini_entries(state: &AppState) -> Vec<ModelEntry> {
-   state
-      .pools
+pub fn gemini_entries(state: &AppState, catalogs: &Catalogs) -> Vec<ModelEntry> {
+   catalogs
       .gemini
-      .models()
-      .await
-      .into_iter()
+      .iter()
       .filter(|model| state.cfg.models.route(&model.id) == Provider::Gemini)
-      .map(|model| ModelEntry::new(model.id, "google", model.context_window))
+      .map(|model| ModelEntry::new(model.id.clone(), "google", model.context_window))
       .collect()
 }
 
-async fn zen_responses_models(state: &AppState) -> Vec<ZenModel> {
-   state
-      .pools
-      .zen
-      .models()
-      .await
-      .into_iter()
-      .filter(|model| {
-         state.cfg.models.route(&model.id) == Provider::Zen
-            && state.cfg.models.zen_dialect(&model.id) != ZenDialect::Messages
-      })
-      .collect()
+fn zen_responses_models<'cat>(
+   state: &AppState,
+   catalogs: &'cat Catalogs,
+) -> impl Iterator<Item = &'cat ZenModel> {
+   catalogs.zen.iter().filter(|model| {
+      state.cfg.models.route(&model.id) == Provider::Zen
+         && state.cfg.models.zen_dialect(&model.id) != ZenDialect::Messages
+   })
 }
 
 pub async fn chat_completions(
@@ -210,14 +203,9 @@ pub fn responses_upgrade_required() -> Response {
       .into_response()
 }
 
-async fn messages_catalog(state: &AppState) -> Catalog {
-   let (mut data, glm, deepseek, zen) = tokio::join!(
-      state.pools.anthropic.catalog(),
-      state.pools.glm.models(),
-      state.pools.deepseek.models(),
-      state.pools.zen.models(),
-   );
-
+fn messages_catalog(state: &AppState) -> Catalog {
+   let catalogs = state.pools.catalogs();
+   let mut data = catalogs.anthropic.to_vec();
    let now = rfc3339(unix_now());
    let synthetic = |id: String| Model {
       display_name: id.clone(),
@@ -227,19 +215,25 @@ async fn messages_catalog(state: &AppState) -> Catalog {
    };
 
    data.extend(
-      glm.into_iter()
-         .filter(|model| state.cfg.models.route(&model.id) == Provider::Glm),
+      catalogs
+         .glm
+         .iter()
+         .filter(|model| state.cfg.models.route(&model.id) == Provider::Glm)
+         .cloned(),
    );
    data.extend(
-      deepseek
-         .into_iter()
+      catalogs
+         .deepseek
+         .iter()
          .filter(|id| state.cfg.models.route(id) == Provider::DeepSeek)
-         .map(&synthetic),
+         .map(|id| synthetic(id.clone())),
    );
    data.extend(
-      zen.into_iter()
+      catalogs
+         .zen
+         .iter()
          .filter(|model| state.cfg.models.zen_dialect(&model.id) == ZenDialect::Messages)
-         .map(|model| synthetic(model.id)),
+         .map(|model| synthetic(model.id.clone())),
    );
 
    Catalog {
@@ -262,10 +256,11 @@ pub async fn models(
    // understands its own. `anthropic-version` is required on every Anthropic
    // API call, so its presence identifies the caller.
    if headers.contains_key("anthropic-version") {
-      return Json(messages_catalog(&state).await).into_response();
+      return Json(messages_catalog(&state)).into_response();
    }
+
+   let catalogs = state.pools.catalogs();
    if query.client_version.is_some() {
-      let zen = zen_responses_models(&state).await;
       return state
          .catalog(&auth.user, auth.limits.pinned_account)
          .await
@@ -280,7 +275,12 @@ pub async fn models(
             },
             |catalog| {
                let body = serde_json::to_string(&catalog).expect("catalog serializes");
-               let body = with_zen_entries(&body, &state.cfg.models.default, &zen).unwrap_or(body);
+               let body = with_zen_entries(
+                  &body,
+                  &state.cfg.models.default,
+                  zen_responses_models(&state, &catalogs),
+               )
+               .unwrap_or(body);
                ([("content-type", "application/json")], body).into_response()
             },
          );
@@ -311,23 +311,18 @@ pub async fn models(
    // This catalog is what an openai-dialect client discovers from, so a zen
    // model the responses surface refuses must not appear in it.
    data.extend(
-      zen_responses_models(&state)
-         .await
-         .into_iter()
-         .map(|model| ModelEntry::new(model.id, "opencode", model.context_window)),
+      zen_responses_models(&state, &catalogs)
+         .map(|model| ModelEntry::new(model.id.clone(), "opencode", model.context_window)),
    );
-   data.extend(gemini_entries(&state).await);
+   data.extend(gemini_entries(&state, &catalogs));
    // The Copilot catalog narrowed to whatever `copilot_patterns` claims, so
    // `/v1/models` only advertises what this proxy will actually serve.
    data.extend(
-      state
-         .pools
+      catalogs
          .copilot
-         .models()
-         .await
-         .into_iter()
+         .iter()
          .filter(|id| state.cfg.models.route(id) == Provider::Copilot)
-         .map(|id| ModelEntry::new(id, "github", None)),
+         .map(|id| ModelEntry::new(id.clone(), "github", None)),
    );
 
    Json(ModelList {

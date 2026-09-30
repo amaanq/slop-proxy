@@ -137,7 +137,7 @@ impl Scan for ChatScan {
 pub async fn models(State(state): State<AppState>) -> Response {
    axum::Json(ModelList {
       object: "list",
-      data: gemini_entries(&state).await,
+      data: gemini_entries(&state, &state.pools.catalogs()),
    })
    .into_response()
 }

@@ -7,11 +7,10 @@ use crate::upstream::SendError;
 pub type DeepSeekPool = Pool<DeepSeekClient>;
 
 impl DeepSeekPool {
-   pub async fn models(&self) -> Vec<String> {
+   pub async fn models(&self) -> Option<Vec<String>> {
       self
          .first_answer(async |backend, key, _| backend.models(key).await)
          .await
-         .unwrap_or_default()
    }
 }
 

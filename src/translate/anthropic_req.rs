@@ -357,9 +357,6 @@ fn convert_message(msg: &AnthMessage, out: &mut Vec<InputItem>, replay_reasoning
                continue;
             };
             let (id, encrypted_content) = decode_signature(sig);
-            if encrypted_content.is_none() {
-               continue;
-            }
             flush(&mut parts, out);
             out.push(InputItem::Reasoning {
                id,
@@ -370,7 +367,7 @@ fn convert_message(msg: &AnthMessage, out: &mut Vec<InputItem>, replay_reasoning
                      text: thinking.clone(),
                   }]
                },
-               encrypted_content,
+               encrypted_content: Some(encrypted_content),
             });
          },
          ContentBlock::RedactedThinking => {},
@@ -386,15 +383,23 @@ fn tool_result_text(content: Option<&ToolResultContent>) -> String {
    match content {
       None => String::new(),
       Some(&ToolResultContent::Text(ref text)) => text.clone(),
-      Some(&ToolResultContent::Blocks(ref blocks)) => blocks
-         .iter()
-         .filter_map(|block| match *block {
-            ToolResultBlock::Text { ref text } => Some(text.clone()),
-            ToolResultBlock::Image => Some("[image omitted]".into()),
-            ToolResultBlock::Other => None,
-         })
-         .collect::<Vec<_>>()
-         .join("\n"),
+      Some(&ToolResultContent::Blocks(ref blocks)) => {
+         let mut out = String::new();
+         let mut first = true;
+         for block in blocks {
+            let chunk: &str = match *block {
+               ToolResultBlock::Text { ref text } => text.as_str(),
+               ToolResultBlock::Image => "[image omitted]",
+               ToolResultBlock::Other => continue,
+            };
+            if !first {
+               out.push('\n');
+            }
+            first = false;
+            out.push_str(chunk);
+         }
+         out
+      },
       Some(&ToolResultContent::Other(ref other)) => other.to_string(),
    }
 }

@@ -1,6 +1,5 @@
 use crate::codex::types::{ContentPart, InputItem, ResponsesRequest, SummaryPart};
 
-/// Rough chars/4 estimate.
 pub fn estimate(req: &ResponsesRequest) -> i64 {
    let mut chars = req.instructions.len();
    let mut per_item_overhead = 0_i64;

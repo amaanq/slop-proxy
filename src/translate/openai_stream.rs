@@ -6,7 +6,7 @@ use super::chat::{
    ChatChoice, ChatChunk, ChatCompletion, ChatContent, ChatDelta, ChatError, ChatErrorBody,
    ChatMessage, ChatToolCall, ChatUsage, ChunkChoice, FinishReason, FunctionBody,
 };
-use super::{Aggregated, Block, BlockEvent, Step, StopKind, UsageCapture, Walker};
+use super::{Aggregated, Block, BlockEvent, Step, UsageCapture, Walker};
 use crate::clock::unix_now;
 use crate::codex::types::ResponsesEvent;
 
@@ -33,14 +33,6 @@ where
    T: Serialize,
 {
    serde_json::to_string(&payload).expect("chunk serializes")
-}
-
-const fn finish_reason(kind: StopKind) -> FinishReason {
-   match kind {
-      StopKind::ToolUse => FinishReason::ToolCalls,
-      StopKind::MaxTokens => FinishReason::Length,
-      StopKind::EndTurn | StopKind::Error => FinishReason::Stop,
-   }
 }
 
 fn error_chunk(message: String) -> String {
@@ -163,7 +155,7 @@ impl OpenAiStream {
             out.push(self.chunk(delta, None));
          },
          Step::Stop { kind, usage } => {
-            out.push(self.chunk(ChatDelta::default(), Some(finish_reason(kind))));
+            out.push(self.chunk(ChatDelta::default(), Some(kind.chat_finish_reason())));
             if self.include_usage {
                out.push(to_json(ChatChunk {
                   id: self.id.clone(),
@@ -246,7 +238,7 @@ pub fn render_aggregated(agg: &Aggregated, model: &str) -> ChatCompletion {
             tool_calls: Some(tool_calls).filter(|calls| !calls.is_empty()),
             ..Default::default()
          },
-         finish_reason: Some(finish_reason(agg.stop)),
+         finish_reason: Some(agg.stop.chat_finish_reason()),
          logprobs: None,
       }],
       usage: Some(ChatUsage::from(&agg.usage)),

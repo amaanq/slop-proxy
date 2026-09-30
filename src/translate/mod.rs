@@ -72,14 +72,14 @@ pub fn encode_signature(id: Option<&str>, encrypted_content: &str) -> String {
    BASE64URL_NOPAD.encode(payload.as_bytes())
 }
 
-pub fn decode_signature(sig: &str) -> (Option<String>, Option<String>) {
+pub fn decode_signature(sig: &str) -> (Option<String>, String) {
    if let Ok(bytes) = BASE64URL_NOPAD.decode(sig.as_bytes())
-      && let Ok(payload) = serde_json::from_slice::<SignaturePayload>(&bytes)
-      && payload.encrypted_content.is_some()
+      && let Ok(mut payload) = serde_json::from_slice::<SignaturePayload>(&bytes)
+      && let Some(encrypted_content) = payload.encrypted_content.take()
    {
-      return (payload.id, payload.encrypted_content);
+      return (payload.id, encrypted_content);
    }
-   (None, Some(sig.to_owned()))
+   (None, sig.to_owned())
 }
 
 #[derive(Default, Debug, Clone)]
@@ -261,6 +261,22 @@ impl StopKind {
          Self::Error => "error",
       }
    }
+
+   pub const fn anthropic_stop_reason(self) -> &'static str {
+      match self {
+         Self::ToolUse => "tool_use",
+         Self::MaxTokens => "max_tokens",
+         Self::EndTurn | Self::Error => "end_turn",
+      }
+   }
+
+   pub const fn chat_finish_reason(self) -> chat::FinishReason {
+      match self {
+         Self::ToolUse => chat::FinishReason::ToolCalls,
+         Self::MaxTokens => chat::FinishReason::Length,
+         Self::EndTurn | Self::Error => chat::FinishReason::Stop,
+      }
+   }
 }
 
 #[derive(Debug)]
@@ -304,7 +320,6 @@ struct TrackedBlock {
    closed: bool,
 }
 
-/// The one state machine every consumer of a Responses stream shares.
 pub struct Walker {
    blocks: BTreeMap<(u64, u64), TrackedBlock>,
    saw_tool: bool,
@@ -458,12 +473,16 @@ impl Walker {
                   signature: None,
                },
             );
-            let text = summary
-               .unwrap_or_default()
-               .iter()
-               .map(|&SummaryPart::SummaryText { ref text }| text.as_str())
-               .collect::<Vec<_>>()
-               .join("\n\n");
+            let mut text = String::new();
+            if let Some(parts) = summary {
+               for (index, part) in parts.into_iter().enumerate() {
+                  let SummaryPart::SummaryText { text: part_text } = part;
+                  if index > 0 {
+                     text.push_str("\n\n");
+                  }
+                  text.push_str(&part_text);
+               }
+            }
             if !self.blocks[&key].seen && !text.is_empty() {
                self.append(out, key, text);
             }
@@ -491,14 +510,14 @@ impl Walker {
                   }
                }
             }
-            let keys: Vec<_> = self
-               .blocks
-               .keys()
-               .filter(|key| key.0 == output_index)
-               .copied()
-               .collect();
-            for key in keys {
-               self.close(out, key);
+            for (&key, block) in &mut self.blocks {
+               if key.0 == output_index && !block.closed {
+                  block.closed = true;
+                  out.push(Step::Block {
+                     index: block.index,
+                     event: BlockEvent::Close,
+                  });
+               }
             }
          },
          OutputItem::FunctionCall {
@@ -704,13 +723,13 @@ mod tests {
       let sig = encode_signature(Some("rs_1"), "SECRET");
       assert_eq!(
          decode_signature(&sig),
-         (Some("rs_1".into()), Some("SECRET".into()))
+         (Some("rs_1".into()), "SECRET".into())
       );
       let sig_no_id = encode_signature(None, "SECRET");
-      assert_eq!(decode_signature(&sig_no_id), (None, Some("SECRET".into())));
+      assert_eq!(decode_signature(&sig_no_id), (None, "SECRET".into()));
       assert_eq!(
          decode_signature("not-base64-json"),
-         (None, Some("not-base64-json".into()))
+         (None, "not-base64-json".into())
       );
    }
 }

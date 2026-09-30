@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Display;
 use std::time::{Duration, Instant};
@@ -11,8 +12,8 @@ use axum::extract::{OriginalUri, State};
 use axum::http::HeaderMap;
 use axum::response::Response;
 use futures_util::{Sink, SinkExt as _, StreamExt as _};
-use serde::Deserialize as _;
-use serde_json::{Value, json};
+use serde::{Deserialize as _, Serialize};
+use serde_json::{Map, Value};
 use tokio::time::{MissedTickBehavior, interval, timeout};
 use tokio_tungstenite::tungstenite::Message as UpstreamMessage;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame as UpstreamCloseFrame;
@@ -524,6 +525,25 @@ where
    }
 }
 
+#[derive(Serialize)]
+struct ErrorBody<'a> {
+   #[serde(rename = "type")]
+   kind: &'static str,
+   message: Cow<'a, str>,
+}
+
+#[derive(Serialize)]
+struct ErrorFrame {
+   #[serde(flatten)]
+   body: Map<String, Value>,
+   #[serde(rename = "type")]
+   kind: &'static str,
+   status: u16,
+   headers: BTreeMap<String, String>,
+   #[serde(skip_serializing_if = "Option::is_none")]
+   stream_id: Option<Value>,
+}
+
 async fn response_error(response: Response, stream: Option<Value>) -> Message {
    let status = response.status();
    let headers: BTreeMap<_, _> = response
@@ -534,16 +554,22 @@ async fn response_error(response: Response, stream: Option<Value>) -> Message {
    let body = to_bytes(response.into_body(), 64 * 1024)
       .await
       .unwrap_or_default();
-   let mut value: Value = serde_json::from_slice(&body).unwrap_or_else(|_| {
-      json!({
-         "error": { "type": "api_error", "message": String::from_utf8_lossy(&body) }
-      })
+   let body = serde_json::from_slice(&body).unwrap_or_else(|_| {
+      let error = ErrorBody {
+         kind: "api_error",
+         message: String::from_utf8_lossy(&body),
+      };
+      Map::from_iter([(
+         "error".to_owned(),
+         serde_json::to_value(error).unwrap_or_default(),
+      )])
    });
-   value["type"] = json!("error");
-   value["status"] = json!(status.as_u16());
-   value["headers"] = json!(headers);
-   if let Some(stream) = stream {
-      value["stream_id"] = stream;
-   }
-   Message::Text(value.to_string().into())
+   let frame = ErrorFrame {
+      body,
+      kind: "error",
+      status: status.as_u16(),
+      headers,
+      stream_id: stream,
+   };
+   Message::Text(serde_json::to_string(&frame).unwrap_or_default().into())
 }

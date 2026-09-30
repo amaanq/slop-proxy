@@ -70,7 +70,6 @@ impl ModelInfo {
 /// Codex's fallback for an unlisted slug lets code mode declare a `custom` tool zen refuses.
 #[derive(Serialize)]
 struct ZenEntry<'a> {
-   slug: &'a str,
    display_name: &'a str,
    description: &'static str,
    tool_mode: &'static str,
@@ -81,61 +80,83 @@ struct ZenEntry<'a> {
    prefer_websockets: bool,
    supports_search_tool: bool,
    experimental_supported_tools: [(); 0],
+   service_tiers: [(); 0],
+   additional_speed_tiers: [(); 0],
    priority: i32,
    upgrade: Option<()>,
    availability_nux: Option<()>,
    comp_hash: Option<()>,
    default_reasoning_level: &'static str,
-   service_tiers: [(); 0],
-   additional_speed_tiers: [(); 0],
-   supported_reasoning_levels: Vec<Value>,
-   #[serde(skip_serializing_if = "Option::is_none")]
-   context_window: Option<i64>,
 }
 
 const ZEN_EFFORTS: [&str; 4] = ["low", "medium", "high", "xhigh"];
 
+#[derive(Clone, Deserialize, Serialize)]
+struct CatalogEntry {
+   #[serde(skip_serializing_if = "Option::is_none")]
+   slug: Option<String>,
+   #[serde(skip_serializing_if = "Option::is_none")]
+   visibility: Option<String>,
+   #[serde(skip_serializing_if = "Option::is_none")]
+   supported_reasoning_levels: Option<Vec<ReasoningLevel>>,
+   #[serde(skip_serializing_if = "Option::is_none")]
+   context_window: Option<i64>,
+   #[serde(flatten)]
+   rest: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct ReasoningLevel {
+   #[serde(skip_serializing_if = "Option::is_none")]
+   effort: Option<String>,
+   #[serde(flatten)]
+   rest: BTreeMap<String, Value>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct Catalog {
+   models: Vec<CatalogEntry>,
+   #[serde(flatten)]
+   rest: BTreeMap<String, Value>,
+}
+
 /// Cloned from `template` so the fields codex requires track the backend.
 pub fn with_zen_entries(raw: &str, template: &str, zen: &[ZenModel]) -> Option<String> {
-   let mut catalog: Value = serde_json::from_str(raw).ok()?;
-   let models = catalog.get_mut("models")?.as_array_mut()?;
-   let present: Vec<String> = models
+   let mut catalog: Catalog = serde_json::from_str(raw).ok()?;
+   let present: Vec<String> = catalog
+      .models
       .iter()
-      .filter_map(|entry| entry.get("slug").and_then(Value::as_str).map(str::to_owned))
+      .filter_map(|entry| entry.slug.clone())
       .collect();
-   let base = models
+   let base = catalog
+      .models
       .iter()
-      .find(|entry| entry.get("slug").and_then(Value::as_str) == Some(template))
+      .find(|entry| entry.slug.as_deref() == Some(template))
       .or_else(|| {
-         models
+         catalog
+            .models
             .iter()
-            .find(|entry| entry.get("visibility").and_then(Value::as_str) == Some("list"))
+            .find(|entry| entry.visibility.as_deref() == Some("list"))
       })?
-      .as_object()?
       .clone();
-   let levels: Vec<Value> = base
-      .get("supported_reasoning_levels")
-      .and_then(Value::as_array)
-      .map(|levels| {
-         levels
-            .iter()
-            .filter(|level| {
-               level
-                  .get("effort")
-                  .and_then(Value::as_str)
-                  .is_some_and(|effort| ZEN_EFFORTS.contains(&effort))
-            })
-            .cloned()
-            .collect()
+   let levels: Vec<ReasoningLevel> = base
+      .supported_reasoning_levels
+      .iter()
+      .flatten()
+      .filter(|level| {
+         level
+            .effort
+            .as_deref()
+            .is_some_and(|effort| ZEN_EFFORTS.contains(&effort))
       })
-      .unwrap_or_default();
+      .cloned()
+      .collect();
    for model in zen {
       let id = &model.id;
       if present.contains(id) {
          continue;
       }
       let patch = serde_json::to_value(ZenEntry {
-         slug: id,
          display_name: id,
          description: "Served by opencode zen",
          tool_mode: "direct",
@@ -146,22 +167,23 @@ pub fn with_zen_entries(raw: &str, template: &str, zen: &[ZenModel]) -> Option<S
          prefer_websockets: false,
          supports_search_tool: false,
          experimental_supported_tools: [],
+         service_tiers: [],
+         additional_speed_tiers: [],
          priority: 99,
          upgrade: None,
          availability_nux: None,
          comp_hash: None,
          default_reasoning_level: "high",
-         supported_reasoning_levels: levels.clone(),
-         service_tiers: [],
-         additional_speed_tiers: [],
-         context_window: model.context_window,
       })
       .ok()?;
       let mut entry = base.clone();
+      entry.slug = Some(id.clone());
+      entry.supported_reasoning_levels = Some(levels.clone());
+      entry.context_window = model.context_window.or(base.context_window);
       if let Value::Object(fields) = patch {
-         entry.extend(fields);
+         entry.rest.extend(fields);
       }
-      models.push(Value::Object(entry));
+      catalog.models.push(entry);
    }
    serde_json::to_string(&catalog).ok()
 }

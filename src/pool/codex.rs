@@ -4,7 +4,8 @@ use std::sync::Arc;
 use axum::body::Bytes;
 use futures_util::{StreamExt as _, stream};
 use reqwest::header::{HeaderMap, HeaderValue};
-use serde_json::{Value, json};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::clock::unix_now;
 use crate::codex::client::CodexClient;
@@ -18,6 +19,40 @@ use crate::pool::{
 };
 use crate::provider::Provider;
 use crate::upstream::SendError;
+
+#[derive(Default, Deserialize)]
+struct RateLimitEvent {
+   metered_limit_name: Option<String>,
+   limit_name: Option<String>,
+   #[serde(default)]
+   rate_limits: RateLimitsIn,
+}
+
+#[derive(Default, Deserialize)]
+struct RateLimitsIn {
+   primary: Option<WindowIn>,
+   secondary: Option<WindowIn>,
+}
+
+#[derive(Deserialize)]
+struct WindowIn {
+   window_minutes: Option<i64>,
+   used_percent: Option<f64>,
+   reset_at: Option<i64>,
+}
+
+#[derive(Default, Serialize)]
+struct RateLimitsOut {
+   primary: Option<WindowOut>,
+   secondary: Option<WindowOut>,
+}
+
+#[derive(Serialize)]
+struct WindowOut {
+   used_percent: f64,
+   window_minutes: i64,
+   reset_at: Option<i64>,
+}
 
 /// Session-sticky pool over codex accounts, owning the backend client.
 pub type CodexPool = Pool<CodexClient>;
@@ -208,29 +243,30 @@ impl Pool<CodexClient> {
       pinned_account: Option<i64>,
       event: &mut Value,
    ) {
-      let limit = event
-         .get("metered_limit_name")
-         .and_then(Value::as_str)
-         .or_else(|| event.get("limit_name").and_then(Value::as_str))
+      let reading = RateLimitEvent::deserialize(&*event).unwrap_or_default();
+      let limit = reading
+         .metered_limit_name
+         .as_deref()
+         .or(reading.limit_name.as_deref())
          .map(str::trim)
          .filter(|name| !name.is_empty())
          .unwrap_or("codex")
          .to_ascii_lowercase()
          .replace('-', "_");
       let named_limit = (limit != "codex").then_some(limit.as_str());
-      let windows = ["primary", "secondary"]
+      let windows = [reading.rate_limits.primary, reading.rate_limits.secondary]
          .into_iter()
-         .filter_map(|tier| {
-            let window = event.get("rate_limits")?.get(tier)?;
-            let minutes = window.get("window_minutes")?.as_i64()?;
+         .filter_map(|window| {
+            let window = window?;
+            let minutes = window.window_minutes?;
             if minutes <= 0 || minutes.checked_mul(60).is_none() {
                return None;
             }
-            let percent = window.get("used_percent")?.as_f64()?;
+            let percent = window.used_percent?;
             (percent.is_finite() && percent >= 0.0_f64).then(|| UsageWindow {
                name: window_name(minutes),
                utilization: percent / 100.0,
-               resets_at: window.get("reset_at").and_then(Value::as_i64),
+               resets_at: window.reset_at,
             })
          })
          .collect();
@@ -242,18 +278,21 @@ impl Pool<CodexClient> {
       }
       let mut pooled = self.pool_windows(user, pinned_account, named_limit).await;
       pooled.sort_by_key(|window| window_seconds(&window.name).unwrap_or(i64::MAX));
-      let mut limits = json!({ "primary": null, "secondary": null });
-      for (tier, window) in ["primary", "secondary"].into_iter().zip(pooled) {
+      let mut limits = RateLimitsOut::default();
+      for (tier, window) in [&mut limits.primary, &mut limits.secondary]
+         .into_iter()
+         .zip(pooled)
+      {
          let Some(seconds) = window_seconds(&window.name) else {
             continue;
          };
-         limits[tier] = json!({
-            "used_percent": window.utilization * 100.0_f64,
-            "window_minutes": seconds / 60,
-            "reset_at": window.resets_at,
+         *tier = Some(WindowOut {
+            used_percent: window.utilization * 100.0_f64,
+            window_minutes: seconds / 60,
+            reset_at: window.resets_at,
          });
       }
-      event["rate_limits"] = limits;
+      event["rate_limits"] = serde_json::to_value(limits).unwrap_or_default();
       if let Some(event) = event.as_object_mut() {
          event.remove("credits");
          event.remove("plan_type");

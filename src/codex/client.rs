@@ -10,6 +10,7 @@ use serde_json::Value;
 use tokio::time::{sleep, timeout};
 
 use crate::codex::models::ModelsResponse;
+use crate::codex::types::ContentPart;
 use crate::config::CodexConfig;
 use crate::upstream::{Classify, SendError, classify};
 
@@ -105,7 +106,10 @@ fn drop_undecryptable_payloads(req: &Bytes) -> Option<Bytes> {
       };
       for part in parts.iter_mut() {
          if part.get("encrypted_content").is_some() {
-            *part = serde_json::json!({"type": "input_text", "text": DROPPED_PAYLOAD_NOTE});
+            *part = serde_json::to_value(ContentPart::InputText {
+               text: DROPPED_PAYLOAD_NOTE.to_owned(),
+            })
+            .ok()?;
             dropped += 1;
          }
       }
@@ -118,6 +122,20 @@ fn drop_undecryptable_payloads(req: &Bytes) -> Option<Bytes> {
       "retrying without the payloads the backend cannot decrypt"
    );
    serde_json::to_vec(&body).ok().map(Bytes::from)
+}
+
+#[derive(Deserialize)]
+struct OpeningEvent {
+   #[serde(rename = "type")]
+   kind: Option<String>,
+   error: Option<OpeningError>,
+}
+
+#[derive(Default, Deserialize)]
+struct OpeningError {
+   code: Option<String>,
+   #[serde(rename = "type")]
+   kind: Option<String>,
 }
 
 /// `response.created` always arrives first, even when the next event is
@@ -142,27 +160,18 @@ fn opening(head: &[u8]) -> Opening {
       if data.is_empty() {
          continue;
       }
-      let Ok(event) = serde_json::from_str::<Value>(&data) else {
+      let Ok(event) = serde_json::from_str::<OpeningEvent>(&data) else {
          return Opening::Serve;
       };
-      let error = match event
-         .get("type")
-         .and_then(Value::as_str)
-         .unwrap_or_default()
-      {
+      let error = match event.kind.as_deref().unwrap_or_default() {
          "response.created" | "response.in_progress" | "keepalive" => continue,
-         "error" => event.get("error"),
+         "error" => event.error,
          _ => return Opening::Serve,
       };
-      let field = |name: &str| {
-         error
-            .and_then(|error| error.get(name))
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-      };
-      return if field("code") == "invalid_encrypted_content" {
+      let error = error.unwrap_or_default();
+      return if error.code.as_deref() == Some("invalid_encrypted_content") {
          Opening::Undecryptable
-      } else if field("type") == "invalid_request_error" {
+      } else if error.kind.as_deref() == Some("invalid_request_error") {
          Opening::Serve
       } else {
          Opening::Refused(data)

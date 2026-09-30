@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use serde::Serialize;
-use serde_json::value::{RawValue, to_raw_value};
+use serde_json::value::RawValue;
 
 use crate::codex::types::{ContentPart, InputItem, ResponsesRequest, ToolChoice, ToolDef};
 use crate::gemini::signatures;
@@ -66,13 +66,10 @@ struct Freeform<'a> {
    input: &'a str,
 }
 
+const FREEFORM_SCHEMA: &str = r#"{"properties":{"input":{"description":"The complete tool input, verbatim.","type":"string"}},"required":["input"],"type":"object"}"#;
+
 fn freeform_schema() -> Box<RawValue> {
-   to_raw_value(&serde_json::json!({
-      "type": "object",
-      "properties": {"input": {"type": "string", "description": "The complete tool input, verbatim."}},
-      "required": ["input"],
-   }))
-   .expect("schema serializes")
+   RawValue::from_string(FREEFORM_SCHEMA.to_owned()).expect("schema is valid JSON")
 }
 
 pub fn to_chat(req: &ResponsesRequest) -> ChatRequest {

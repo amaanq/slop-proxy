@@ -338,7 +338,7 @@ impl<B: Backend> Pool<B> {
    /// then does the token's trusted preference break the tie. Within a group
    /// a session sticks to one account, since a prompt cache lives on the
    /// account that built it and scattering re-bills the whole prefix.
-   pub(crate) async fn ranked(&self, route: Route<'_>) -> Vec<Arc<Slot>> {
+   pub async fn ranked(&self, route: Route<'_>) -> Vec<Arc<Slot>> {
       let slots = self.slots.list().await;
       // A pin names one account across the whole fleet, so a pool that does
       // not hold it is being asked about a different provider and ignores it.

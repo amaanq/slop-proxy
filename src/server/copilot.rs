@@ -3,17 +3,18 @@ use std::time::Instant;
 use axum::body::Bytes;
 use axum::response::Response;
 
-use super::AppState;
-use super::auth::AuthInfo;
-use super::chat::{
-   force_usage, relay_chat_body, relay_chat_stream, session_key, upstream_rejected,
-};
-use super::error::{Dialect, error_response};
-use super::pipeline::{dispatch_failed, read_body};
-use super::relay::forwarded_response;
 use crate::pool::Route;
 use crate::pool::copilot::Call;
 use crate::provider::Provider;
+use crate::server::auth::AuthInfo;
+use crate::server::chat::{
+   force_usage, relay_chat_body, relay_chat_stream, session_key, upstream_rejected,
+};
+use crate::server::error::{Dialect, error_response};
+use crate::server::facts::RequestFacts;
+use crate::server::pipeline::{self, dispatch_failed, read_body};
+use crate::server::relay::forwarded_response;
+use crate::server::{AppState, log_rejected};
 use crate::translate::chat::{ChatContent, ChatPart, ChatRequest};
 
 const DIALECT: Dialect = Dialect::OpenAi;
@@ -23,14 +24,14 @@ pub async fn chat_completions(
    auth: AuthInfo,
    mut body: ChatRequest,
    model: String,
-   facts: super::facts::RequestFacts,
+   facts: RequestFacts,
 ) -> Response {
    let started = Instant::now();
    let streaming = body.stream.unwrap_or(false);
    body.stream_options = None;
    force_usage(&mut body, streaming);
 
-   let mut record = super::pipeline::record(
+   let mut record = pipeline::record(
       &auth,
       "chat",
       Provider::Copilot,
@@ -52,7 +53,7 @@ pub async fn chat_completions(
    let encoded = match serde_json::to_vec(&body) {
       Ok(bytes) => Bytes::from(bytes),
       Err(err) => {
-         super::log_rejected(&state, &auth, "chat", &model);
+         log_rejected(&state, &auth, "chat", &model);
          return error_response(DIALECT, 400, "invalid_request_error", &err.to_string());
       },
    };

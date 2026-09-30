@@ -7,14 +7,18 @@ use axum::response::sse::Event;
 use axum::response::{IntoResponse as _, Response};
 use axum::{Extension, Json};
 
-use super::auth::AuthInfo;
-use super::error::{Dialect, translation_error};
-use super::pipeline::{self, apply_snapshot, dispatch_failed, translated};
-use super::{AppState, LogGuard, cache_key, log_rejected};
 use crate::config::ZenDialect;
 use crate::pool::Route;
 use crate::pool::pools::Dispatched;
 use crate::provider::Provider;
+use crate::server::auth::AuthInfo;
+use crate::server::error::{
+   Dialect, blocked_model, body_at, error_response, out_of_scope, translation_error,
+};
+use crate::server::facts::RequestFacts;
+use crate::server::pipeline::{self, apply_snapshot, dispatch_failed, translated};
+use crate::server::relay;
+use crate::server::{AppState, LogGuard, cache_key, log_rejected, log_usage};
 use crate::translate::anthropic_req::{self, AnthropicRequest};
 use crate::translate::anthropic_stream::{AnthropicStream, render_aggregated};
 use crate::translate::{StopKind, UsageCapture, aggregate, count_tokens};
@@ -28,10 +32,10 @@ pub async fn messages(
    body: Bytes,
 ) -> Response {
    let started = Instant::now();
-   let peek = super::relay::Peek::from_slice(&body, &state.cfg.models);
+   let peek = relay::Peek::from_slice(&body, &state.cfg.models);
    if state.cfg.models.blocked(&peek.upstream_model) {
       log_rejected(&state, &auth, "messages", &peek.model);
-      return super::error::blocked_model(DIALECT, &peek.upstream_model);
+      return blocked_model(DIALECT, &peek.upstream_model);
    }
    // An effort suffix is part of what the caller typed, not part of the model
    // name a pattern matches, so routing the raw string sent muse:high to
@@ -39,25 +43,25 @@ pub async fn messages(
    let provider = state.cfg.models.route(&peek.upstream_model);
    if !auth.may_use(provider) {
       log_rejected(&state, &auth, "messages", &peek.model);
-      return super::error::out_of_scope(DIALECT, provider);
+      return out_of_scope(DIALECT, provider);
    }
    match provider {
       // Z.ai speaks this dialect, so the body it needs is the one that
       // arrived and the reply needs no translating back.
       Provider::Anthropic | Provider::Glm | Provider::DeepSeek | Provider::Experiential => {
-         return super::relay::messages(state, auth, headers, body, peek, provider).await;
+         return relay::messages(state, auth, headers, body, peek, provider).await;
       },
       Provider::Zen
          if state.cfg.models.zen_dialect(&peek.upstream_model) == ZenDialect::Messages =>
       {
-         return super::relay::messages(state, auth, headers, body, peek, provider).await;
+         return relay::messages(state, auth, headers, body, peek, provider).await;
       },
       Provider::Gemini | Provider::Zen | Provider::OpenAi | Provider::Copilot => {},
    }
    let req = match serde_json::from_slice::<AnthropicRequest>(&body) {
       Ok(req) => req,
       Err(err) => {
-         tracing::warn!(near = %super::error::body_at(&body, &err), "anthropic request did not parse");
+         tracing::warn!(near = %body_at(&body, &err), "anthropic request did not parse");
          log_rejected(&state, &auth, "messages", &peek.model);
          return translation_error(DIALECT, &format!("invalid request: {err}"));
       },
@@ -72,7 +76,7 @@ pub async fn messages(
       provider,
       req.model.clone(),
       upstream_req.model.clone(),
-      super::facts::RequestFacts::from_anthropic(&req, &headers),
+      RequestFacts::from_anthropic(&req, &headers),
    );
    record.effort = upstream_req
       .reasoning
@@ -133,8 +137,8 @@ pub async fn messages(
             .error_message
             .unwrap_or_else(|| "upstream failure".into());
          record.status = 502;
-         super::log_usage(&state, record);
-         return super::error::error_response(DIALECT, 502, "api_error", &msg);
+         log_usage(&state, record);
+         return error_response(DIALECT, 502, "api_error", &msg);
       }
       record.error_kind = snap.error_kind;
       pipeline::logged_json(
@@ -156,19 +160,19 @@ pub async fn count_tokens(
       input_tokens: i64,
    }
 
-   let peek = super::relay::Peek::from_slice(&body, &state.cfg.models);
+   let peek = relay::Peek::from_slice(&body, &state.cfg.models);
    if state.cfg.models.blocked(&peek.upstream_model) {
       log_rejected(&state, &auth, "count_tokens", &peek.model);
-      return super::error::blocked_model(DIALECT, &peek.upstream_model);
+      return blocked_model(DIALECT, &peek.upstream_model);
    }
    let provider = state.cfg.models.route(&peek.upstream_model);
    if !auth.may_use(provider) {
       log_rejected(&state, &auth, "count_tokens", &peek.model);
-      return super::error::out_of_scope(DIALECT, provider);
+      return out_of_scope(DIALECT, provider);
    }
    match provider {
       Provider::Anthropic => {
-         return super::relay::count_tokens(state, auth, headers, body, peek).await;
+         return relay::count_tokens(state, auth, headers, body, peek).await;
       },
       Provider::Gemini
       | Provider::Zen

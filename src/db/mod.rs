@@ -83,12 +83,10 @@ impl Db {
       })
    }
 
-   pub(crate) async fn call<T>(
-      &self,
-      query: impl FnOnce(&mut Connection) -> Result<T> + Send + 'static,
-   ) -> Result<T>
+   pub async fn call<T, Query>(&self, query: Query) -> Result<T>
    where
       T: Send + 'static,
+      Query: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
    {
       self.writer.call(query).await
    }

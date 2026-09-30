@@ -7,13 +7,13 @@ use axum::http::header::CONTENT_TYPE;
 use axum::response::IntoResponse as _;
 use axum::response::Response;
 
-use super::AppState;
 use crate::clock;
 use crate::db::usage::{
    ErrorRow, InsightRow, MetricsRow, SessionRow, ToolRow, USAGE_DIMENSIONS, cache_hit_ratio,
 };
 use crate::pool::{AccountSnapshot, UsageWindow};
 use crate::provider::Provider;
+use crate::server::AppState;
 
 pub async fn metrics(State(state): State<AppState>) -> Response {
    let accounts = state.pools.snapshots().await;

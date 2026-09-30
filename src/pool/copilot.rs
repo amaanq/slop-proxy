@@ -1,7 +1,7 @@
 use axum::body::Bytes;
 
-use super::{AccountUsage, AuthPolicy, Backend, Pool, Route, Slot, UsageWindow};
 use crate::copilot::{CopilotClient, QuotaReport};
+use crate::pool::{AccountUsage, AuthPolicy, Backend, Pool, Route, Slot, UsageWindow};
 use crate::provider::Provider;
 use crate::upstream::SendError;
 

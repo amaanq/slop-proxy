@@ -6,11 +6,11 @@ use axum::middleware::Next;
 use axum::response::Response;
 use tokio::time;
 
-use super::AppState;
-use super::error::{Dialect, error_response};
 use crate::db::tokens::TokenLimits;
 use crate::db::usage::AdmissionError;
 use crate::provider::Provider;
+use crate::server::AppState;
+use crate::server::error::{Dialect, error_response};
 
 #[derive(Clone, Debug)]
 pub struct AuthInfo {

@@ -9,7 +9,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async_with_config, tungstenite};
 
-use super::client::{CodexClient, EXHAUSTED_CODES, RULES};
+use crate::codex::client::{CodexClient, EXHAUSTED_CODES, RULES};
 use crate::upstream::{SendError, classify};
 
 pub const MAX_MESSAGE_SIZE: usize = 192 * 1024 * 1024;

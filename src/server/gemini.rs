@@ -4,14 +4,6 @@ use axum::http::HeaderMap;
 use axum::response::{IntoResponse as _, Response};
 use std::time::Instant;
 
-use super::auth::AuthInfo;
-use super::chat::{
-   ChatUsageScan, force_usage, relay_chat_body, relay_chat_stream, session_key, upstream_rejected,
-};
-use super::error::{Dialect, error_response};
-use super::pipeline::{apply_snapshot, dispatch_failed, read_body, relayed};
-use super::relay::forwarded_response;
-use super::{AppState, LogGuard, log_error};
 use crate::codex::types::Usage;
 use crate::gemini::native::{NativeStream, chat_usage, response};
 use crate::gemini::sse::Frames;
@@ -19,6 +11,16 @@ use crate::gemini::types::{GenerateContentRequest, GenerateContentResponse};
 use crate::pool::Route;
 use crate::pool::gemini::Call;
 use crate::provider::Provider;
+use crate::server::auth::AuthInfo;
+use crate::server::chat::{
+   ChatUsageScan, force_usage, relay_chat_body, relay_chat_stream, session_key, upstream_rejected,
+};
+use crate::server::error::{Dialect, blocked_model, error_response, out_of_scope};
+use crate::server::facts::RequestFacts;
+use crate::server::openai::{ModelList, gemini_entries};
+use crate::server::pipeline::{self, apply_snapshot, dispatch_failed, read_body, relayed};
+use crate::server::relay::forwarded_response;
+use crate::server::{AppState, LogGuard, log_error, log_usage};
 use crate::translate::UsageCapture;
 use crate::translate::bridge::BridgeProtocol;
 use crate::translate::chat::ChatRequest;
@@ -35,7 +37,7 @@ pub async fn chat_completions(
    auth: AuthInfo,
    mut body: ChatRequest,
    model: String,
-   facts: super::facts::RequestFacts,
+   facts: RequestFacts,
 ) -> Response {
    let started = Instant::now();
    let streaming = body.stream.unwrap_or(false);
@@ -44,7 +46,7 @@ pub async fn chat_completions(
    }
    force_usage(&mut body, streaming);
 
-   let mut record = super::pipeline::record(
+   let mut record = pipeline::record(
       &auth,
       "chat",
       Provider::Gemini,
@@ -137,9 +139,9 @@ pub async fn chat_completions(
 /// `data[].id` cannot see, so this answers in the same shape as `/v1/models`
 /// narrowed to the Gemini pool.
 pub async fn models(State(state): State<AppState>) -> Response {
-   axum::Json(super::openai::ModelList {
+   axum::Json(ModelList {
       object: "list",
-      data: super::openai::gemini_entries(&state).await,
+      data: gemini_entries(&state).await,
    })
    .into_response()
 }
@@ -173,7 +175,7 @@ pub async fn native(
    }
    let resolved = resolve(&state.cfg.models, raw_model);
    if state.cfg.models.blocked(&resolved.model) {
-      return super::error::blocked_model(DIALECT, &resolved.model);
+      return blocked_model(DIALECT, &resolved.model);
    }
    if state.cfg.models.route(&resolved.model) != Provider::Gemini {
       return error_response(
@@ -186,7 +188,7 @@ pub async fn native(
 
    let started = Instant::now();
    if !auth.may_use(Provider::Gemini) {
-      return super::error::out_of_scope(DIALECT, Provider::Gemini);
+      return out_of_scope(DIALECT, Provider::Gemini);
    }
    let streaming = action == "streamGenerateContent";
    let parsed = match serde_json::from_slice::<GenerateContentRequest>(&body) {
@@ -202,8 +204,8 @@ pub async fn native(
    };
    let request = parsed;
    let key = native_session_key(&auth.user, &request);
-   let facts = super::facts::RequestFacts::from_native(&request, &headers);
-   let mut record = super::pipeline::record(
+   let facts = RequestFacts::from_native(&request, &headers);
+   let mut record = pipeline::record(
       &auth,
       "native",
       Provider::Gemini,
@@ -281,7 +283,7 @@ pub async fn native(
    }
    record.duration_ms = Some(started.elapsed().as_millis() as i64);
    record.response_bytes = bytes.len() as i64;
-   super::log_usage(&state, record);
+   log_usage(&state, record);
    builder
       .body(Body::from(bytes))
       .unwrap_or_else(|err| error_response(DIALECT, 502, "api_error", &err.to_string()))

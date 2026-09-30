@@ -3,13 +3,13 @@ use std::collections::BTreeSet;
 use serde::Serialize;
 use serde_json::value::{RawValue, to_raw_value};
 
-use super::anthropic_req::empty_schema;
-use super::chat::{
+use crate::codex::types::{ContentPart, InputItem, ResponsesRequest, ToolChoice, ToolDef};
+use crate::gemini::signatures;
+use crate::translate::anthropic_req::empty_schema;
+use crate::translate::chat::{
    ChatContent, ChatMessage, ChatPart, ChatRequest, ChatToolCall, ChatToolChoice, ChatToolDef,
    ExtraContent, FunctionBody, FunctionDef, ImageRef, StreamOptions,
 };
-use crate::codex::types::{ContentPart, InputItem, ResponsesRequest, ToolChoice, ToolDef};
-use crate::gemini::signatures;
 
 fn tool_call_message(call_id: &str, name: &str, arguments: String) -> ChatMessage {
    let call = ChatToolCall {
@@ -59,7 +59,7 @@ fn request_tools(req: &ResponsesRequest) -> impl Iterator<Item = &ToolDef> {
    )
 }
 
-pub(super) const FREEFORM_ARG: &str = "input";
+pub const FREEFORM_ARG: &str = "input";
 
 #[derive(Serialize)]
 struct Freeform<'a> {

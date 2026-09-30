@@ -2,13 +2,13 @@ use std::mem;
 
 use serde::Serialize;
 
-use super::chat::{
+use crate::clock::unix_now;
+use crate::codex::types::ResponsesEvent;
+use crate::translate::chat::{
    ChatChoice, ChatChunk, ChatCompletion, ChatContent, ChatDelta, ChatError, ChatErrorBody,
    ChatMessage, ChatToolCall, ChatUsage, ChunkChoice, FinishReason, FunctionBody,
 };
-use super::{Aggregated, Block, BlockEvent, Step, UsageCapture, Walker};
-use crate::clock::unix_now;
-use crate::codex::types::ResponsesEvent;
+use crate::translate::{Aggregated, Block, BlockEvent, Step, UsageCapture, Walker};
 
 pub struct OpenAiStream {
    model: String,

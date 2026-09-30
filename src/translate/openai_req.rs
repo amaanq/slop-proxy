@@ -1,11 +1,11 @@
-use super::TranslateError;
-use super::anthropic_req::empty_schema;
-use super::chat::{ChatContent, ChatMessage, ChatPart, ChatRequest, ChatToolChoice};
-use super::{model_map, usable_cap};
 use crate::codex::types::{
    ContentPart, InputItem, ReasoningConfig, ResponsesRequest, ToolChoice, ToolDef, ToolOutput,
 };
 use crate::config::Config;
+use crate::translate::TranslateError;
+use crate::translate::anthropic_req::empty_schema;
+use crate::translate::chat::{ChatContent, ChatMessage, ChatPart, ChatRequest, ChatToolChoice};
+use crate::translate::{model_map, usable_cap};
 
 pub fn to_responses(req: &ChatRequest, cfg: &Config) -> Result<ResponsesRequest, TranslateError> {
    let resolved = model_map::resolve(&cfg.models, &req.model);

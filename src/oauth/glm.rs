@@ -8,8 +8,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
 
-use super::http;
 use crate::clock;
+use crate::oauth::http;
 
 const CLI_OAUTH: &str = "https://zcode.z.ai/api/v1/oauth/cli";
 const BIZ_HOST: &str = "https://api.z.ai";

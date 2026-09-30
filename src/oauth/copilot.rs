@@ -4,11 +4,10 @@ use eyre::{Result, WrapErr as _, bail};
 use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
 
-use super::TokenSet;
-use super::http;
-use super::refresh::RefreshError;
 use crate::copilot::{USER_AGENT, editor};
 use crate::db::Db;
+use crate::oauth::refresh::RefreshError;
+use crate::oauth::{TokenSet, finish_login, http};
 use crate::provider::Provider;
 
 const CLIENT_ID: &str = "Iv1.b507a08c87ecfe98";
@@ -117,7 +116,7 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
       id_token: None,
       expires_at: None,
    };
-   super::finish_login(
+   finish_login(
       db,
       Provider::Copilot,
       &login,

@@ -1,8 +1,8 @@
 use serde::Deserialize;
 use thiserror::Error;
 
-use super::{CLIENT_ID, TOKEN_URL, TokenSet, jwt};
 use crate::clock;
+use crate::oauth::{CLIENT_ID, TOKEN_URL, TokenSet, http, jwt};
 
 #[derive(Debug, Error)]
 pub enum RefreshError {
@@ -64,7 +64,7 @@ pub async fn post_token<B>(url: &str, body: &B) -> Result<(u16, String), Refresh
 where
    B: serde::Serialize + Sync,
 {
-   let resp = super::http()
+   let resp = http()
       .post(url)
       .json(body)
       .send()

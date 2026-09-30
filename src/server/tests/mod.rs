@@ -11,7 +11,6 @@ use axum::response::IntoResponse as _;
 use axum::routing::post;
 use tokio::net::TcpListener;
 
-use super::{AppState, Inner, metrics, router};
 use crate::clock;
 use crate::codex::client::CodexClient;
 use crate::config::{
@@ -26,6 +25,7 @@ use crate::pool::Pools;
 use crate::pool::codex::CodexPool;
 use crate::pricing::Prices;
 use crate::provider::{AuthMode, Provider};
+use crate::server::{AppState, Inner, metrics, router};
 
 const MOCK_SSE: &str = concat!(
    "event: response.created\n",

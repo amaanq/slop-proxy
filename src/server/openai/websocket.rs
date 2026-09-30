@@ -16,7 +16,6 @@ use tokio::time::{MissedTickBehavior, interval, sleep, timeout};
 use tokio_tungstenite::tungstenite::Message as UpstreamMessage;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame as UpstreamCloseFrame;
 
-use super::{DIALECT, PassthroughRequest, prepare_request, restore_reserved_namespace};
 use crate::codex::turn_state::TurnState;
 use crate::codex::types::{ResponsesEvent, ResponsesRequest};
 use crate::codex::websocket::{Fault, MAX_MESSAGE_SIZE, Socket, response_error as upstream_error};
@@ -28,6 +27,10 @@ use crate::server::error::{
    blocked_model, error_response, out_of_scope, pool_error_response, translation_error,
 };
 use crate::server::facts::RequestFacts;
+use crate::server::openai::{
+   DIALECT, PassthroughRequest, prepare_request, responses_upgrade_required,
+   restore_reserved_namespace,
+};
 use crate::server::{AppState, LogGuard, pipeline};
 use crate::translate::{UsageCapture, model_map};
 
@@ -59,13 +62,13 @@ pub async fn responses(
       return out_of_scope(DIALECT, provider);
    }
    if provider != Provider::OpenAi {
-      return super::responses_upgrade_required();
+      return responses_upgrade_required();
    }
    let upgrade = match upgrade {
       Ok(upgrade) => upgrade,
       Err(reason) => {
          tracing::warn!(%reason, "WebSocket upgrade unavailable, falling back to HTTP");
-         return super::responses_upgrade_required();
+         return responses_upgrade_required();
       },
    };
    let session_key = ["session-id", "session_id", "thread-id", "thread_id"]

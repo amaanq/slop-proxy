@@ -4,9 +4,9 @@ use eyre::Result;
 use rusqlite::{OptionalExtension as _, TransactionBehavior, params};
 use serde::Serialize;
 
-use super::Db;
-use super::tokens::TokenLimits;
 use crate::clock;
+use crate::db::Db;
+use crate::db::tokens::TokenLimits;
 use crate::pricing::Tokens;
 use crate::provider::Provider;
 

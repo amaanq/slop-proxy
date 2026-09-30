@@ -1,5 +1,6 @@
 use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::Request;
+use axum::http::HeaderValue;
 use axum::http::header::{CONTENT_ENCODING, CONTENT_LENGTH};
 use axum::middleware::Next;
 use axum::response::Response;
@@ -57,7 +58,7 @@ pub async fn zstd_requests(req: Request, next: Next) -> Response {
    parts.headers.remove(CONTENT_ENCODING);
    parts
       .headers
-      .insert(CONTENT_LENGTH, plain.len().to_string().parse().unwrap());
+      .insert(CONTENT_LENGTH, HeaderValue::from(plain.len()));
    next
       .run(Request::from_parts(parts, Body::from(plain)))
       .await

@@ -128,16 +128,14 @@ pub async fn require_token(
 }
 
 fn insert_header(response: &mut Response, name: &'static str, value: i64) {
-   if let Ok(value) = HeaderValue::from_str(&value.to_string()) {
-      response
-         .headers_mut()
-         .insert(HeaderName::from_static(name), value);
-   }
+   response
+      .headers_mut()
+      .insert(HeaderName::from_static(name), HeaderValue::from(value));
 }
 
 /// Gemini CLI sends its key as `x-goog-api-key`, and the raw REST form puts it
 /// in a `key` query parameter, so neither of the other two headers is present.
-pub(super) fn bearer_token(headers: &HeaderMap, query: Option<&str>) -> Option<String> {
+pub fn bearer_token(headers: &HeaderMap, query: Option<&str>) -> Option<String> {
    let header = |name: &str| headers.get(name)?.to_str().ok().map(str::to_owned);
    header("x-api-key")
       .or_else(|| header("x-goog-api-key"))

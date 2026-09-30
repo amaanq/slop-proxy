@@ -7,9 +7,10 @@ use axum::body::to_bytes;
 use axum::extract::ws::rejection::WebSocketUpgradeRejection;
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{OriginalUri, State};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, HeaderValue};
 use axum::response::Response;
 use futures_util::{SinkExt as _, StreamExt as _};
+use serde::Deserialize as _;
 use serde_json::{Value, json};
 use tokio::time::{MissedTickBehavior, interval, sleep, timeout};
 use tokio_tungstenite::tungstenite::Message as UpstreamMessage;
@@ -120,7 +121,6 @@ pub async fn responses(
    response
 }
 
-/// Records the handshake's block count and keeps the account's cleanest token.
 async fn observe_turn_state(
    state: &AppState,
    account_id: Option<i64>,
@@ -202,9 +202,9 @@ impl Relay {
                },
             };
             let mut response = error_response(DIALECT, 429, "rate_limit_error", message);
-            if let Ok(value) = retry_after.to_string().parse() {
-               response.headers_mut().insert("retry-after", value);
-            }
+            response
+               .headers_mut()
+               .insert("retry-after", HeaderValue::from(retry_after));
             response
          })?;
       if admission.slowdown_ms > 0 {
@@ -375,7 +375,7 @@ impl Relay {
       if let Some(queue) = self.pending.get_mut(stream) {
          if let Some(pending) = queue.front() {
             pending.capture.note_bytes(text.len());
-            if let Ok(event) = serde_json::from_value::<ResponsesEvent>(value.clone()) {
+            if let Ok(event) = ResponsesEvent::deserialize(&value) {
                pending.capture.observe(&event);
             }
             if kind == "error" {

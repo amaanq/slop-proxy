@@ -1,26 +1,18 @@
-//! GitHub Copilot over its OpenAI-compatible chat-completions surface.
-//!
-//! The body is relayed rather than translated and only usage is read back
-//! out, the same shape as the Gemini chat path.
-
 use std::time::Instant;
 
-use axum::body::{Body, Bytes};
+use axum::body::Bytes;
 use axum::response::Response;
 
 use super::AppState;
 use super::auth::AuthInfo;
 use super::error::{Dialect, error_response};
-use super::gemini::{relay_chat_stream, session_key, upstream_rejected};
-use super::pipeline::{apply_snapshot, dispatch_failed, read_body};
+use super::gemini::{relay_chat_body, relay_chat_stream, session_key, upstream_rejected};
+use super::pipeline::{dispatch_failed, read_body};
 use super::relay::forwarded_response;
 use crate::pool::Route;
 use crate::pool::copilot::Call;
 use crate::provider::Provider;
-use crate::translate::UsageCapture;
-use crate::translate::chat::{
-   ChatCompletion, ChatEnvelope, ChatRequest, FinishReason, StreamOptions,
-};
+use crate::translate::chat::{ChatContent, ChatPart, ChatRequest, StreamOptions};
 
 const DIALECT: Dialect = Dialect::OpenAi;
 
@@ -35,14 +27,9 @@ pub async fn chat_completions(
    let streaming = body.stream.unwrap_or(false);
    // Without this the terminal chunk carries no usage and the request bills
    // as zero tokens.
-   if streaming {
-      body.stream_options = Some(StreamOptions {
-         include_usage: true,
-      });
-   } else {
-      body.stream = Some(false);
-      body.stream_options = None;
-   }
+   body.stream_options = streaming.then_some(StreamOptions {
+      include_usage: true,
+   });
 
    let mut record = super::pipeline::record(
       &auth,
@@ -55,7 +42,14 @@ pub async fn chat_completions(
    record.session_key = session_key(&auth.user, &body);
    record.effort = body.reasoning_effort.clone().unwrap_or_default();
 
-   let session_key = record.session_key.clone();
+   let agent = body
+      .messages
+      .iter()
+      .any(|msg| matches!(msg.role.as_str(), "assistant" | "tool"));
+   let vision = body.messages.iter().any(|msg| {
+      matches!(msg.content, Some(ChatContent::Parts(ref parts))
+         if parts.iter().any(|part| matches!(*part, ChatPart::ImageUrl { .. })))
+   });
    let encoded = match serde_json::to_vec(&body) {
       Ok(bytes) => Bytes::from(bytes),
       Err(err) => {
@@ -68,7 +62,7 @@ pub async fn chat_completions(
       .copilot
       .execute(
          Route {
-            session_key: &session_key,
+            session_key: &record.session_key,
             model: &record.upstream_model,
             service_tier: None,
             user: &auth.user,
@@ -76,7 +70,11 @@ pub async fn chat_completions(
             prefer_trusted: false,
             reserved_only: auth.limits.reserved_only,
          },
-         Call { body: encoded },
+         Call {
+            body: encoded,
+            agent,
+            vision,
+         },
       )
       .await
    {
@@ -95,40 +93,8 @@ pub async fn chat_completions(
    if streaming {
       return relay_chat_stream(state, record, builder, resp, started, Provider::Copilot);
    }
-
-   let bytes = match read_body(&state, &record, DIALECT, resp).await {
-      Ok(bytes) => bytes,
-      Err(resp) => return resp,
-   };
-   let capture = UsageCapture::default();
-   if let Ok(completion) = serde_json::from_slice::<ChatCompletion>(&bytes) {
-      if let Some(usage) = completion.usage {
-         capture.record(&usage.into());
-      }
-      if let Some(reason) = completion
-         .choices
-         .iter()
-         .find_map(|choice| choice.finish_reason)
-      {
-         let reason = match reason {
-            FinishReason::Stop => "stop",
-            FinishReason::Length => "length",
-            FinishReason::ToolCalls => "tool_calls",
-            FinishReason::ContentFilter => "content_filter",
-            FinishReason::Other => "other",
-         };
-         capture.note_stop_reason(reason);
-      }
-   } else if let Ok(env) = serde_json::from_slice::<ChatEnvelope>(&bytes)
-      && let Some(usage) = env.usage
-   {
-      capture.record(&usage.into());
+   match read_body(&state, &record, DIALECT, resp).await {
+      Ok(bytes) => relay_chat_body(&state, record, builder, bytes, started),
+      Err(resp) => resp,
    }
-   apply_snapshot(&mut record, &capture.snapshot(), started);
-   record.duration_ms = Some(started.elapsed().as_millis() as i64);
-   record.response_bytes = bytes.len() as i64;
-   super::log_usage(&state, record);
-   builder
-      .body(Body::from(bytes))
-      .unwrap_or_else(|err| error_response(DIALECT, 502, "api_error", &err.to_string()))
 }

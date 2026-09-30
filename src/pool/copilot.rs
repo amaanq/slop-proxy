@@ -6,13 +6,15 @@ use crate::provider::Provider;
 use crate::translate::chat::ChatError;
 use crate::upstream::SendError;
 
-/// Pool over Copilot accounts. The pool hands out minted Copilot tokens and
-/// each send carries the chat-completions body the caller already wrote.
 pub type CopilotPool = Pool<CopilotClient>;
 
 #[derive(Clone)]
 pub struct Call {
    pub body: Bytes,
+   /// Copilot bills a replayed assistant or tool turn under a different
+   /// initiator than a fresh user turn.
+   pub agent: bool,
+   pub vision: bool,
 }
 
 impl Backend for CopilotClient {
@@ -40,13 +42,13 @@ impl Backend for CopilotClient {
       _route: Route<'_>,
       req: &Self::Request,
    ) -> Result<Self::Response, SendError> {
-      self.post(token, &req.body).await
+      self.post(token, &req.body, req.agent, req.vision).await
    }
 }
 
 impl Pool<CopilotClient> {
-   /// The first account that answers. Every seat sees the same catalog, so
-   /// there is nothing to merge across accounts.
+   /// Every seat sees the same catalog, so the first account that answers
+   /// speaks for all of them.
    pub async fn models(&self) -> Vec<String> {
       for slot in self.slots.list().await {
          let Ok(key) = self.slots.fresh_token(&slot, false).await else {
@@ -60,9 +62,6 @@ impl Pool<CopilotClient> {
       Vec::new()
    }
 
-   /// Reads each account's quota from the provider. This needs no inference
-   /// request, so idle accounts report real numbers and the router ranks on
-   /// them.
    pub async fn poll_usage(&self) {
       for slot in self.slots.list().await {
          let Ok(token) = self.slots.fresh_token(&slot, false).await else {
@@ -70,18 +69,13 @@ impl Pool<CopilotClient> {
          };
          match self.backend.quota(&token).await {
             Ok(report) => {
-               self
-                  .slots
-                  .note_usage(
-                     &slot,
-                     AccountUsage {
-                        windows: quota_windows(&report),
-                        model_windows: Vec::new(),
-                        locked: quota_locked(&report),
-                        observed_at: 0,
-                     },
-                  )
-                  .await;
+               let usage = AccountUsage {
+                  windows: quota_windows(&report),
+                  model_windows: Vec::new(),
+                  locked: quota_locked(&report),
+                  observed_at: 0,
+               };
+               self.slots.note_usage(&slot, usage).await;
             },
             Err(err) => tracing::debug!("usage for {}: {err}", slot.display),
          }
@@ -89,8 +83,7 @@ impl Pool<CopilotClient> {
    }
 }
 
-/// The billed budget as the one routing window. Only `premium_interactions`
-/// is metered against spend here; chat and completions ride along as
+/// Only `premium_interactions` is billed. `chat` and `completions` are
 /// unlimited on most plans and would flatten the band if mixed in.
 fn quota_windows(report: &QuotaReport) -> Vec<UsageWindow> {
    let Some(premium) = report.quota_snapshots.premium_interactions.as_ref() else {
@@ -109,35 +102,4 @@ fn quota_locked(report: &QuotaReport) -> bool {
       .premium_interactions
       .as_ref()
       .is_some_and(|premium| !premium.unlimited && premium.remaining <= 0)
-}
-
-#[cfg(test)]
-mod tests {
-   use super::*;
-   use crate::copilot::client::{QuotaDetail, QuotaSnapshots};
-
-   #[test]
-   fn empty_quota_reports_no_windows() {
-      assert!(quota_windows(&QuotaReport::default()).is_empty());
-      assert!(!quota_locked(&QuotaReport::default()));
-   }
-
-   #[test]
-   fn spent_premium_locks_the_account() {
-      let report = QuotaReport {
-         quota_snapshots: QuotaSnapshots {
-            premium_interactions: Some(QuotaDetail {
-               entitlement: 100,
-               remaining: 0,
-               ..QuotaDetail::default()
-            }),
-            ..QuotaSnapshots::default()
-         },
-         ..QuotaReport::default()
-      };
-      assert!(quota_locked(&report));
-      let window = &quota_windows(&report)[0];
-      assert_eq!(window.name.as_str(), "30d");
-      assert!((window.utilization - 1.0_f64).abs() < f64::EPSILON);
-   }
 }

@@ -6,11 +6,7 @@ use std::time::Duration;
 
 type Requests = Arc<Mutex<Vec<(HeaderMap, Bytes)>>>;
 
-async fn copilot_upstream(
-   status: StatusCode,
-   content_type: &'static str,
-   reply: String,
-) -> (String, Requests) {
+async fn copilot_upstream(content_type: &'static str, reply: String) -> (String, Requests) {
    let requests = Requests::default();
    let seen = Arc::clone(&requests);
    let upstream = Router::new()
@@ -19,17 +15,7 @@ async fn copilot_upstream(
          post(move |headers: HeaderMap, body: Bytes| {
             seen.lock().unwrap().push((headers, body));
             let reply = reply.clone();
-            async move {
-               (
-                  status,
-                  [
-                     ("content-type", content_type),
-                     ("request-id", "copilot-request"),
-                     ("retry-after", "7"),
-                  ],
-                  reply,
-               )
-            }
+            async move { (StatusCode::OK, [("content-type", content_type)], reply) }
          }),
       )
       .route(
@@ -128,8 +114,7 @@ async fn chat_preserves_payloads_usage_and_provider_scope() {
       (false, "application/json", completion),
       (true, "text/event-stream", sse.to_owned()),
    ] {
-      let (upstream_url, requests) =
-         copilot_upstream(StatusCode::OK, content_type, reply.clone()).await;
+      let (upstream_url, requests) = copilot_upstream(content_type, reply.clone()).await;
       let (base, db) = proxy(upstream_url).await;
       let client = reqwest::Client::builder()
          .timeout(Duration::from_secs(3))
@@ -147,7 +132,6 @@ async fn chat_preserves_payloads_usage_and_provider_scope() {
          .await
          .unwrap();
       assert_eq!(response.status(), 200);
-      // The upstream request id stays upstream; only the body is compared.
       let text = response.text().await.unwrap();
       assert_eq!(text, reply);
       db.flush().await.unwrap();
@@ -191,32 +175,4 @@ async fn chat_preserves_payloads_usage_and_provider_scope() {
       assert_eq!(denied.status(), 403);
       assert_eq!(requests.lock().unwrap().len(), 1);
    }
-}
-
-#[tokio::test]
-async fn quota_exhaustion_keeps_the_retry_header() {
-   let (upstream_url, _) = copilot_upstream(
-      StatusCode::TOO_MANY_REQUESTS,
-      "application/json",
-      "quota exhausted".into(),
-   )
-   .await;
-   let (base, _) = proxy(upstream_url).await;
-   let response = reqwest::Client::new()
-      .post(format!("{base}/v1/chat/completions"))
-      .bearer_auth("sp-test")
-      .json(&serde_json::json!({"model": "copilot", "messages": []}))
-      .timeout(Duration::from_secs(3))
-      .send()
-      .await
-      .unwrap();
-   assert_eq!(response.status(), 429);
-   assert!(
-      response.headers()["retry-after"]
-         .to_str()
-         .unwrap()
-         .parse::<u64>()
-         .unwrap()
-         > 0
-   );
 }

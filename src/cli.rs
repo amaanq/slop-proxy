@@ -8,7 +8,6 @@ use crate::codex;
 use crate::codex::client::CodexClient;
 use crate::codex::models::ModelInfo;
 use crate::config::Config;
-use crate::copilot::client::CopilotClient;
 use crate::db::Db;
 use crate::db::accounts::AccountStatus;
 use crate::db::accounts::NewAccount;
@@ -389,15 +388,10 @@ async fn accounts_add_key(
    Ok(())
 }
 
-/// A pasted GitHub token is validated against the user endpoint and stored
-/// as the account's grant, so headless logins keep the OAuth shape instead
-/// of inventing a second credential kind.
+/// A pasted GitHub token is stored as the grant the device flow would mint.
 async fn accounts_add_copilot_key(db: &Db, key: &str, label: Option<&str>) -> Result<()> {
    let key = key.trim();
-   if key.is_empty() {
-      bail!("empty github token");
-   }
-   let login = CopilotClient::login(key).await?;
+   let login = copilot::github_login(key).await?;
    let tokens = oauth::TokenSet {
       access_token: key.to_owned(),
       refresh_token: key.to_owned(),

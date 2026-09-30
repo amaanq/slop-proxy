@@ -52,11 +52,10 @@ impl Backend for AnthropicClient {
 }
 
 impl Pool<AnthropicClient> {
-   pub async fn catalog(&self) -> Vec<Model> {
+   pub async fn catalog(&self) -> Option<Vec<Model>> {
       self
          .first_answer(async |backend, token, _| backend.models(token).await)
          .await
-         .unwrap_or_default()
    }
 
    /// Reads each account's rolling-window consumption from the provider.

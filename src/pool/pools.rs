@@ -1,11 +1,12 @@
 use std::collections::BTreeSet;
+use std::sync::{Arc, RwLock};
 
 use axum::body::Bytes;
 use futures_util::future::join_all;
 use reqwest::header::HeaderMap;
 use serde::Serialize;
 
-use crate::anthropic::AnthropicClient;
+use crate::anthropic::{AnthropicClient, Model};
 use crate::codex::client::CodexClient;
 use crate::codex::sse;
 use crate::codex::sse::EventStream;
@@ -17,6 +18,7 @@ use crate::deepseek::DeepSeekClient;
 use crate::egress::egress_of;
 use crate::experiential::ExperientialClient;
 use crate::gemini::client::GeminiClient;
+use crate::gemini::types::ListedModel;
 use crate::glm::GlmClient;
 use crate::pool::anthropic::AnthropicPool;
 use crate::pool::codex::CodexPool;
@@ -32,7 +34,7 @@ use crate::translate::UsageCapture;
 use crate::translate::bridge;
 use crate::translate::bridge::BridgeProtocol;
 use crate::translate::chat_req::{custom_tools, to_chat};
-use crate::zen::ZenClient;
+use crate::zen::{ZenClient, ZenModel};
 
 /// A backend's reply to a Responses request, before anything reads it.
 pub enum Upstream {
@@ -86,6 +88,20 @@ pub struct Pools {
    pub deepseek: DeepSeekPool,
    pub experiential: ExperientialPool,
    pub copilot: CopilotPool,
+   catalogs: RwLock<Arc<Catalogs>>,
+}
+
+/// The upstream catalogs `/models` replies from. Each upstream takes up to
+/// seconds to list, so a caller reads the last refresh instead of waiting
+/// on all of them.
+#[derive(Default)]
+pub struct Catalogs {
+   pub anthropic: Arc<[Model]>,
+   pub gemini: Arc<[ListedModel]>,
+   pub zen: Arc<[ZenModel]>,
+   pub glm: Arc<[Model]>,
+   pub deepseek: Arc<[String]>,
+   pub copilot: Arc<[String]>,
 }
 
 impl Pools {
@@ -113,6 +129,7 @@ impl Pools {
          deepseek,
          experiential,
          copilot,
+         catalogs: RwLock::default(),
       };
       for slots in pools.slots() {
          announce(slots.provider(), slots.len().await);
@@ -140,6 +157,37 @@ impl Pools {
             tracing::warn!("reloading {} accounts: {err}", slots.provider());
          }
       }
+   }
+
+   pub fn catalogs(&self) -> Arc<Catalogs> {
+      Arc::clone(&self.catalogs.read().expect("catalogs lock poisoned"))
+   }
+
+   /// An upstream that fails to list keeps its previous catalog, so one
+   /// flaky provider does not vanish from every client's model picker.
+   pub async fn refresh_catalogs(&self) {
+      fn keep<T>(fresh: Option<Vec<T>>, old: &Arc<[T]>) -> Arc<[T]> {
+         fresh.map_or_else(|| Arc::clone(old), Arc::from)
+      }
+
+      let (anthropic, gemini, zen, glm, deepseek, copilot) = tokio::join!(
+         self.anthropic.catalog(),
+         self.gemini.models(),
+         self.zen.models(),
+         self.glm.models(),
+         self.deepseek.models(),
+         self.copilot.models(),
+      );
+      let previous = self.catalogs();
+      let next = Catalogs {
+         anthropic: keep(anthropic, &previous.anthropic),
+         gemini: keep(gemini, &previous.gemini),
+         zen: keep(zen, &previous.zen),
+         glm: keep(glm, &previous.glm),
+         deepseek: keep(deepseek, &previous.deepseek),
+         copilot: keep(copilot, &previous.copilot),
+      };
+      *self.catalogs.write().expect("catalogs lock poisoned") = Arc::new(next);
    }
 
    pub async fn poll_usage(&self) {

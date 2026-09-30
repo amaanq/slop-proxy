@@ -38,11 +38,10 @@ impl Backend for CopilotClient {
 }
 
 impl Pool<CopilotClient> {
-   pub async fn models(&self) -> Vec<String> {
+   pub async fn models(&self) -> Option<Vec<String>> {
       self
          .first_answer(async |backend, key, _| backend.models(key).await)
          .await
-         .unwrap_or_default()
    }
 
    pub async fn poll_usage(&self) {

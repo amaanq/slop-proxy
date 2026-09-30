@@ -8,11 +8,10 @@ use crate::upstream::SendError;
 pub type GlmPool = Pool<GlmClient>;
 
 impl GlmPool {
-   pub async fn models(&self) -> Vec<Model> {
+   pub async fn models(&self) -> Option<Vec<Model>> {
       self
          .first_answer(async |backend, key, _| backend.models(key).await)
          .await
-         .unwrap_or_default()
    }
 }
 

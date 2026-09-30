@@ -121,7 +121,10 @@ struct Catalog {
 }
 
 /// Cloned from `template` so the fields codex requires track the backend.
-pub fn with_zen_entries(raw: &str, template: &str, zen: &[ZenModel]) -> Option<String> {
+pub fn with_zen_entries<'zen, Zen>(raw: &str, template: &str, zen: Zen) -> Option<String>
+where
+   Zen: IntoIterator<Item = &'zen ZenModel>,
+{
    let mut catalog: Catalog = serde_json::from_str(raw).ok()?;
    let present: Vec<String> = catalog
       .models

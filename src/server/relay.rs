@@ -18,6 +18,7 @@ use super::{AppState, LogGuard, log_error, log_usage};
 use crate::anthropic::client::RelayHeaders;
 use crate::config::ModelsConfig;
 use crate::db::usage::UsageRecord;
+use crate::egress::egress_of;
 use crate::pool::anthropic::Relay as AnthropicRelay;
 use crate::pool::deepseek::Relay as DeepSeekRelay;
 use crate::pool::experiential::Relay as ExperientialRelay;
@@ -28,7 +29,6 @@ use crate::provider::Provider;
 use crate::translate::UsageCapture;
 use crate::translate::anthropic_req::AnthropicRequest;
 use crate::translate::model_map::resolve;
-use crate::zen::client::egress_of;
 
 const DIALECT: Dialect = Dialect::Anthropic;
 

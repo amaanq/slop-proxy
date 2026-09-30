@@ -21,6 +21,7 @@ use crate::config::{Config, ModelsConfig, ZenDialect};
 use crate::copilot::client::CopilotClient;
 use crate::db::Db;
 use crate::deepseek::client::DeepSeekClient;
+use crate::egress::egress_of;
 use crate::experiential::client::ExperientialClient;
 use crate::gemini::client::GeminiClient;
 use crate::glm::client::GlmClient;
@@ -29,7 +30,7 @@ use crate::translate::UsageCapture;
 use crate::translate::bridge;
 use crate::translate::bridge::BridgeProtocol;
 use crate::translate::chat_req::{custom_tools, to_chat};
-use crate::zen::client::{ZenClient, egress_of};
+use crate::zen::client::ZenClient;
 
 /// A backend's reply to a Responses request, before anything reads it.
 pub enum Upstream {

@@ -45,6 +45,7 @@ impl DeepSeekClient {
                .map_err(|err| SendError::Network(err.to_string()))
          })
          .await?;
+      let resp = classify(resp, Classify::STRICT).await?;
       let status = resp.status().as_u16();
       let body = resp.text().await.map_err(|err| SendError::Upstream {
          status,

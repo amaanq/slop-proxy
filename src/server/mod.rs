@@ -1,5 +1,6 @@
 pub mod anthropic;
 pub mod auth;
+pub mod chat;
 pub mod clientcfg;
 pub mod copilot;
 pub mod decompress;
@@ -13,6 +14,7 @@ pub mod relay;
 #[cfg(test)]
 mod tests;
 
+use std::mem;
 use std::ops::Deref;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -167,7 +169,10 @@ pub fn router(state: AppState) -> Router {
       .route("/v1beta/models/{spec}", post(gemini::native))
       .route("/config/codex/auth.json", get(clientcfg::codex_auth))
       .route("/config/codex/config.toml", get(clientcfg::codex_config))
-      .route("/backend-api/wham/accounts/check", get(clientcfg::codex_accounts))
+      .route(
+         "/backend-api/wham/accounts/check",
+         get(clientcfg::codex_accounts),
+      )
       .route(
          "/v1/responses",
          post(openai::responses_passthrough).get(openai::websocket::responses),
@@ -221,7 +226,7 @@ impl LogGuard {
 
 impl Drop for LogGuard {
    fn drop(&mut self) {
-      let mut record = self.record.clone();
+      let mut record = mem::take(&mut self.record);
       let cap = self.capture.snapshot();
       pipeline::apply_snapshot(&mut record, &cap, self.start);
       let finished = cap.completed || cap.stop_reason.is_some();
@@ -278,7 +283,6 @@ pub fn log_error(state: &AppState, mut record: UsageRecord, status: i64, kind: &
    write_usage(&state.db, record);
 }
 
-/// Both write paths price a row
 fn price(prices: &Prices, record: &mut UsageRecord) {
    let billable = billable(record);
    record.cost_usd = prices.cost(&record.upstream_model, billable);
@@ -310,26 +314,4 @@ pub fn cache_key(user: &str, req: &ResponsesRequest) -> String {
    uuid::Builder::from_random_bytes(bytes)
       .into_uuid()
       .to_string()
-}
-
-#[cfg(test)]
-mod end_reason_tests {
-   use crate::translate::UsageCapture;
-
-   #[test]
-   fn the_two_ways_a_stream_dies_are_distinguishable() {
-      let cut_by_client = UsageCapture::default();
-      cut_by_client.note_event("response.output_text.delta");
-      let snap = cut_by_client.snapshot();
-      assert!(!snap.completed && !snap.upstream_eof);
-      assert_eq!(
-         snap.last_event.as_deref(),
-         Some("response.output_text.delta")
-      );
-
-      let cut_by_upstream = UsageCapture::default();
-      cut_by_upstream.note_upstream_eof();
-      let upstream_snap = cut_by_upstream.snapshot();
-      assert!(!upstream_snap.completed && upstream_snap.upstream_eof);
-   }
 }

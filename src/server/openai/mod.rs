@@ -26,6 +26,7 @@ use crate::codex::models::with_zen_entries;
 use crate::codex::types::{OutputItem, ResponseObj, ResponsesEvent, ResponsesRequest};
 use crate::config::ZenDialect;
 use crate::db::usage::UsageRecord;
+use crate::egress::egress_of;
 use crate::pool::pools::{Dispatched, Upstream};
 use crate::pool::{PoolError, Route, UsageWindow, window_seconds};
 use crate::provider::Provider;
@@ -33,7 +34,7 @@ use crate::translate::chat::ChatRequest;
 use crate::translate::openai_req;
 use crate::translate::openai_stream::{OpenAiStream, render_aggregated};
 use crate::translate::{StopKind, UsageCapture, aggregate, model_map, usable_cap};
-use crate::zen::client::{ZenModel, egress_of};
+use crate::zen::client::ZenModel;
 
 pub mod websocket;
 

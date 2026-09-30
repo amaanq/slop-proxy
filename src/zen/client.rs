@@ -3,9 +3,8 @@
 //! caller wrote it and comes back as frames that caller already understands.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
 
 use axum::body::Bytes;
 use rand::distributions::Alphanumeric;
@@ -14,20 +13,15 @@ use reqwest::header::CONTENT_TYPE;
 
 use crate::clock::{unix_now, unix_now_ms};
 use crate::config::ZenConfig;
+use crate::egress::Egresses;
 use crate::upstream::{Classify, SendError, classify};
-
-/// 250 proxies at one round trip each is minutes of hanging before the
-/// caller sees anything. Cooldowns persist, so the next request skips what
-/// this one benched and walks the next batch.
-const EGRESS_ATTEMPTS: usize = 8;
 
 const CONTEXT_REFRESH_SECS: i64 = 12 * 60 * 60;
 
 pub struct ZenClient {
    base_url: String,
    models_dev_url: String,
-   egresses: Vec<Egress>,
-   next: AtomicUsize,
+   egresses: Egresses,
    context_windows: RwLock<Arc<HashMap<String, i64>>>,
    context_fetched_at: AtomicI64,
 }
@@ -37,67 +31,20 @@ pub struct ZenModel {
    pub context_window: Option<i64>,
 }
 
-/// Rides the response so a stream that dies halfway can name the proxy it
-/// died on, which the headers cannot.
-#[derive(Clone, Copy)]
-pub struct EgressIndex(pub usize);
-
-pub fn egress_of(response: &reqwest::Response) -> Option<usize> {
-   response
-      .extensions()
-      .get::<EgressIndex>()
-      .map(|index| index.0)
-}
-
-struct Egress {
-   http: reqwest::Client,
-   unavailable_until: AtomicI64,
-   anonymous_cooldown_until: AtomicI64,
-}
-
-impl Egress {
-   fn new(proxy_url: Option<&str>, index: usize, user_agent: &str) -> eyre::Result<Self> {
-      let mut builder = reqwest::Client::builder()
-         .user_agent(user_agent)
-         .connect_timeout(Duration::from_secs(30))
-         .tcp_keepalive(Duration::from_secs(30));
-      if let Some(proxy_url) = proxy_url {
-         let proxy = reqwest::Proxy::all(proxy_url)
-            .map_err(|_| eyre::eyre!("invalid zen proxy URL at position {}", index + 1))?;
-         builder = builder.proxy(proxy);
-      }
-      let http = builder
-         .build()
-         .map_err(|_| eyre::eyre!("building zen HTTP client"))?;
-      Ok(Self {
-         http,
-         unavailable_until: AtomicI64::new(0),
-         anonymous_cooldown_until: AtomicI64::new(0),
-      })
-   }
-}
-
 impl ZenClient {
    pub fn new(cfg: ZenConfig) -> eyre::Result<Self> {
-      let proxy_urls = cfg.egress.urls()?;
-      let agent = cfg.user_agent.as_str();
-      let egresses = if proxy_urls.is_empty() {
-         vec![Egress::new(None, 0, agent)?]
-      } else {
-         proxy_urls
-            .iter()
-            .enumerate()
-            .map(|(index, url)| Egress::new(Some(url), index, agent))
-            .collect::<eyre::Result<Vec<_>>>()?
-      };
+      let egresses = Egresses::new(&cfg.egress.urls()?, "zen", Some(&cfg.user_agent))?;
       Ok(Self {
          base_url: cfg.base_url,
          models_dev_url: cfg.models_dev_url,
          egresses,
-         next: AtomicUsize::new(0),
          context_windows: RwLock::default(),
          context_fetched_at: AtomicI64::new(0),
       })
+   }
+
+   fn base_url(&self) -> &str {
+      self.base_url.trim_end_matches('/')
    }
 
    /// The free contributor models answer without any credential at all, so
@@ -109,94 +56,40 @@ impl ZenClient {
       path: &str,
       req: &Bytes,
    ) -> Result<reqwest::Response, SendError> {
-      let anonymous = key.is_none_or(str::is_empty);
-      let mut rate_limit_body = None;
-      let mut network_error = None;
-      let available = self.available_egresses(anonymous)?;
+      let key = key.filter(|key| !key.is_empty());
       let request_id = request_id();
-      let mut tried = 0;
-      for index in available.iter().copied().take(EGRESS_ATTEMPTS) {
-         tried += 1;
-         match self
-            .send_via(index, key, session, &request_id, path, req)
-            .await
-         {
-            Ok(mut response) => {
-               response.extensions_mut().insert(EgressIndex(index));
-               if tried > 1 {
-                  tracing::info!(
-                     egress = index,
-                     failed = tried - 1,
-                     "zen egress served after failover"
-                  );
-               }
-               return Ok(response);
-            },
-            Err(SendError::RateLimited { retry_after, body }) if anonymous => {
-               tracing::warn!(
-                  egress = index,
-                  "zen egress rate limited: {}",
-                  body.chars().take(200).collect::<String>()
-               );
-               self.cool_anonymous(index, retry_after.unwrap_or(60));
-               rate_limit_body = Some(body);
-            },
-            Err(SendError::Network(error)) => {
-               tracing::warn!(egress = index, "zen egress unreachable: {error}");
-               self.cool_unavailable(index, 30);
-               network_error = Some(error);
-            },
-            Err(error) => {
-               tracing::warn!(egress = index, "zen egress rejected the request: {error}");
-               return Err(error);
-            },
+      let request_id = request_id.as_str();
+      let attempt = move |http: reqwest::Client| async move {
+         let mut builder = http
+            .post(format!("{}{path}", self.base_url()))
+            .header("Accept", "*/*")
+            .header("x-opencode-session", session)
+            .header("x-opencode-request", request_id)
+            .header("x-opencode-client", "cli")
+            .header("x-opencode-project", "global");
+         builder = match key {
+            Some(key) => builder.bearer_auth(key),
+            None => builder.header("x-api-key", "public"),
+         };
+         if path.ends_with("/messages") {
+            builder = builder.header("anthropic-version", "2023-06-01");
          }
-      }
-      let untried = available.len().saturating_sub(tried);
-      tracing::warn!(
-         tried,
-         untried,
-         total = self.egresses.len(),
-         "zen egresses exhausted for this request"
-      );
-      Err(self.exhausted_error(rate_limit_body, network_error, untried))
-   }
-
-   async fn send_via(
-      &self,
-      index: usize,
-      key: Option<&str>,
-      session: &str,
-      request_id: &str,
-      path: &str,
-      req: &Bytes,
-   ) -> Result<reqwest::Response, SendError> {
-      let mut builder = self.egresses[index]
-         .http
-         .post(format!("{}{path}", self.base_url.trim_end_matches('/')))
-         .header("Accept", "*/*")
-         .header("x-opencode-session", session)
-         .header("x-opencode-request", request_id)
-         .header("x-opencode-client", "cli")
-         .header("x-opencode-project", "global");
-      if let Some(key) = key.filter(|key| !key.is_empty()) {
-         builder = builder.bearer_auth(key);
+         let response = builder
+            .header(CONTENT_TYPE, "application/json")
+            .body(req.clone())
+            .send()
+            .await
+            .map_err(|error| SendError::Network(error.to_string()))?;
+         classify(response, Classify::STRICT).await
+      };
+      if key.is_some() {
+         self.egresses.send(attempt).await
       } else {
-         builder = builder.header("x-api-key", "public");
+         self.egresses.send_anonymous(attempt).await
       }
-      if path.ends_with("/messages") {
-         builder = builder.header("anthropic-version", "2023-06-01");
-      }
-      let response = builder
-         .header(CONTENT_TYPE, "application/json")
-         .body(req.clone())
-         .send()
-         .await
-         .map_err(|error| SendError::Network(error.to_string()))?;
-      classify(response, Classify::STRICT).await
    }
 
-   pub async fn models(&self) -> Result<Vec<ZenModel>, String> {
+   pub async fn models(&self) -> Result<Vec<ZenModel>, SendError> {
       #[derive(serde::Deserialize)]
       struct Entry {
          id: String,
@@ -205,60 +98,31 @@ impl ZenClient {
       struct Listing {
          data: Vec<Entry>,
       }
-      let mut rate_limit_body = None;
-      let mut network_error = None;
-      let available = self
-         .available_egresses(true)
-         .map_err(|error| error.to_string())?;
-      let mut tried = 0;
-      for index in available.iter().copied().take(EGRESS_ATTEMPTS) {
-         tried += 1;
-         let response = match self.egresses[index]
-            .http
-            .get(format!("{}/models", self.base_url.trim_end_matches('/')))
-            .send()
-            .await
-         {
-            Ok(response) => response,
-            Err(error) => {
-               self.cool_unavailable(index, 30);
-               network_error = Some(error.to_string());
-               continue;
-            },
-         };
-         match classify(response, Classify::STRICT).await {
-            Ok(response) => {
-               let listing: Listing = response.json().await.map_err(|error| error.to_string())?;
-               let windows = self.context_windows().await;
-               return Ok(listing
-                  .data
-                  .into_iter()
-                  .map(|entry| ZenModel {
-                     context_window: windows.get(&entry.id).copied(),
-                     id: entry.id,
-                  })
-                  .collect());
-            },
-            Err(SendError::RateLimited { retry_after, body }) => {
-               self.cool_anonymous(index, retry_after.unwrap_or(60));
-               rate_limit_body = Some(body);
-            },
-            Err(SendError::Network(error)) => {
-               self.cool_unavailable(index, 30);
-               network_error = Some(error);
-            },
-            Err(error) => return Err(error.to_string()),
-         }
-      }
-      Err(
-         self
-            .exhausted_error(
-               rate_limit_body,
-               network_error,
-               available.len().saturating_sub(tried),
-            )
-            .to_string(),
-      )
+      let response = self
+         .egresses
+         .send_anonymous(|http| async move {
+            let response = http
+               .get(format!("{}/models", self.base_url()))
+               .send()
+               .await
+               .map_err(|error| SendError::Network(error.to_string()))?;
+            classify(response, Classify::STRICT).await
+         })
+         .await?;
+      let status = response.status().as_u16();
+      let listing: Listing = response.json().await.map_err(|error| SendError::Upstream {
+         status,
+         body: format!("parsing zen models: {error}"),
+      })?;
+      let windows = self.context_windows().await;
+      Ok(listing
+         .data
+         .into_iter()
+         .map(|entry| ZenModel {
+            context_window: windows.get(&entry.id).copied(),
+            id: entry.id,
+         })
+         .collect())
    }
 
    async fn context_windows(&self) -> Arc<HashMap<String, i64>> {
@@ -276,99 +140,6 @@ impl ZenClient {
          }
       }
       self.context_windows.read().unwrap().clone()
-   }
-
-   fn available_egresses(&self, anonymous: bool) -> Result<Vec<usize>, SendError> {
-      let now = unix_now();
-      let start = self.next.fetch_add(1, Ordering::Relaxed);
-      let indices = (0..self.egresses.len())
-         .map(|offset| start.wrapping_add(offset) % self.egresses.len())
-         .filter(|&index| {
-            let egress = &self.egresses[index];
-            egress.unavailable_until.load(Ordering::Relaxed) <= now
-               && (!anonymous || egress.anonymous_cooldown_until.load(Ordering::Relaxed) <= now)
-         })
-         .collect::<Vec<_>>();
-      if !indices.is_empty() {
-         return Ok(indices);
-      }
-      let has_rate_limit = anonymous
-         && self
-            .egresses
-            .iter()
-            .any(|egress| egress.anonymous_cooldown_until.load(Ordering::Relaxed) > now);
-      if has_rate_limit {
-         tracing::warn!(
-            total = self.egresses.len(),
-            "no zen egress available: all cooling down"
-         );
-         return Err(SendError::RateLimited {
-            retry_after: Some(self.retry_after(now, true)),
-            body: "all zen egresses are cooling down".into(),
-         });
-      }
-      tracing::warn!(
-         total = self.egresses.len(),
-         "no zen egress available: all unreachable"
-      );
-      Err(SendError::Network(
-         "all zen egresses are temporarily unavailable".into(),
-      ))
-   }
-
-   fn cool_unavailable(&self, index: usize, seconds: i64) {
-      self.egresses[index]
-         .unavailable_until
-         .store(unix_now().saturating_add(seconds.max(1)), Ordering::Relaxed);
-   }
-
-   fn cool_anonymous(&self, index: usize, seconds: i64) {
-      self.egresses[index]
-         .anonymous_cooldown_until
-         .store(unix_now().saturating_add(seconds.max(1)), Ordering::Relaxed);
-   }
-
-   fn retry_after(&self, now: i64, anonymous: bool) -> i64 {
-      self
-         .egresses
-         .iter()
-         .map(|egress| {
-            let unavailable = egress.unavailable_until.load(Ordering::Relaxed);
-            let rate_limited = if anonymous {
-               egress.anonymous_cooldown_until.load(Ordering::Relaxed)
-            } else {
-               0
-            };
-            unavailable.max(rate_limited) - now
-         })
-         .filter(|seconds| *seconds > 0)
-         .min()
-         .unwrap_or(30)
-   }
-
-   fn exhausted_error(
-      &self,
-      rate_limit_body: Option<String>,
-      network_error: Option<String>,
-      untried: usize,
-   ) -> SendError {
-      if let Some(body) = rate_limit_body {
-         let retry_after = if untried > 0 {
-            1
-         } else {
-            self.retry_after(unix_now(), true)
-         };
-         return SendError::RateLimited {
-            retry_after: Some(retry_after),
-            body,
-         };
-      }
-      let error = network_error.unwrap_or_else(|| "all zen egresses failed".into());
-      SendError::Network(if untried > 0 {
-         format!("{error}, {untried} egresses untried")
-      } else {
-         error
-      })
    }
 }
 
@@ -424,6 +195,7 @@ mod tests {
 
    use super::*;
    use crate::config::EgressConfig;
+   use crate::egress::ATTEMPTS;
 
    type Requests = Arc<Mutex<Vec<(String, Option<String>)>>>;
 
@@ -572,7 +344,7 @@ mod tests {
          total
       }
       let mut proxies = Vec::new();
-      for _ in 0..EGRESS_ATTEMPTS + 4 {
+      for _ in 0..ATTEMPTS + 4 {
          proxies.push(spawn_proxy(StatusCode::TOO_MANY_REQUESTS).await);
       }
       let client = ZenClient::new(ZenConfig {
@@ -603,7 +375,7 @@ mod tests {
          ),
          "{err}"
       );
-      assert_eq!(seen(&proxies).await, EGRESS_ATTEMPTS);
+      assert_eq!(seen(&proxies).await, ATTEMPTS);
 
       let exhausted = client
          .post(None, "sess-test", "/responses", &Bytes::from_static(b"{}"))
@@ -613,6 +385,6 @@ mod tests {
          matches!(exhausted, SendError::RateLimited { retry_after: Some(secs), .. } if secs > 1),
          "{exhausted}"
       );
-      assert_eq!(seen(&proxies).await, EGRESS_ATTEMPTS + 4);
+      assert_eq!(seen(&proxies).await, ATTEMPTS + 4);
    }
 }

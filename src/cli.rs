@@ -16,6 +16,7 @@ use crate::db::tokens::TokenLimits;
 use crate::oauth;
 use crate::oauth::anthropic;
 use crate::oauth::copilot;
+use crate::oauth::glm;
 use crate::oauth::refresh;
 use crate::pool::codex::CodexPool;
 use crate::provider::{AuthMode, Provider};
@@ -232,9 +233,10 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
          Provider::DeepSeek => Err(eyre::eyre!(
             "deepseek issues static keys, use `accounts add-key --provider deepseek`"
          )),
-         Provider::Glm => Err(eyre::eyre!(
-            "z.ai issues static keys, use `accounts add-key --provider glm`"
-         )),
+         Provider::Glm => {
+            let key = glm::login().await?;
+            accounts_add_key(&db, Provider::Glm, &key, label.as_deref(), None, false).await
+         },
          Provider::Experiential => Err(eyre::eyre!(
             "experiential issues static keys, use `accounts add-key --provider experiential`"
          )),

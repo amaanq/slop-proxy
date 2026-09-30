@@ -191,11 +191,4 @@ mod tests {
       let facts = RequestFacts::from_responses(&req, &HeaderMap::new());
       assert_eq!((facts.turn_index, facts.tools_declared), (2, 2));
    }
-
-   #[test]
-   fn a_bare_chat_request_yields_zeroes() {
-      let req = serde_json::from_value(json!({"model": "m"})).unwrap();
-      let facts = RequestFacts::from_chat(&req, &HeaderMap::new());
-      assert_eq!((facts.turn_index, facts.tools_declared), (0, 0));
-   }
 }

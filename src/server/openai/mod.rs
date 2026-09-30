@@ -498,6 +498,13 @@ struct ZenFixups {
    malformed: usize,
 }
 
+impl ZenFixups {
+   const fn changed(&self) -> bool {
+      self.hoisted + self.rewritten + self.dropped + self.unpaired + self.repaired + self.malformed
+         > 0
+   }
+}
+
 #[derive(serde::Serialize)]
 struct AssistantText {
    #[serde(rename = "type")]
@@ -746,12 +753,8 @@ fn zen_input_fixups(rest: &mut serde_json::Map<String, Value>) -> ZenFixups {
    if let Some(&mut Value::Array(ref mut items)) = rest.get_mut("input") {
       let before = items.len();
       for item in items.iter_mut() {
-         let kind = item
-            .get("type")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .unwrap_or_default();
-         match kind.as_str() {
+         let kind = item.get("type").and_then(Value::as_str).unwrap_or_default();
+         match kind {
             "additional_tools" => {
                if let Some(&mut Value::Array(ref mut tools)) = item.get_mut("tools") {
                   hoisted.append(tools);
@@ -847,12 +850,9 @@ fn repair_tool_arguments(rest: &mut serde_json::Map<String, Value>) -> (usize, u
 
 /// An unpaired `*_call` or `*_call_output` is a 400 on zen.
 fn drop_unpaired_tool_items(rest: &mut serde_json::Map<String, Value>) -> usize {
-   let Some(&mut Value::Array(ref mut items)) = rest.get_mut("input") else {
-      return 0;
-   };
-   let side = |item: &Value| -> Option<(bool, String)> {
+   fn side(item: &Value) -> Option<(bool, &str)> {
       let kind = item.get("type")?.as_str()?;
-      let call_id = item.get("call_id")?.as_str()?.to_owned();
+      let call_id = item.get("call_id")?.as_str()?;
       if kind.ends_with("_call_output") {
          Some((false, call_id))
       } else if kind.ends_with("_call") {
@@ -860,20 +860,26 @@ fn drop_unpaired_tool_items(rest: &mut serde_json::Map<String, Value>) -> usize 
       } else {
          None
       }
+   }
+
+   let Some(&mut Value::Array(ref mut items)) = rest.get_mut("input") else {
+      return 0;
    };
    let mut calls = HashSet::new();
    let mut outputs = HashSet::new();
    for item in items.iter() {
-      match side(item) {
-         Some((true, call_id)) => calls.insert(call_id),
-         Some((false, call_id)) => outputs.insert(call_id),
-         None => false,
-      };
+      if let Some((is_call, call_id)) = side(item) {
+         if is_call {
+            calls.insert(call_id.to_owned());
+         } else {
+            outputs.insert(call_id.to_owned());
+         }
+      }
    }
    let before = items.len();
    items.retain(|item| match side(item) {
-      Some((true, ref call_id)) => outputs.contains(call_id),
-      Some((false, ref call_id)) => calls.contains(call_id),
+      Some((true, call_id)) => outputs.contains(call_id),
+      Some((false, call_id)) => calls.contains(call_id),
       None => true,
    });
    before - items.len()
@@ -979,14 +985,7 @@ fn prepare_request(
 
    if provider == Provider::Zen {
       let fixes = zen_input_fixups(&mut req.rest);
-      if fixes.hoisted
-         + fixes.rewritten
-         + fixes.dropped
-         + fixes.unpaired
-         + fixes.repaired
-         + fixes.malformed
-         > 0
-      {
+      if fixes.changed() {
          tracing::warn!(
             fixes.hoisted,
             fixes.rewritten,
@@ -1136,6 +1135,16 @@ pub async fn responses_passthrough(
    raw_response(state, record, resp, capture, started).await
 }
 
+fn upstream_eof(state: &AppState, record: UsageRecord) -> Response {
+   log_error(state, record, 502, "upstream_eof");
+   super::error::error_response(
+      DIALECT,
+      502,
+      "api_error",
+      "upstream stream ended unexpectedly",
+   )
+}
+
 async fn raw_response(
    state: AppState,
    mut record: UsageRecord,
@@ -1170,13 +1179,7 @@ async fn raw_response(
       .as_ref()
       .map_or(0, |value| value.get().len() as i64);
    let Some(value) = final_response else {
-      log_error(&state, record, 502, "upstream_eof");
-      return super::error::error_response(
-         DIALECT,
-         502,
-         "api_error",
-         "upstream stream ended unexpectedly",
-      );
+      return upstream_eof(&state, record);
    };
    log_usage(&state, record);
    (
@@ -1228,13 +1231,7 @@ async fn bridged_responses(
    let snap = capture.snapshot();
    apply_snapshot(&mut record, &snap, started);
    let Some(mut response) = terminal else {
-      log_error(&state, record, 502, "upstream_eof");
-      return super::error::error_response(
-         DIALECT,
-         502,
-         "api_error",
-         "upstream stream ended unexpectedly",
-      );
+      return upstream_eof(&state, record);
    };
    response
       .id

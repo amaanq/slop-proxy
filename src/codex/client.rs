@@ -13,12 +13,18 @@ use crate::codex::models::ModelsResponse;
 use crate::config::CodexConfig;
 use crate::upstream::{Classify, SendError, classify};
 
-const RULES: Classify = Classify {
+pub const RULES: Classify = Classify {
    pass: |_| false,
    auth: &[401],
    reset_headers: &["x-codex-primary-reset-at"],
    account_faults: &[],
 };
+
+pub const EXHAUSTED_CODES: &[&str] = &[
+   "usage_limit_reached",
+   "usage_not_included",
+   "insufficient_quota",
+];
 
 /// One rolling limit window as the usage endpoint reports it.
 #[derive(Debug, Default, Clone, serde::Deserialize)]
@@ -27,7 +33,6 @@ pub struct UsageWindow {
    pub used_percent: f64,
    #[serde(default)]
    pub limit_window_seconds: i64,
-   #[serde(default)]
    pub reset_at: Option<i64>,
 }
 
@@ -35,9 +40,7 @@ pub struct UsageWindow {
 pub struct RateLimit {
    #[serde(default)]
    pub limit_reached: bool,
-   #[serde(default)]
    pub primary_window: Option<UsageWindow>,
-   #[serde(default)]
    pub secondary_window: Option<UsageWindow>,
 }
 
@@ -181,13 +184,7 @@ async fn refuse_early(resp: reqwest::Response) -> Result<reqwest::Response, Send
          Opening::Serve => break,
          Opening::Undecryptable => return Err(SendError::BadRequest(UNDECRYPTABLE.into())),
          Opening::Refused(body) => {
-            let spent = [
-               "usage_limit_reached",
-               "usage_not_included",
-               "insufficient_quota",
-            ]
-            .iter()
-            .any(|code| body.contains(code));
+            let spent = EXHAUSTED_CODES.iter().any(|code| body.contains(code));
             let retry_after = if spent {
                EXHAUSTED_REFUSAL_COOLDOWN
             } else {
@@ -241,6 +238,18 @@ impl CodexClient {
       Self { http, cfg }
    }
 
+   pub fn authed(
+      &self,
+      req: reqwest::RequestBuilder,
+      token: &str,
+      account: &str,
+   ) -> reqwest::RequestBuilder {
+      req.bearer_auth(token)
+         .header("chatgpt-account-id", account)
+         .header("originator", self.cfg.originator.as_str())
+         .header("version", self.cfg.version.as_str())
+   }
+
    pub async fn post(
       &self,
       access_token: &str,
@@ -250,7 +259,7 @@ impl CodexClient {
       model: &str,
       headers: &header::HeaderMap,
    ) -> Result<reqwest::Response, SendError> {
-      match self
+      let initial = self
          .send_once(
             access_token,
             chatgpt_account_id,
@@ -259,57 +268,41 @@ impl CodexClient {
             model,
             headers,
          )
-         .await
-      {
-         Err(SendError::BadRequest(body))
+         .await;
+      let retry_body = match initial.as_ref() {
+         Err(&SendError::BadRequest(ref body))
             if body.contains("max_output_tokens")
                && let Ok(mut retry) = serde_json::from_slice::<Retry>(req)
                && retry.max_output_tokens.take().is_some()
                && let Ok(retry) = serde_json::to_vec(&retry) =>
          {
             tracing::debug!("upstream rejected max_output_tokens; retrying without it");
-            self
-               .send_once(
-                  access_token,
-                  chatgpt_account_id,
-                  &Bytes::from(retry),
-                  session_id,
-                  model,
-                  headers,
-               )
-               .await
+            Some(Bytes::from(retry))
          },
-         Err(SendError::BadRequest(body))
+         Err(&SendError::BadRequest(ref body))
             if body == UNDECRYPTABLE
                && let Some(retry) = drop_undecryptable_payloads(req) =>
          {
-            self
-               .send_once(
-                  access_token,
-                  chatgpt_account_id,
-                  &retry,
-                  session_id,
-                  model,
-                  headers,
-               )
-               .await
+            Some(retry)
          },
          // Cloudflare occasionally 403s fresh headless clients; the cookie
          // jar picks up clearance on the first response, so retry once.
-         Err(SendError::Upstream { status: 403, .. }) => {
-            self
-               .send_once(
-                  access_token,
-                  chatgpt_account_id,
-                  req,
-                  session_id,
-                  model,
-                  headers,
-               )
-               .await
-         },
-         other => other,
-      }
+         Err(&SendError::Upstream { status: 403, .. }) => Some(req.clone()),
+         _ => None,
+      };
+      let Some(body) = retry_body else {
+         return initial;
+      };
+      self
+         .send_once(
+            access_token,
+            chatgpt_account_id,
+            &body,
+            session_id,
+            model,
+            headers,
+         )
+         .await
    }
 
    /// Quota without spending an inference request. The same figures ride on
@@ -319,13 +312,11 @@ impl CodexClient {
       access_token: &str,
       chatgpt_account_id: &str,
    ) -> Result<Usage, SendError> {
-      let resp = self
+      let req = self
          .http
-         .get(format!("{}/usage", self.cfg.base_url.trim_end_matches('/')))
-         .bearer_auth(access_token)
-         .header("chatgpt-account-id", chatgpt_account_id)
-         .header("originator", self.cfg.originator.clone())
-         .header("version", self.cfg.version.clone())
+         .get(format!("{}/usage", self.cfg.base_url.trim_end_matches('/')));
+      let resp = self
+         .authed(req, access_token, chatgpt_account_id)
          .send()
          .await
          .map_err(|err| SendError::Network(err.to_string()))?;
@@ -354,15 +345,12 @@ impl CodexClient {
       access_token: &str,
       chatgpt_account_id: &str,
    ) -> Result<reqwest::Response, SendError> {
-      self
+      let req = self
          .http
          .get(self.models_url())
-         .timeout(Duration::from_secs(10))
-         .bearer_auth(access_token)
-         .header("ChatGPT-Account-ID", chatgpt_account_id)
-         .header("chatgpt-account-id", chatgpt_account_id)
-         .header("originator", self.cfg.originator.clone())
-         .header("version", self.cfg.version.clone())
+         .timeout(Duration::from_secs(10));
+      self
+         .authed(req, access_token, chatgpt_account_id)
          .send()
          .await
          .map_err(|err| SendError::Network(err.to_string()))

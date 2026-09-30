@@ -8,17 +8,12 @@ use crate::zen::client::ZenModel;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ModelInfo {
    pub slug: String,
-   #[serde(default)]
    pub display_name: Option<String>,
-   #[serde(default)]
    pub default_reasoning_level: Option<String>,
    #[serde(default)]
    pub supported_reasoning_levels: Vec<ReasoningLevel>,
-   #[serde(default)]
    pub visibility: Option<String>,
-   #[serde(default)]
    pub supported_in_api: Option<bool>,
-   #[serde(default)]
    pub context_window: Option<i64>,
    #[serde(default)]
    pub input_modalities: Vec<String>,

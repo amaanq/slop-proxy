@@ -14,7 +14,7 @@ use reqwest::header::CONTENT_TYPE;
 use crate::clock::{unix_now, unix_now_ms};
 use crate::config::ZenConfig;
 use crate::egress::Egresses;
-use crate::upstream::{Classify, SendError, classify};
+use crate::upstream::{Classify, IdList, SendError, classify, json};
 
 const CONTEXT_REFRESH_SECS: i64 = 12 * 60 * 60;
 
@@ -78,8 +78,7 @@ impl ZenClient {
             .header(CONTENT_TYPE, "application/json")
             .body(req.clone())
             .send()
-            .await
-            .map_err(|error| SendError::Network(error.to_string()))?;
+            .await?;
          classify(response, Classify::STRICT).await
       };
       if key.is_some() {
@@ -90,30 +89,11 @@ impl ZenClient {
    }
 
    pub async fn models(&self) -> Result<Vec<ZenModel>, SendError> {
-      #[derive(serde::Deserialize)]
-      struct Entry {
-         id: String,
-      }
-      #[derive(serde::Deserialize)]
-      struct Listing {
-         data: Vec<Entry>,
-      }
       let response = self
          .egresses
-         .send_anonymous(|http| async move {
-            let response = http
-               .get(format!("{}/models", self.base_url()))
-               .send()
-               .await
-               .map_err(|error| SendError::Network(error.to_string()))?;
-            classify(response, Classify::STRICT).await
-         })
+         .send_anonymous(|http| http.get(format!("{}/models", self.base_url())).send())
          .await?;
-      let status = response.status().as_u16();
-      let listing: Listing = response.json().await.map_err(|error| SendError::Upstream {
-         status,
-         body: format!("parsing zen models: {error}"),
-      })?;
+      let listing: IdList = json(response, Classify::STRICT).await?;
       let windows = self.context_windows().await;
       Ok(listing
          .data

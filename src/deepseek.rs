@@ -8,7 +8,7 @@ use reqwest::header::CONTENT_TYPE;
 
 use crate::config::RelayConfig;
 use crate::egress::Egresses;
-use crate::upstream::{Classify, SendError, classify};
+use crate::upstream::{Classify, IdList, SendError, classify, json};
 
 /// The site root, not the messages surface. `DeepSeek` serves its catalog from
 /// the root and its Anthropic dialect from `/anthropic` under it.
@@ -30,37 +30,17 @@ impl DeepSeekClient {
    }
 
    pub async fn models(&self, key: &str) -> Result<Vec<String>, SendError> {
-      #[derive(serde::Deserialize)]
-      struct Entry {
-         id: String,
-      }
-      #[derive(serde::Deserialize)]
-      struct Listing {
-         data: Vec<Entry>,
-      }
       let resp = self
          .egresses
-         .send(|http| async move {
+         .send(|http| {
             http
                .get(format!("{}/models", self.root()))
                .bearer_auth(key)
                .send()
-               .await
-               .map_err(|err| SendError::Network(err.to_string()))
          })
          .await?;
-      let resp = classify(resp, Classify::STRICT).await?;
-      let status = resp.status().as_u16();
-      let body = resp.text().await.map_err(|err| SendError::Upstream {
-         status,
-         body: format!("reading models response: {err}"),
-      })?;
-      serde_json::from_str::<Listing>(&body)
-         .map(|listing| listing.data.into_iter().map(|entry| entry.id).collect())
-         .map_err(|err| SendError::Upstream {
-            status,
-            body: format!("parsing models response: {err}"),
-         })
+      let listing: IdList = json(resp, Classify::STRICT).await?;
+      Ok(listing.data.into_iter().map(|entry| entry.id).collect())
    }
 
    pub async fn post(
@@ -71,7 +51,7 @@ impl DeepSeekClient {
    ) -> Result<reqwest::Response, SendError> {
       let resp = self
          .egresses
-         .send(|http| async move {
+         .send(|http| {
             http
                .post(format!("{}/anthropic{path}", self.root()))
                .header("x-api-key", key)
@@ -79,8 +59,6 @@ impl DeepSeekClient {
                .header(CONTENT_TYPE, "application/json")
                .body(body.clone())
                .send()
-               .await
-               .map_err(|err| SendError::Network(err.to_string()))
          })
          .await?;
       classify(resp, Classify::STRICT).await

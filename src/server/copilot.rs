@@ -1,6 +1,7 @@
 use std::time::Instant;
 
 use axum::body::Bytes;
+use axum::http::StatusCode;
 use axum::response::Response;
 
 use crate::pool::copilot::Call;
@@ -50,7 +51,12 @@ pub async fn chat_completions(
       Ok(bytes) => Bytes::from(bytes),
       Err(err) => {
          log_rejected(&state, &auth, "chat", &model);
-         return error_response(DIALECT, 400, "invalid_request_error", &err.to_string());
+         return error_response(
+            DIALECT,
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            &err.to_string(),
+         );
       },
    };
    let served = state

@@ -236,14 +236,12 @@ pub struct ApiError {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ModelList {
-   pub data: Vec<ModelEntry>,
    pub models: Vec<ModelEntry>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ModelEntry {
-   pub id: Option<String>,
    pub name: Option<String>,
    /// Only the native surface sends this. `embedContent`, `bidiGenerateContent`
    /// and `predictLongRunning` name models this proxy carries no path for.

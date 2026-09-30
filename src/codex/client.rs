@@ -12,13 +12,12 @@ use tokio::time::{sleep, timeout};
 use crate::codex::models::ModelsResponse;
 use crate::codex::types::ContentPart;
 use crate::config::CodexConfig;
-use crate::upstream::{Classify, SendError, classify};
+use crate::upstream::{Classify, SendError, classify, json};
 
 pub const RULES: Classify = Classify {
-   pass: |_| false,
    auth: &[401],
    reset_headers: &["x-codex-primary-reset-at"],
-   account_faults: &[],
+   ..Classify::STRICT
 };
 
 pub const EXHAUSTED_CODES: &[&str] = &[
@@ -217,7 +216,7 @@ async fn refuse_early(resp: reqwest::Response) -> Result<reqwest::Response, Send
             },
             chunk = stream.next() => match chunk {
                Some(Ok(chunk)) => head.extend_from_slice(&chunk),
-               Some(Err(err)) => return Err(SendError::Network(err.to_string())),
+               Some(Err(err)) => return Err(err.into()),
                None => break,
             },
          },
@@ -324,42 +323,12 @@ impl CodexClient {
       let resp = self
          .authed(req, access_token, chatgpt_account_id)
          .send()
-         .await
-         .map_err(|err| SendError::Network(err.to_string()))?;
-      let resp = classify(resp, Classify::STRICT).await?;
-      let status = resp.status().as_u16();
-      resp.json().await.map_err(|err| SendError::Upstream {
-         status,
-         body: format!("parsing usage response: {err}"),
-      })
+         .await?;
+      json(resp, Classify::STRICT).await
    }
 
    pub const fn soft_utilization_limit(&self) -> f64 {
       self.cfg.soft_utilization_limit
-   }
-
-   pub fn models_url(&self) -> String {
-      format!(
-         "{}/models?client_version={}",
-         self.cfg.base_url.trim_end_matches('/'),
-         self.cfg.version
-      )
-   }
-
-   async fn models_response(
-      &self,
-      access_token: &str,
-      chatgpt_account_id: &str,
-   ) -> Result<reqwest::Response, SendError> {
-      let req = self
-         .http
-         .get(self.models_url())
-         .timeout(Duration::from_secs(10));
-      self
-         .authed(req, access_token, chatgpt_account_id)
-         .send()
-         .await
-         .map_err(|err| SendError::Network(err.to_string()))
    }
 
    pub async fn catalog(
@@ -367,16 +336,19 @@ impl CodexClient {
       access_token: &str,
       chatgpt_account_id: &str,
    ) -> Result<ModelsResponse, SendError> {
+      let req = self
+         .http
+         .get(format!(
+            "{}/models?client_version={}",
+            self.cfg.base_url.trim_end_matches('/'),
+            self.cfg.version
+         ))
+         .timeout(Duration::from_secs(10));
       let resp = self
-         .models_response(access_token, chatgpt_account_id)
+         .authed(req, access_token, chatgpt_account_id)
+         .send()
          .await?;
-      let resp = classify(resp, Classify::STRICT).await?;
-      let status = resp.status().as_u16();
-      let parsed: ModelsResponse = resp.json().await.map_err(|err| SendError::Upstream {
-         status,
-         body: format!("parsing models response: {err}"),
-      })?;
-      Ok(parsed)
+      json(resp, Classify::STRICT).await
    }
 
    async fn send_once(
@@ -404,8 +376,7 @@ impl CodexClient {
          .send();
       let resp = timeout(RESPONSE_HEADERS_TIMEOUT, request)
          .await
-         .map_err(|_| SendError::Network("timed out waiting for responses headers".into()))?
-         .map_err(|err| SendError::Network(err.to_string()))?;
+         .map_err(|_| SendError::Network("timed out waiting for responses headers".into()))??;
       let resp = classify(resp, RULES).await?;
       refuse_early(resp).await
    }

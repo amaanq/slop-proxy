@@ -1,7 +1,7 @@
 use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::Request;
-use axum::http::HeaderValue;
 use axum::http::header::{CONTENT_ENCODING, CONTENT_LENGTH};
+use axum::http::{HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::Response;
 use ruzstd::decoding::StreamingDecoder;
@@ -25,13 +25,16 @@ pub async fn zstd_requests(req: Request, next: Next) -> Response {
    }
 
    let (mut parts, body) = req.into_parts();
-   let Ok(bytes) = to_bytes(body, MAX_BODY).await else {
-      return error_response(
+   let too_large = || {
+      error_response(
          Dialect::OpenAi,
-         413,
+         StatusCode::PAYLOAD_TOO_LARGE,
          "invalid_request_error",
          "request body too large",
-      );
+      )
+   };
+   let Ok(bytes) = to_bytes(body, MAX_BODY).await else {
+      return too_large();
    };
    let plain = match decode(&bytes, MAX_BODY) {
       Ok(plain) => plain,
@@ -40,17 +43,12 @@ pub async fn zstd_requests(req: Request, next: Next) -> Response {
             "rejecting a body that unpacks past {MAX_BODY} bytes from {} compressed",
             bytes.len()
          );
-         return error_response(
-            Dialect::OpenAi,
-            413,
-            "invalid_request_error",
-            "request body too large",
-         );
+         return too_large();
       },
       Err(DecodeError::Malformed) => {
          return error_response(
             Dialect::OpenAi,
-            400,
+            StatusCode::BAD_REQUEST,
             "invalid_request_error",
             "malformed zstd request body",
          );

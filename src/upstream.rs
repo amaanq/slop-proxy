@@ -2,6 +2,8 @@ use std::mem;
 
 use axum::http::Response;
 use reqwest::header::HeaderMap;
+use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use thiserror::Error;
 
 use crate::clock;
@@ -28,7 +30,24 @@ pub enum SendError {
    Network(String),
 }
 
-pub fn retry_after_secs(headers: &HeaderMap, reset_headers: &[&str]) -> Option<i64> {
+impl From<reqwest::Error> for SendError {
+   fn from(err: reqwest::Error) -> Self {
+      Self::Network(err.to_string())
+   }
+}
+
+/// The `{"data": [{"id": ..}]}` listing shape several providers share.
+#[derive(Deserialize)]
+pub struct IdList {
+   pub data: Vec<IdEntry>,
+}
+
+#[derive(Deserialize)]
+pub struct IdEntry {
+   pub id: String,
+}
+
+fn retry_after_secs(headers: &HeaderMap, reset_headers: &[&str]) -> Option<i64> {
    let get = |name: &str| headers.get(name)?.to_str().ok();
    if let Some(retry) = get("retry-after").and_then(|value| value.parse::<i64>().ok()) {
       return Some(retry);
@@ -55,6 +74,9 @@ pub struct Classify {
    /// Substrings of a 400 body that say this account cannot serve anyone,
    /// so it is benched like a rate limit instead of failing the caller.
    pub account_faults: &'static [&'static str],
+   /// Substrings of a 400 or 429 body that say the key itself is dead, so
+   /// no retry on another account makes it work.
+   pub dead_key: &'static [&'static str],
 }
 
 /// A fault like an empty balance ends when a human acts, which no header
@@ -67,6 +89,7 @@ impl Classify {
       auth: &[401, 403],
       reset_headers: &[],
       account_faults: &[],
+      dead_key: &[],
    };
 }
 
@@ -76,7 +99,8 @@ pub async fn classify(
 ) -> Result<reqwest::Response, SendError> {
    let status = resp.status().as_u16();
    let passed = (rules.pass)(status);
-   let inspect = status == 400 && !rules.account_faults.is_empty();
+   let inspect = matches!(status, 400 | 429)
+      && !(rules.account_faults.is_empty() && rules.dead_key.is_empty());
    if resp.status().is_success() || (passed && !inspect) {
       return Ok(resp);
    }
@@ -90,7 +114,10 @@ pub async fn classify(
       .chars()
       .take(2000)
       .collect::<String>();
-   if inspect
+   if inspect && rules.dead_key.iter().any(|dead| body.contains(dead)) {
+      return Err(SendError::Auth(body));
+   }
+   if status == 400
       && rules
          .account_faults
          .iter()
@@ -118,6 +145,19 @@ pub async fn classify(
          400 => SendError::BadRequest(body),
          code => SendError::Upstream { status: code, body },
       }
+   })
+}
+
+pub async fn json<T>(resp: reqwest::Response, rules: Classify) -> Result<T, SendError>
+where
+   T: DeserializeOwned,
+{
+   let resp = classify(resp, rules).await?;
+   let status = resp.status().as_u16();
+   let path = resp.url().path().to_owned();
+   resp.json().await.map_err(|err| SendError::Upstream {
+      status,
+      body: format!("parsing {path}: {err}"),
    })
 }
 

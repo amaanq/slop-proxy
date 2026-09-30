@@ -12,7 +12,6 @@ use crate::upstream::SendError;
 /// list otherwise turns a dead upstream into a very slow failure.
 pub const ATTEMPTS: usize = 8;
 
-/// Seconds an egress sits out after refusing to connect.
 const UNREACHABLE_COOLDOWN: i64 = 30;
 
 pub struct Egresses {
@@ -128,35 +127,41 @@ impl Egresses {
    /// Retries the next egress when one cannot be reached at all. Anything the
    /// upstream itself answered is the upstream's verdict and stops the walk,
    /// since a second egress would only ask the same question again.
-   pub async fn send<Attempt, Fut>(&self, attempt: Attempt) -> Result<reqwest::Response, SendError>
+   pub async fn send<Attempt, Fut, Error>(
+      &self,
+      attempt: Attempt,
+   ) -> Result<reqwest::Response, SendError>
    where
       Attempt: Fn(reqwest::Client) -> Fut,
-      Fut: Future<Output = Result<reqwest::Response, SendError>>,
+      Fut: Future<Output = Result<reqwest::Response, Error>>,
+      Error: Into<SendError>,
    {
       self.walk(false, attempt).await
    }
 
    /// As `send`, but a rate limit is the egress's address being throttled,
    /// so it benches that egress and the walk moves on.
-   pub async fn send_anonymous<Attempt, Fut>(
+   pub async fn send_anonymous<Attempt, Fut, Error>(
       &self,
       attempt: Attempt,
    ) -> Result<reqwest::Response, SendError>
    where
       Attempt: Fn(reqwest::Client) -> Fut,
-      Fut: Future<Output = Result<reqwest::Response, SendError>>,
+      Fut: Future<Output = Result<reqwest::Response, Error>>,
+      Error: Into<SendError>,
    {
       self.walk(true, attempt).await
    }
 
-   async fn walk<Attempt, Fut>(
+   async fn walk<Attempt, Fut, Error>(
       &self,
       anonymous: bool,
       attempt: Attempt,
    ) -> Result<reqwest::Response, SendError>
    where
       Attempt: Fn(reqwest::Client) -> Fut,
-      Fut: Future<Output = Result<reqwest::Response, SendError>>,
+      Fut: Future<Output = Result<reqwest::Response, Error>>,
+      Error: Into<SendError>,
    {
       let order = self.order(anonymous);
       if order.is_empty() {
@@ -191,7 +196,10 @@ impl Egresses {
       let mut tried = 0_usize;
       for index in order.iter().copied().take(ATTEMPTS) {
          tried += 1;
-         match attempt(self.entries[index].http.clone()).await {
+         match attempt(self.entries[index].http.clone())
+            .await
+            .map_err(Into::into)
+         {
             Ok(mut response) => {
                response.extensions_mut().insert(EgressIndex(index));
                if tried > 1 {

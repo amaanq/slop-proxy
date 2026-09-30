@@ -2,8 +2,8 @@ use std::mem;
 use std::time::{Duration, Instant};
 
 use axum::body::{Body, Bytes};
-use axum::http::HeaderMap;
 use axum::http::response::Builder;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use serde::Deserialize;
 use serde_json::value::RawValue;
@@ -189,7 +189,7 @@ fn refuses_non_claude_code(
    );
    Some(error_response(
       DIALECT,
-      403,
+      StatusCode::FORBIDDEN,
       "permission_error",
       "this proxy serves Anthropic subscriptions, which only cover Claude Code",
    ))
@@ -444,7 +444,12 @@ pub async fn count_tokens(
    let builder = forwarded_response(&resp);
    match resp.bytes().await {
       Ok(bytes) => respond(builder, DIALECT, Body::from(bytes)),
-      Err(err) => error_response(DIALECT, 502, "api_error", &err.to_string()),
+      Err(err) => error_response(
+         DIALECT,
+         StatusCode::BAD_GATEWAY,
+         "api_error",
+         &err.to_string(),
+      ),
    }
 }
 

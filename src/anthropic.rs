@@ -2,10 +2,11 @@ use axum::body::Bytes;
 use reqwest::StatusCode;
 use reqwest::header::{CONTENT_TYPE, HeaderMap};
 
+use crate::clock;
 use crate::config::AnthropicConfig;
 use crate::egress::Egresses;
 use crate::provider::AuthMode;
-use crate::upstream::{Classify, SendError, classify};
+use crate::upstream::{Classify, SendError, classify, json};
 
 #[derive(Clone, serde::Deserialize, serde::Serialize)]
 pub struct Model {
@@ -34,6 +35,7 @@ const RULES: Classify = Classify {
       "anthropic-ratelimit-requests-reset",
    ],
    account_faults: &["Your credit balance is too low"],
+   ..Classify::STRICT
 };
 
 /// Every claim a request counts against gets its own `anthropic-ratelimit-unified-<claim>-status` header.
@@ -67,12 +69,7 @@ pub struct Window {
 
 impl Window {
    pub fn resets_at_unix(&self) -> Option<i64> {
-      self
-         .resets_at
-         .as_deref()?
-         .parse::<jiff::Timestamp>()
-         .ok()
-         .map(jiff::Timestamp::as_second)
+      clock::unix_seconds(self.resets_at.as_deref())
    }
 }
 
@@ -102,12 +99,7 @@ pub struct ScopedModel {
 
 impl Limit {
    pub fn resets_at_unix(&self) -> Option<i64> {
-      self
-         .resets_at
-         .as_deref()?
-         .parse::<jiff::Timestamp>()
-         .ok()
-         .map(jiff::Timestamp::as_second)
+      clock::unix_seconds(self.resets_at.as_deref())
    }
 
    fn window_name(&self) -> &'static str {
@@ -185,7 +177,6 @@ impl Usage {
    }
 }
 
-/// Client headers worth carrying through to the upstream request.
 #[derive(Debug, Default, Clone)]
 pub struct RelayHeaders {
    pub version: Option<String>,
@@ -222,6 +213,10 @@ impl AnthropicClient {
       &self.direct
    }
 
+   fn url(&self, path: &str) -> String {
+      format!("{}{path}", self.cfg.base_url.trim_end_matches('/'))
+   }
+
    pub const fn soft_utilization_limit(&self) -> f64 {
       self.cfg.soft_utilization_limit
    }
@@ -230,50 +225,25 @@ impl AnthropicClient {
       let resp = self
          .direct
          .http(0)
-         .get(format!(
-            "{}/api/oauth/usage",
-            self.cfg.base_url.trim_end_matches('/')
-         ))
+         .get(self.url("/api/oauth/usage"))
          .bearer_auth(access_token)
          .header("anthropic-beta", OAUTH_BETA)
          .send()
-         .await
-         .map_err(|err| SendError::Network(err.to_string()))?;
-      let resp = classify(resp, Classify::STRICT).await?;
-      let status = resp.status().as_u16();
-      resp.json().await.map_err(|err| SendError::Upstream {
-         status,
-         body: format!("parsing usage response: {err}"),
-      })
+         .await?;
+      json(resp, Classify::STRICT).await
    }
 
-   /// The catalog exactly as the backend sends it. Relayed rather than
-   /// rebuilt so a client sees the same model ids and display names it would
-   /// talking to Anthropic directly.
-   pub async fn models_raw(
-      &self,
-      access_token: &str,
-   ) -> Result<(reqwest::StatusCode, String), SendError> {
+   pub async fn models(&self, access_token: &str) -> Result<Vec<Model>, SendError> {
       let resp = self
          .direct
          .http(0)
-         .get(format!(
-            "{}/v1/models?limit=100",
-            self.cfg.base_url.trim_end_matches('/')
-         ))
+         .get(self.url("/v1/models?limit=100"))
          .bearer_auth(access_token)
          .header("anthropic-beta", OAUTH_BETA)
          .header("anthropic-version", "2023-06-01")
          .send()
-         .await
-         .map_err(|err| SendError::Network(err.to_string()))?;
-      let status = resp.status();
-      let status_u16 = status.as_u16();
-      let body = resp.text().await.map_err(|err| SendError::Upstream {
-         status: status_u16,
-         body: format!("reading models response: {err}"),
-      })?;
-      Ok((status, body))
+         .await?;
+      Ok(json::<Catalog>(resp, Classify::STRICT).await?.data)
    }
 
    /// Statuses other than 401/429/5xx come back as `Ok` so the caller can
@@ -298,35 +268,29 @@ impl AnthropicClient {
          // still gate the fields it sent, `context_management` among them.
          AuthMode::ApiKey => hdrs.beta.clone(),
       };
-      let url = format!("{}{path}", self.cfg.base_url.trim_end_matches('/'));
+      let url = self.url(path);
       let resp = self
          .egresses(via_egress)
          .send(|http| {
-            let url = url.clone();
-            let beta = beta.clone();
-            async move {
-               let mut req = http
-                  .post(url)
-                  .header(
-                     "anthropic-version",
-                     hdrs.version.as_deref().unwrap_or("2023-06-01"),
-                  )
-                  .header(CONTENT_TYPE, "application/json")
-                  .body(body.clone());
-               req = match mode {
-                  AuthMode::OAuth => req.bearer_auth(credential),
-                  AuthMode::ApiKey => req.header("x-api-key", credential),
-               };
-               if let Some(beta) = beta {
-                  req = req.header("anthropic-beta", beta);
-               }
-               if let Some(agent) = hdrs.user_agent.as_ref() {
-                  req = req.header("user-agent", agent);
-               }
-               req.send()
-                  .await
-                  .map_err(|err| SendError::Network(err.to_string()))
+            let mut req = http
+               .post(&url)
+               .header(
+                  "anthropic-version",
+                  hdrs.version.as_deref().unwrap_or("2023-06-01"),
+               )
+               .header(CONTENT_TYPE, "application/json")
+               .body(body.clone());
+            req = match mode {
+               AuthMode::OAuth => req.bearer_auth(credential),
+               AuthMode::ApiKey => req.header("x-api-key", credential),
+            };
+            if let Some(beta) = beta.as_deref() {
+               req = req.header("anthropic-beta", beta);
             }
+            if let Some(agent) = hdrs.user_agent.as_ref() {
+               req = req.header("user-agent", agent);
+            }
+            req.send()
          })
          .await?;
       let model_limited =

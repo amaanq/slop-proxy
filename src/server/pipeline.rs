@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use axum::body::HttpBody as _;
 use axum::body::{Body, Bytes};
+use axum::http::StatusCode;
 use axum::http::response::Builder;
 use axum::response::IntoResponse as _;
 use axum::response::Response;
@@ -23,9 +24,7 @@ use crate::egress::egress_of;
 use crate::pool::{PoolError, Route, Served};
 use crate::provider::Provider;
 use crate::server::auth::AuthInfo;
-use crate::server::error::{
-   Dialect, blocked_model, error_response, out_of_scope, pool_error_kind, pool_error_response,
-};
+use crate::server::error::{Dialect, error_response, pool_error_response};
 use crate::server::facts::RequestFacts;
 use crate::server::relay::forwarded_response;
 use crate::server::{AppState, LogGuard, log_error, log_rejected, log_usage};
@@ -67,12 +66,27 @@ pub fn admit(
 ) -> Result<Provider, Box<Response>> {
    if state.cfg.models.blocked(model) {
       log_rejected(state, auth, endpoint, requested);
-      return Err(Box::new(blocked_model(dialect, model)));
+      return Err(Box::new(error_response(
+         dialect,
+         StatusCode::FORBIDDEN,
+         "permission_error",
+         &format!("{model} is blocked on this proxy"),
+      )));
    }
    let provider = state.cfg.models.route(model);
    if !auth.limits.may_use(provider) {
       log_rejected(state, auth, endpoint, requested);
-      return Err(Box::new(out_of_scope(dialect, provider)));
+      // Names the provider the token lacks, so a scoped key does not read as
+      // the model being broken for everyone.
+      return Err(Box::new(error_response(
+         dialect,
+         StatusCode::FORBIDDEN,
+         "permission_error",
+         &format!(
+            "this token is not scoped to the {} backend",
+            provider.as_str()
+         ),
+      )));
    }
    Ok(provider)
 }
@@ -84,7 +98,12 @@ pub fn dispatch_failed(
    err: PoolError,
 ) -> Response {
    record.attempts = i64::from(err.attempts());
-   let kind = pool_error_kind(&err);
+   let kind = match err {
+      PoolError::NoAccounts(_) => "pool_no_accounts",
+      PoolError::AllCoolingDown { .. } => "pool_cooling_down",
+      PoolError::BadRequest { .. } => "pool_bad_request",
+      PoolError::Upstream(_) => "pool_upstream",
+   };
    let response = pool_error_response(dialect, &state.cfg.models, err);
    log_error(state, record, i64::from(response.status().as_u16()), kind);
    response
@@ -98,14 +117,24 @@ pub async fn read_body(
 ) -> Result<Bytes, Response> {
    resp.bytes().await.map_err(|err| {
       log_error(state, record.clone(), 502, "upstream_read");
-      error_response(dialect, 502, "api_error", &err.to_string())
+      error_response(
+         dialect,
+         StatusCode::BAD_GATEWAY,
+         "api_error",
+         &err.to_string(),
+      )
    })
 }
 
 pub fn respond(builder: Builder, dialect: Dialect, body: Body) -> Response {
-   builder
-      .body(body)
-      .unwrap_or_else(|err| error_response(dialect, 502, "api_error", &err.to_string()))
+   builder.body(body).unwrap_or_else(|err| {
+      error_response(
+         dialect,
+         StatusCode::BAD_GATEWAY,
+         "api_error",
+         &err.to_string(),
+      )
+   })
 }
 
 pub fn apply_snapshot(record: &mut UsageRecord, snap: &CapturedUsage, started: Instant) {
@@ -230,7 +259,7 @@ where
       Ok(bytes) => bytes,
       Err(error) => {
          log_error(&state, record, 502, "upstream_decode");
-         return error_response(S::DIALECT, 502, "api_error", &error);
+         return error_response(S::DIALECT, StatusCode::BAD_GATEWAY, "api_error", &error);
       },
    };
    apply_snapshot(&mut record, &capture.snapshot(), started);
@@ -369,7 +398,7 @@ where
          .unwrap_or_else(|| "upstream failure".into());
       record.status = 502;
       log_usage(&state, record);
-      return error_response(reply.dialect, 502, "api_error", &msg);
+      return error_response(reply.dialect, StatusCode::BAD_GATEWAY, "api_error", &msg);
    }
    record.error_kind = snap.error_kind;
    logged_json(&state, record, (reply.render)(&agg))

@@ -117,21 +117,9 @@ impl fmt::Display for Provider {
 
 impl FromSql for Provider {
    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
-      match value.as_str()? {
-         // "codex" is the name this column used before the rename, and a
-         // db written by the older binary outlives the deploy.
-         "openai" | "codex" => Ok(Self::OpenAi),
-         "anthropic" => Ok(Self::Anthropic),
-         "gemini" => Ok(Self::Gemini),
-         "zen" => Ok(Self::Zen),
-         "glm" => Ok(Self::Glm),
-         "deepseek" => Ok(Self::DeepSeek),
-         "experiential" => Ok(Self::Experiential),
-         "copilot" => Ok(Self::Copilot),
-         other => Err(FromSqlError::Other(
-            format!("unknown provider {other:?}").into(),
-         )),
-      }
+      let text = value.as_str()?;
+      Self::from_str(text)
+         .ok_or_else(|| FromSqlError::Other(format!("unknown provider {text:?}").into()))
    }
 }
 

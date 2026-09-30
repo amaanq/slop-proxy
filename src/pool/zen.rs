@@ -4,11 +4,11 @@ use std::sync::LazyLock;
 use axum::body::Bytes;
 use rand::{Rng as _, thread_rng};
 
-use super::{AuthPolicy, Backend, Cooldown, Pool, Route, Slot};
+use super::{Backend, Pool, Relay, Route, Slot};
 use crate::clock::unix_now_ms;
 use crate::provider::Provider;
 use crate::translate::anthropic_req::empty_schema;
-use crate::translate::chat::{ChatError, ChatRequest, ChatToolDef, FunctionDef};
+use crate::translate::chat::{ChatRequest, ChatToolDef, FunctionDef};
 use crate::upstream::SendError;
 use crate::zen::client::{ZenClient, ZenModel};
 
@@ -16,12 +16,6 @@ use crate::zen::client::{ZenClient, ZenModel};
 /// table is empty. The free models are served without a key today, so an
 /// empty pool is a working pool rather than an error.
 pub type ZenPool = Pool<ZenClient>;
-
-#[derive(Clone)]
-pub struct Relay {
-   pub path: &'static str,
-   pub body: Bytes,
-}
 
 const GATE_SHELL: &str = "bash";
 const GATE_READER: &str = "read";
@@ -106,18 +100,9 @@ pub fn satisfy_chat_tool_gate(req: &mut ChatRequest) {
 
 impl Backend for ZenClient {
    const PROVIDER: Provider = Provider::Zen;
-   const RATE_LIMIT: Cooldown = Cooldown {
-      max: 3600,
-      base: 60,
-   };
-   const ON_AUTH: AuthPolicy = AuthPolicy::CoolKey(15 * 60);
    const ANONYMOUS: bool = true;
    type Request = Relay;
    type Response = reqwest::Response;
-
-   fn reason(body: String) -> String {
-      ChatError::reason(body)
-   }
 
    async fn send(
       &self,

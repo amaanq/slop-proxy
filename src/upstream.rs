@@ -28,8 +28,6 @@ pub enum SendError {
    Network(String),
 }
 
-/// Seconds until the caller may retry, from `retry-after` or the first of the
-/// backend-specific reset headers that parses.
 pub fn retry_after_secs(headers: &HeaderMap, reset_headers: &[&str]) -> Option<i64> {
    let get = |name: &str| headers.get(name)?.to_str().ok();
    if let Some(retry) = get("retry-after").and_then(|value| value.parse::<i64>().ok()) {
@@ -46,8 +44,7 @@ pub fn retry_after_secs(headers: &HeaderMap, reset_headers: &[&str]) -> Option<i
    Some(if secs > now { secs - now } else { secs }.max(1))
 }
 
-/// How one backend's statuses read. Every client used to spell this out
-/// by hand and they only ever differed in these three fields.
+/// How one backend's statuses read.
 #[derive(Clone, Copy)]
 pub struct Classify {
    /// Non-2xx statuses handed back as a response, for a relay that wants

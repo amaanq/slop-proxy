@@ -12,9 +12,12 @@ pub mod zen;
 use crate::clock;
 use crate::db::Db;
 use crate::provider::Provider;
+use crate::translate::chat::ChatError;
 use crate::upstream::SendError;
+use axum::body::Bytes;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap};
+use std::fmt::Display;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -69,6 +72,13 @@ pub enum AuthPolicy {
    CoolKey(i64),
 }
 
+/// A messages-API body relayed verbatim to `path`.
+#[derive(Clone)]
+pub struct Relay {
+   pub path: &'static str,
+   pub body: Bytes,
+}
+
 #[derive(Clone, Copy)]
 pub struct Route<'route> {
    pub session_key: &'route str,
@@ -90,8 +100,13 @@ impl<'route> Route<'route> {
 
 pub trait Backend: Send + Sync + 'static {
    const PROVIDER: Provider;
-   const RATE_LIMIT: Cooldown;
-   const ON_AUTH: AuthPolicy;
+   const RATE_LIMIT: Cooldown = Cooldown {
+      max: 3600,
+      base: 60,
+   };
+   /// A static key cannot be refreshed into a working one, so a rejected key
+   /// sits out rather than retrying in place.
+   const ON_AUTH: AuthPolicy = AuthPolicy::CoolKey(15 * 60);
    const ATTEMPTS: u32 = 3;
    /// Accounts come in two tiers and a token may prefer one, codex only.
    const TIERED: bool = false;
@@ -146,7 +161,7 @@ pub trait Backend: Send + Sync + 'static {
 
    /// Each dialect buries its one useful sentence at a different depth.
    fn reason(body: String) -> String {
-      body
+      ChatError::reason(body)
    }
 
    fn usage_from(&self, resp: &Self::Response) -> Option<AccountUsage> {
@@ -282,6 +297,25 @@ impl<B: Backend> Pool<B> {
 
    pub const fn backend(&self) -> &B {
       &self.backend
+   }
+
+   /// Every account on one provider sees the same catalog, so the first that
+   /// answers speaks for all of them.
+   pub async fn first_answer<T, E, Fetch>(&self, fetch: Fetch) -> Option<T>
+   where
+      E: Display,
+      Fetch: AsyncFn(&B, &str, &Slot) -> Result<T, E>,
+   {
+      for slot in self.slots.list().await {
+         let Ok(token) = self.slots.fresh_token(&slot, false).await else {
+            continue;
+         };
+         match fetch(&self.backend, &token, &slot).await {
+            Ok(answer) => return Some(answer),
+            Err(err) => tracing::debug!("models for {}: {err}", slot.display),
+         }
+      }
+      None
    }
 
    pub async fn len(&self) -> usize {

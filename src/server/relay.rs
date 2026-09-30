@@ -20,11 +20,7 @@ use crate::config::ModelsConfig;
 use crate::db::usage::UsageRecord;
 use crate::egress::egress_of;
 use crate::pool::anthropic::Relay as AnthropicRelay;
-use crate::pool::deepseek::Relay as DeepSeekRelay;
-use crate::pool::experiential::Relay as ExperientialRelay;
-use crate::pool::glm::Relay as GlmRelay;
-use crate::pool::zen::Relay as ZenRelay;
-use crate::pool::{PoolError, Route, Served, UsageWindow};
+use crate::pool::{PoolError, Relay, Route, Served, UsageWindow};
 use crate::provider::Provider;
 use crate::translate::UsageCapture;
 use crate::translate::anthropic_req::AnthropicRequest;
@@ -380,7 +376,7 @@ async fn dispatch(
             .glm
             .execute(
                route,
-               GlmRelay {
+               Relay {
                   path: "/v1/messages",
                   body,
                },
@@ -393,7 +389,7 @@ async fn dispatch(
             .deepseek
             .execute(
                route,
-               DeepSeekRelay {
+               Relay {
                   path: "/v1/messages",
                   body,
                },
@@ -406,7 +402,7 @@ async fn dispatch(
             .experiential
             .execute(
                route,
-               ExperientialRelay {
+               Relay {
                   path: "/v1/messages",
                   body,
                },
@@ -414,7 +410,7 @@ async fn dispatch(
             .await
       },
       Provider::Zen => {
-         let relay = ZenRelay {
+         let relay = Relay {
             path: "/messages",
             body,
          };

@@ -124,15 +124,6 @@ pub fn body_at(body: &[u8], error: &serde_json::Error) -> String {
    String::from_utf8_lossy(&body[start..end]).into_owned()
 }
 
-pub const fn pool_error_status(err: &PoolError) -> i64 {
-   match *err {
-      PoolError::NoAccounts(_) => 503,
-      PoolError::AllCoolingDown { .. } => 429,
-      PoolError::BadRequest { .. } => 400,
-      PoolError::Upstream(_) => 502,
-   }
-}
-
 pub const fn pool_error_kind(err: &PoolError) -> &'static str {
    match *err {
       PoolError::NoAccounts(_) => "pool_no_accounts",

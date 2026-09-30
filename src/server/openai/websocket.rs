@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, VecDeque};
+use std::fmt::Display;
 use std::time::{Duration, Instant};
 
 use axum::Extension;
@@ -7,30 +8,28 @@ use axum::body::to_bytes;
 use axum::extract::ws::rejection::WebSocketUpgradeRejection;
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{OriginalUri, State};
-use axum::http::{HeaderMap, HeaderValue};
+use axum::http::HeaderMap;
 use axum::response::Response;
-use futures_util::{SinkExt as _, StreamExt as _};
+use futures_util::{Sink, SinkExt as _, StreamExt as _};
 use serde::Deserialize as _;
 use serde_json::{Value, json};
-use tokio::time::{MissedTickBehavior, interval, sleep, timeout};
+use tokio::time::{MissedTickBehavior, interval, timeout};
 use tokio_tungstenite::tungstenite::Message as UpstreamMessage;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame as UpstreamCloseFrame;
 
 use crate::codex::turn_state::TurnState;
 use crate::codex::types::{ResponsesEvent, ResponsesRequest};
 use crate::codex::websocket::{Fault, MAX_MESSAGE_SIZE, Socket, response_error as upstream_error};
-use crate::db::usage::AdmissionError;
 use crate::pool::{Route, Served};
 use crate::provider::Provider;
-use crate::server::auth::{AuthInfo, bearer_token};
-use crate::server::error::{
-   blocked_model, error_response, out_of_scope, pool_error_response, translation_error,
-};
+use crate::server::auth::{AuthInfo, admit_token, bearer_token};
+use crate::server::error::{error_response, pool_error_response, translation_error};
 use crate::server::facts::RequestFacts;
 use crate::server::openai::{
-   DIALECT, PassthroughRequest, prepare_request, responses_upgrade_required,
+   DIALECT, PassthroughRequest, passthrough_record, prepare_request, responses_upgrade_required,
    restore_reserved_namespace,
 };
+use crate::server::relay::header_str;
 use crate::server::{AppState, LogGuard, pipeline};
 use crate::translate::{UsageCapture, model_map};
 
@@ -44,9 +43,7 @@ pub async fn responses(
    headers: HeaderMap,
    upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Response {
-   let requested = headers
-      .get("x-codex-routing-hint")
-      .and_then(|value| value.to_str().ok())
+   let requested = header_str(&headers, "x-codex-routing-hint")
       .and_then(|hint| {
          hint
             .split(',')
@@ -54,15 +51,17 @@ pub async fn responses(
       })
       .unwrap_or(&state.cfg.models.default);
    let resolved = model_map::resolve(&state.cfg.models, requested);
-   if state.cfg.models.blocked(&resolved.model) {
-      return blocked_model(DIALECT, &resolved.model);
-   }
-   let provider = state.cfg.models.route(&resolved.model);
-   if !auth.may_use(provider) {
-      return out_of_scope(DIALECT, provider);
-   }
-   if provider != Provider::OpenAi {
-      return responses_upgrade_required();
+   match pipeline::admit(
+      &state,
+      &auth,
+      DIALECT,
+      "responses",
+      requested,
+      &resolved.model,
+   ) {
+      Ok(Provider::OpenAi) => {},
+      Ok(_) => return responses_upgrade_required(),
+      Err(response) => return *response,
    }
    let upgrade = match upgrade {
       Ok(upgrade) => upgrade,
@@ -76,15 +75,7 @@ pub async fn responses(
       .find_map(|name| headers.get(name)?.to_str().ok())
       .unwrap_or(&auth.user)
       .to_owned();
-   let route = Route {
-      session_key: &session_key,
-      model: &resolved.model,
-      service_tier: None,
-      user: &auth.user,
-      pinned_account: auth.limits.pinned_account,
-      prefer_trusted: auth.limits.prefer_trusted,
-      reserved_only: auth.limits.reserved_only,
-   };
+   let route = auth.route(&session_key, &resolved.model);
    let Served {
       account_id,
       response: upstream,
@@ -159,25 +150,18 @@ struct Relay {
 }
 
 impl Relay {
-   async fn authenticate(&self) -> Result<AuthInfo, Response> {
-      let token = self
-         .state
-         .db
-         .auth_token(&self.token)
-         .await
-         .map_err(|_| error_response(DIALECT, 500, "api_error", "token lookup failed"))?
-         .ok_or_else(|| {
-            error_response(
-               DIALECT,
-               401,
-               "authentication_error",
-               "invalid or revoked API token",
-            )
-         })?;
-      if !token.limits.may_use(Provider::OpenAi) {
-         return Err(out_of_scope(DIALECT, Provider::OpenAi));
+   async fn request(&mut self, text: &str, upstream: &mut Socket) -> Result<String, Response> {
+      let value: Value = serde_json::from_str(text)
+         .map_err(|err| translation_error(DIALECT, &format!("invalid request {err}")))?;
+      if value.get("type").and_then(Value::as_str) != Some("response.create") {
+         return Ok(text.to_owned());
       }
-      if token
+      let started = Instant::now();
+      let stream = stream_id(&value).to_owned();
+      let req: PassthroughRequest = serde_json::from_value(value)
+         .map_err(|err| translation_error(DIALECT, &format!("invalid request {err}")))?;
+      let (auth, _) = admit_token(&self.state, DIALECT, &self.token).await?;
+      if auth
          .limits
          .pinned_account
          .is_some_and(|id| Some(id) != self.account_id)
@@ -189,49 +173,6 @@ impl Relay {
             "reconnect to use the pinned account",
          ));
       }
-      let admission = self
-         .state
-         .db
-         .admit_token(token.id, &token.limits)
-         .await
-         .map_err(|_| error_response(DIALECT, 500, "api_error", "token metering failed"))?
-         .map_err(|err| {
-            let (message, retry_after) = match err {
-               AdmissionError::RequestLimit { retry_after } => {
-                  ("API token request limit exceeded", retry_after)
-               },
-               AdmissionError::TokenLimit { retry_after } => {
-                  ("API token token limit exceeded", retry_after)
-               },
-            };
-            let mut response = error_response(DIALECT, 429, "rate_limit_error", message);
-            response
-               .headers_mut()
-               .insert("retry-after", HeaderValue::from(retry_after));
-            response
-         })?;
-      if admission.slowdown_ms > 0 {
-         sleep(Duration::from_millis(admission.slowdown_ms as u64)).await;
-      }
-      Ok(AuthInfo {
-         token_id: token.id,
-         user: token.user,
-         meter_id: Some(admission.meter_id),
-         limits: token.limits,
-      })
-   }
-
-   async fn request(&mut self, text: &str, upstream: &mut Socket) -> Result<String, Response> {
-      let value: Value = serde_json::from_str(text)
-         .map_err(|err| translation_error(DIALECT, &format!("invalid request {err}")))?;
-      if value.get("type").and_then(Value::as_str) != Some("response.create") {
-         return Ok(text.to_owned());
-      }
-      let started = Instant::now();
-      let stream = stream_id(&value).to_owned();
-      let req: PassthroughRequest = serde_json::from_value(value)
-         .map_err(|err| translation_error(DIALECT, &format!("invalid request {err}")))?;
-      let auth = self.authenticate().await?;
       let (mut req, requested_model, provider) =
          prepare_request(&self.state, &auth, req).map_err(|response| *response)?;
       if provider != Provider::OpenAi {
@@ -240,17 +181,13 @@ impl Relay {
             "this connection only serves OpenAI models",
          ));
       }
+      let model = req
+         .model
+         .as_deref()
+         .unwrap_or(&self.state.cfg.models.default);
       let route = Route {
-         session_key: &self.session_key,
-         model: req
-            .model
-            .as_deref()
-            .unwrap_or(&self.state.cfg.models.default),
          service_tier: req.service_tier.as_deref(),
-         user: &auth.user,
-         pinned_account: auth.limits.pinned_account,
-         prefer_trusted: auth.limits.prefer_trusted,
-         reserved_only: auth.limits.reserved_only,
+         ..auth.route(&self.session_key, model)
       };
       let serves = self
          .state
@@ -278,7 +215,7 @@ impl Relay {
             .websocket(route, self.headers.clone())
             .await
             .map_err(|error| pool_error_response(DIALECT, &self.state.cfg.models, error))?;
-         let _ = send_upstream(upstream, UpstreamMessage::Close(None)).await;
+         let _ = send(upstream, UpstreamMessage::Close(None), "upstream").await;
          *upstream = redialed.response.socket;
          self.account_id = redialed.account_id;
          self.attempts = redialed.attempts;
@@ -298,24 +235,16 @@ impl Relay {
          .ok()
          .map(|typed| RequestFacts::from_responses(&typed, &self.headers))
          .unwrap_or_default();
-      let mut record = pipeline::record(
+      let mut record = passthrough_record(
          &auth,
-         "responses",
          provider,
          requested_model,
-         req.model.unwrap_or_default(),
+         &req,
          facts,
+         &self.session_key,
       );
       record.account_id = self.account_id;
       record.request_bytes = text.len() as i64;
-      record.session_key = req
-         .prompt_cache_key
-         .unwrap_or_else(|| self.session_key.clone());
-      record.effort = req
-         .reasoning
-         .and_then(|reasoning| reasoning.effort)
-         .unwrap_or_default();
-      record.service_tier = req.service_tier.unwrap_or_default();
       record.attempts = i64::from(self.attempts);
       record.turn_state_blocks = self.turn_state_blocks;
       self.attempts = u32::from(self.account_id.is_some());
@@ -355,7 +284,16 @@ impl Relay {
          .unwrap_or_default();
       let error = upstream_error(&value);
       match error.as_ref().map(|error| error.fault) {
-         Some(Fault::Exhausted) => self.exhaust_upstream().await,
+         // Bypasses the failure counter: spent is not flaky.
+         Some(Fault::Exhausted) => {
+            self.upstream_failed = true;
+            self
+               .state
+               .pools
+               .codex
+               .websocket_exhausted(self.account_id)
+               .await;
+         },
          Some(Fault::Transient) => {
             let status = error.as_ref().map_or(0, |error| error.status);
             self
@@ -412,17 +350,6 @@ impl Relay {
       text
    }
 
-   /// Bypasses the failure counter: spent is not flaky.
-   async fn exhaust_upstream(&mut self) {
-      self.upstream_failed = true;
-      self
-         .state
-         .pools
-         .codex
-         .websocket_exhausted(self.account_id)
-         .await;
-   }
-
    async fn fail_upstream(&mut self, why: &str) {
       if !self.upstream_failed {
          self.upstream_failed = true;
@@ -457,11 +384,11 @@ impl Relay {
       loop {
          tokio::select! {
             _ = keepalive.tick() => {
-               if !send_upstream(&mut upstream, UpstreamMessage::Ping(Bytes::default())).await {
+               if !send(&mut upstream, UpstreamMessage::Ping(Bytes::default()), "upstream").await {
                   self.upstream_closed().await;
                   break;
                }
-               if !send_client(&mut client, Message::Ping(Bytes::default())).await {
+               if !send(&mut client, Message::Ping(Bytes::default()), "client").await {
                   break;
                }
             },
@@ -483,15 +410,16 @@ impl Relay {
                      Err(response) => {
                         let lane = serde_json::from_str::<Value>(&text).ok()
                            .and_then(|value| value.get("stream_id").cloned());
-                        if !send_client(&mut client, response_error(response, lane).await).await { break; }
+                        let error = response_error(response, lane).await;
+                        if !send(&mut client, error, "client").await { break; }
                         continue;
                      },
                   },
                   Message::Binary(_) => {
-                     let _ = send_client(&mut client, Message::Close(Some(CloseFrame {
+                     let _ = send(&mut client, Message::Close(Some(CloseFrame {
                         code: 1003, reason: "Responses requests must be text messages".into(),
-                     }))).await;
-                     let _ = send_upstream(&mut upstream, UpstreamMessage::Close(None)).await;
+                     })), "client").await;
+                     let _ = send(&mut upstream, UpstreamMessage::Close(None), "upstream").await;
                      return;
                   },
                   Message::Ping(_) | Message::Pong(_) => continue,
@@ -506,12 +434,12 @@ impl Relay {
                      });
                      let _ = tokio::join!(
                         timeout(SEND_TIMEOUT, client.flush()),
-                        send_upstream(&mut upstream, UpstreamMessage::Close(frame)),
+                        send(&mut upstream, UpstreamMessage::Close(frame), "upstream"),
                      );
                      return;
                   },
                };
-               if !send_upstream(&mut upstream, message).await {
+               if !send(&mut upstream, message, "upstream").await {
                   self.upstream_closed().await;
                   break;
                }
@@ -549,24 +477,25 @@ impl Relay {
                      });
                      let _ = tokio::join!(
                         timeout(SEND_TIMEOUT, upstream.flush()),
-                        send_client(&mut client, Message::Close(frame)),
+                        send(&mut client, Message::Close(frame), "client"),
                      );
                      return;
                   },
                };
-               if !send_client(&mut client, message).await { break; }
+               if !send(&mut client, message, "client").await { break; }
             },
          }
       }
-      let _ = send_client(
+      let _ = send(
          &mut client,
          Message::Close(Some(CloseFrame {
             code: 1011,
             reason: "WebSocket connection ended".into(),
          })),
+         "client",
       )
       .await;
-      let _ = send_upstream(&mut upstream, UpstreamMessage::Close(None)).await;
+      let _ = send(&mut upstream, UpstreamMessage::Close(None), "upstream").await;
    }
 }
 
@@ -577,29 +506,19 @@ fn stream_id(value: &Value) -> &str {
       .unwrap_or_default()
 }
 
-async fn send_client(client: &mut WebSocket, message: Message) -> bool {
-   match timeout(SEND_TIMEOUT, client.send(message)).await {
+async fn send<S, M>(sink: &mut S, message: M, side: &str) -> bool
+where
+   S: Sink<M> + Unpin,
+   S::Error: Display,
+{
+   match timeout(SEND_TIMEOUT, sink.send(message)).await {
       Ok(Ok(())) => true,
       Ok(Err(error)) => {
-         tracing::warn!(%error, "WebSocket client send failed");
+         tracing::warn!(%error, "WebSocket {side} send failed");
          false
       },
       Err(_) => {
-         tracing::warn!("WebSocket client send timed out");
-         false
-      },
-   }
-}
-
-async fn send_upstream(upstream: &mut Socket, message: UpstreamMessage) -> bool {
-   match timeout(SEND_TIMEOUT, upstream.send(message)).await {
-      Ok(Ok(())) => true,
-      Ok(Err(error)) => {
-         tracing::warn!(%error, "WebSocket upstream send failed");
-         false
-      },
-      Err(_) => {
-         tracing::warn!("WebSocket upstream send timed out");
+         tracing::warn!("WebSocket {side} send timed out");
          false
       },
    }

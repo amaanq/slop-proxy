@@ -1,22 +1,15 @@
-use axum::body::{Body, Bytes};
-use axum::http::response::Builder;
-use axum::response::Response;
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use axum::body::Bytes;
+use serde::Serialize;
 
-use crate::db::usage::UsageRecord;
 use crate::gemini::sse::Frames;
 use crate::provider::Provider;
-use crate::server::error::{Dialect, error_response};
-use crate::server::pipeline::{apply_snapshot, relayed};
-use crate::server::{AppState, LogGuard, log_usage};
+use crate::server::error::Dialect;
+use crate::server::pipeline::Scan;
 use crate::translate::UsageCapture;
 use crate::translate::chat::{
    ChatChunk, ChatEnvelope, ChatError, ChatErrorBody, ChatRequest, ErrorCode, FinishReason,
    StreamOptions,
 };
-
-const DIALECT: Dialect = Dialect::OpenAi;
 
 pub const fn force_usage(body: &mut ChatRequest, streaming: bool) {
    // Without this the terminal chunk carries no usage and the request bills
@@ -28,114 +21,35 @@ pub const fn force_usage(body: &mut ChatRequest, streaming: bool) {
    }
 }
 
-/// Meters usage out of a finished chat completion and hands it back as is.
-pub fn relay_chat_body(
-   state: &AppState,
-   mut record: UsageRecord,
-   builder: Builder,
-   bytes: Bytes,
-   started: Instant,
-) -> Response {
-   if let Ok(env) = serde_json::from_slice::<ChatEnvelope>(&bytes)
-      && let Some(usage) = env.usage
-   {
-      let capture = UsageCapture::default();
-      capture.record(&usage.into());
-      apply_snapshot(&mut record, &capture.snapshot(), started);
-   }
-   record.duration_ms = Some(started.elapsed().as_millis() as i64);
-   record.response_bytes = bytes.len() as i64;
-   log_usage(state, record);
-   builder
-      .body(Body::from(bytes))
-      .unwrap_or_else(|err| error_response(DIALECT, 502, "api_error", &err.to_string()))
-}
-
-/// Relays a chat-completions stream byte for byte and meters usage out of its
-/// frames. Shared with the Copilot handler, which speaks the same dialect.
-pub fn relay_chat_stream(
-   state: AppState,
-   record: UsageRecord,
-   builder: Builder,
-   resp: reqwest::Response,
-   started: Instant,
-   provider: Provider,
-) -> Response {
-   let capture = UsageCapture::default();
-   let scan = Arc::new(Mutex::new(ChatUsageScan::new(capture.clone(), provider)));
-   let each = {
-      let scan = Arc::clone(&scan);
-      move |bytes: Bytes| {
-         scan.lock().unwrap().feed(&bytes);
-         bytes
-      }
-   };
-   relayed(
-      builder,
-      resp,
-      LogGuard::new(state, capture.clone(), record, started),
-      capture,
-      DIALECT,
-      each,
-      move || {
-         let cutoff = scan.lock().unwrap().frames.cutoff();
-         let frame = match cutoff {
-            Some(error) => {
-               let err = ChatError {
-                  error: ChatErrorBody {
-                     message: error.message.unwrap_or_default(),
-                     kind: Some("server_error".into()),
-                     code: error.status.map(ErrorCode::Text),
-                  },
-               };
-               format!(
-                  "data: {}\n\ndata: [DONE]\n\n",
-                  serde_json::to_string(&err).unwrap_or_default()
-               )
-            },
-            None => String::new(),
-         };
-         Bytes::from(frame)
-      },
-   )
-}
-
-/// A non-2xx carries no SSE frames, so the usage scanner would log a phantom
-/// `client_disconnect` and drop the body.
-pub async fn upstream_rejected(
-   state: &AppState,
-   mut record: UsageRecord,
-   builder: Builder,
-   resp: reqwest::Response,
-   started: Instant,
-   provider: Provider,
-) -> Response {
-   let bytes = resp.bytes().await.unwrap_or_default();
-   tracing::warn!(
-       user = %record.user,
-       model = %record.requested_model,
-       dialect = record.dialect,
-       status = record.status,
-       body = %String::from_utf8_lossy(&bytes).chars().take(2000).collect::<String>(),
-       "{provider} rejected the request"
-   );
-   record.error_kind = Some("upstream_rejected".into());
-   record.response_bytes = bytes.len() as i64;
-   record.duration_ms = Some(started.elapsed().as_millis() as i64);
-   log_usage(state, record);
-   builder
-      .body(Body::from(bytes))
-      .unwrap_or_else(|err| error_response(DIALECT, 502, "api_error", &err.to_string()))
-}
-
 /// Pins a conversation to one account.
-pub fn session_key(user: &str, body: &ChatRequest) -> String {
+pub fn first_turn_key<T>(user: &str, first: Option<&T>) -> String
+where
+   T: Serialize,
+{
    let mut hasher = hmac_sha256::Hash::new();
    hasher.update(user.as_bytes());
-   if let Some(first) = body.messages.first() {
+   if let Some(first) = first {
       hasher.update(serde_json::to_string(first).unwrap_or_default().as_bytes());
    }
    data_encoding::HEXLOWER.encode(&hasher.finalize())
+}
+
+pub fn note_cutoff(frames: &Frames, cut: &mut bool, capture: &UsageCapture, provider: Provider) {
+   if *cut {
+      return;
+   }
+   let Some(error) = frames.cutoff() else {
+      return;
+   };
+   *cut = true;
+   let status = error.status.clone().unwrap_or_else(|| "cutoff".into());
+   tracing::warn!(
+       code = error.code.unwrap_or(0),
+       status = %status,
+       "{provider} gave up mid-stream after its 200: {}",
+       error.message.as_deref().unwrap_or("")
+   );
+   capture.note_cutoff(&status);
 }
 
 /// Reads usage out of the `data:` frames of a chat stream. Only the terminal
@@ -197,20 +111,43 @@ impl ChatUsageScan {
             self.capture.note_cutoff(&code);
          }
       }
-      if !self.cut
-         && let Some(error) = self.frames.cutoff()
+      note_cutoff(&self.frames, &mut self.cut, &self.capture, self.provider);
+   }
+}
+
+impl Scan for ChatUsageScan {
+   const DIALECT: Dialect = Dialect::OpenAi;
+   const REJECTED: &'static str = "upstream_rejected";
+
+   fn chunk(&mut self, bytes: Bytes) -> Bytes {
+      self.feed(&bytes);
+      bytes
+   }
+
+   fn body(&mut self, bytes: Bytes) -> Result<Bytes, String> {
+      if let Ok(env) = serde_json::from_slice::<ChatEnvelope>(&bytes)
+         && let Some(usage) = env.usage
       {
-         self.cut = true;
-         let status = error.status.clone().unwrap_or_else(|| "cutoff".into());
-         tracing::warn!(
-             code = error.code.unwrap_or(0),
-             status = %status,
-             "{} gave up mid-stream after its 200: {}",
-             self.provider,
-             error.message.as_deref().unwrap_or("")
-         );
-         self.capture.note_cutoff(&status);
+         self.capture.record(&usage.into());
       }
+      Ok(bytes)
+   }
+
+   fn tail(&mut self) -> Bytes {
+      let Some(error) = self.frames.cutoff() else {
+         return Bytes::new();
+      };
+      let err = ChatError {
+         error: ChatErrorBody {
+            message: error.message.unwrap_or_default(),
+            kind: Some("server_error".into()),
+            code: error.status.map(ErrorCode::Text),
+         },
+      };
+      Bytes::from(format!(
+         "data: {}\n\ndata: [DONE]\n\n",
+         serde_json::to_string(&err).unwrap_or_default()
+      ))
    }
 }
 

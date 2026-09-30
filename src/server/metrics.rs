@@ -9,7 +9,7 @@ use axum::response::Response;
 
 use crate::clock;
 use crate::db::usage::{
-   ErrorRow, InsightRow, MetricsRow, SessionRow, ToolRow, USAGE_DIMENSIONS, cache_hit_ratio,
+   InsightRow, MetricsRow, SessionRow, ToolRow, USAGE_DIMENSIONS, cache_hit_ratio,
 };
 use crate::pool::{AccountSnapshot, UsageWindow};
 use crate::provider::Provider;
@@ -18,30 +18,72 @@ use crate::server::AppState;
 pub async fn metrics(State(state): State<AppState>) -> Response {
    let accounts = state.pools.snapshots().await;
 
-   let mut out = String::with_capacity(4096);
-   render_accounts(&mut out, &accounts, clock::unix_now());
-   match state.db.usage_metrics().await {
-      Ok(rows) => render_usage(&mut out, &rows),
-      Err(err) => tracing::error!("reading usage metrics: {err}"),
-   }
-   match state.db.error_metrics().await {
-      Ok(rows) => render_errors(&mut out, &rows),
-      Err(err) => tracing::error!("reading error metrics: {err}"),
-   }
-   match state.db.tool_metrics().await {
-      Ok(rows) => render_tools(&mut out, &rows),
-      Err(err) => tracing::error!("reading tool metrics: {err}"),
-   }
-   match state.db.insight_metrics().await {
-      Ok(rows) => render_insights(&mut out, &rows),
-      Err(err) => tracing::error!("reading insight metrics: {err}"),
-   }
-   match state.db.session_metrics().await {
-      Ok(rows) => render_sessions(&mut out, &rows),
-      Err(err) => tracing::error!("reading session metrics: {err}"),
-   }
+   let mut text = String::with_capacity(4096);
+   let buf = &mut text;
+   let db = &state.db;
+   render_accounts(buf, &accounts, clock::unix_now());
+   emit(buf, "usage", db.usage_metrics().await, render_usage);
+   emit(buf, "error", db.error_metrics().await, |out, rows| {
+      counter(out, "slop_errors_total", "Failed requests by cause");
+      for row in rows {
+         let labels = [
+            ("user", row.user.as_str()),
+            ("provider", &row.provider),
+            ("kind", &row.kind),
+         ];
+         sample(out, "slop_errors_total", &labels, row.count);
+      }
+   });
+   emit(buf, "tool", db.tool_metrics().await, |out, rows| {
+      families(out, "counter", &TOOL_COUNTERS, rows, |row| {
+         [("user", row.user.as_str()), ("tool", &row.tool)]
+      });
+   });
+   emit(buf, "insight", db.insight_metrics().await, |out, rows| {
+      families(out, "counter", &INSIGHTS, rows, |row| {
+         [
+            ("user", row.user.as_str()),
+            ("account", &row.account),
+            ("stop_reason", &row.stop_reason),
+         ]
+      });
+   });
+   emit(buf, "session", db.session_metrics().await, |out, rows| {
+      families(out, "gauge", &SESSION_GAUGES, rows, |row| {
+         [("user", row.user.as_str())]
+      });
+   });
 
-   ([(CONTENT_TYPE, "text/plain; version=0.0.4")], out).into_response()
+   ([(CONTENT_TYPE, "text/plain; version=0.0.4")], text).into_response()
+}
+
+fn emit<T, F>(out: &mut String, what: &str, rows: eyre::Result<Vec<T>>, render: F)
+where
+   F: FnOnce(&mut String, &[T]),
+{
+   match rows {
+      Ok(rows) => render(out, &rows),
+      Err(err) => tracing::error!("reading {what} metrics: {err}"),
+   }
+}
+
+type Column<R, V> = (&'static str, &'static str, fn(&R) -> V);
+
+fn families<R, V, const N: usize>(
+   out: &mut String,
+   kind: &str,
+   table: &[Column<R, V>],
+   rows: &[R],
+   labels: fn(&R) -> [(&'static str, &str); N],
+) where
+   V: Display,
+{
+   for &(name, help, get) in table {
+      family(out, name, kind, help);
+      for row in rows {
+         sample(out, name, &labels(row), get(row));
+      }
+   }
 }
 
 fn render_accounts(out: &mut String, accounts: &[AccountSnapshot], now: i64) {
@@ -131,12 +173,7 @@ fn plan_capacity(snap: &AccountSnapshot) -> f64 {
 }
 
 fn render_usage(out: &mut String, rows: &[MetricsRow]) {
-   for (name, help, get) in USAGE_COUNTERS {
-      counter(out, name, help);
-      for row in rows {
-         sample(out, name, &usage_labels(row), get(row));
-      }
-   }
+   families(out, "counter", &USAGE_COUNTERS, rows, usage_labels);
    counter(out, "slop_tokens_total", "Tokens by kind");
    for (kind, get) in TOKEN_KINDS {
       for row in rows {
@@ -167,63 +204,6 @@ fn render_usage(out: &mut String, rows: &[MetricsRow]) {
 
 fn usage_labels(row: &MetricsRow) -> [(&'static str, &str); USAGE_DIMENSIONS.len()] {
    from_fn(|index| (USAGE_DIMENSIONS[index].0, row.dimensions[index].as_str()))
-}
-
-fn render_errors(out: &mut String, rows: &[ErrorRow]) {
-   counter(out, "slop_errors_total", "Failed requests by cause");
-   for row in rows {
-      let labels = [
-         ("user", row.user.as_str()),
-         ("provider", &row.provider),
-         ("kind", &row.kind),
-      ];
-      sample(out, "slop_errors_total", &labels, row.count);
-   }
-}
-
-fn render_tools(out: &mut String, rows: &[ToolRow]) {
-   counter(
-      out,
-      "slop_tool_turns_total",
-      "Turns that used each tool. Names only, never their arguments. A turn \
-         calling one tool repeatedly counts once",
-   );
-   for row in rows {
-      let labels = [("user", row.user.as_str()), ("tool", &row.tool)];
-      sample(out, "slop_tool_turns_total", &labels, row.count);
-   }
-   counter(
-      out,
-      "slop_tool_errors_total",
-      "Failed turns that used each tool. Names only, never their arguments or results",
-   );
-   for row in rows {
-      let labels = [("user", row.user.as_str()), ("tool", &row.tool)];
-      sample(out, "slop_tool_errors_total", &labels, row.errors);
-   }
-}
-
-fn render_insights(out: &mut String, rows: &[InsightRow]) {
-   for (name, help, get) in INSIGHTS {
-      counter(out, name, help);
-      for row in rows {
-         let labels = [
-            ("user", row.user.as_str()),
-            ("account", &row.account),
-            ("stop_reason", &row.stop_reason),
-         ];
-         sample(out, name, &labels, get(row));
-      }
-   }
-}
-
-fn render_sessions(out: &mut String, rows: &[SessionRow]) {
-   for (name, help, get) in SESSION_GAUGES {
-      gauge(out, name, help);
-      for row in rows {
-         sample(out, name, &[("user", &row.user)], get(row));
-      }
-   }
 }
 
 type AccountGauge = fn(&AccountSnapshot, i64) -> Option<f64>;
@@ -305,6 +285,21 @@ const USAGE_COUNTERS: [(&str, &str, UsageCounter); 5] = [
       "What the same traffic would have cost at the model's list rate, so a \
          free tier is worth something rather than reading as zero spend",
       |row| row.list_cost_usd,
+   ),
+];
+
+type ToolCounter = fn(&ToolRow) -> i64;
+const TOOL_COUNTERS: [(&str, &str, ToolCounter); 2] = [
+   (
+      "slop_tool_turns_total",
+      "Turns that used each tool. Names only, never their arguments. A turn \
+         calling one tool repeatedly counts once",
+      |row| row.count,
+   ),
+   (
+      "slop_tool_errors_total",
+      "Failed turns that used each tool. Names only, never their arguments or results",
+      |row| row.errors,
    ),
 ];
 

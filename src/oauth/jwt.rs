@@ -7,29 +7,24 @@ pub struct IdTokenInfo {
    pub plan_type: Option<String>,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize)]
 struct Claims {
-   #[serde(default)]
    exp: Option<i64>,
-   #[serde(default)]
    email: Option<String>,
-   #[serde(default, rename = "https://api.openai.com/auth")]
+   #[serde(rename = "https://api.openai.com/auth")]
    auth: Option<AuthClaims>,
-   #[serde(default, rename = "https://api.openai.com/profile")]
+   #[serde(rename = "https://api.openai.com/profile")]
    profile: Option<ProfileClaims>,
 }
 
 #[derive(Deserialize, Default)]
 struct AuthClaims {
-   #[serde(default)]
    chatgpt_account_id: Option<String>,
-   #[serde(default)]
    chatgpt_plan_type: Option<String>,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize)]
 struct ProfileClaims {
-   #[serde(default)]
    email: Option<String>,
 }
 
@@ -50,9 +45,7 @@ pub fn parse_id_token(token: &str) -> Result<IdTokenInfo> {
    let parsed = claims(token)?;
    let auth = parsed.auth.unwrap_or_default();
    Ok(IdTokenInfo {
-      email: parsed
-         .email
-         .or_else(|| parsed.profile.unwrap_or_default().email),
+      email: parsed.email.or_else(|| parsed.profile?.email),
       chatgpt_account_id: auth.chatgpt_account_id,
       plan_type: auth.chatgpt_plan_type,
    })

@@ -2,7 +2,7 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use crate::clock;
-use crate::oauth::{CLIENT_ID, TOKEN_URL, TokenSet, http, jwt};
+use crate::oauth::{TokenSet, http, jwt};
 
 #[derive(Debug, Error)]
 pub enum RefreshError {
@@ -21,10 +21,10 @@ const TERMINAL_CODES: &[&str] = &[
 ];
 
 #[derive(serde::Serialize)]
-pub struct RefreshRequest<'a> {
-   pub client_id: &'a str,
-   pub grant_type: &'a str,
-   pub refresh_token: &'a str,
+struct RefreshRequest<'a> {
+   client_id: &'a str,
+   grant_type: &'a str,
+   refresh_token: &'a str,
 }
 
 #[derive(Deserialize)]
@@ -60,56 +60,40 @@ impl TokenResponse {
    }
 }
 
-pub async fn post_token<B>(url: &str, body: &B) -> Result<(u16, String), RefreshError>
-where
-   B: serde::Serialize + Sync,
-{
+/// The `OpenAI` endpoint rotates refresh tokens. Anthropic does not always, so
+/// it passes the one it holds as `prior` to carry over.
+pub async fn refresh_at(
+   url: &str,
+   client_id: &str,
+   refresh_token: &str,
+   prior: Option<&str>,
+) -> Result<TokenSet, RefreshError> {
    let resp = http()
       .post(url)
-      .json(body)
+      .json(&RefreshRequest {
+         client_id,
+         grant_type: "refresh_token",
+         refresh_token,
+      })
       .send()
       .await
       .map_err(|err| RefreshError::Transient(err.to_string()))?;
    let status = resp.status().as_u16();
-   let text = resp
+   let body = resp
       .text()
       .await
       .map_err(|err| RefreshError::Transient(err.to_string()))?;
-   Ok((status, text))
-}
-
-pub fn terminal(status: u16, body: &str) -> Option<String> {
-   (status == 403 || TERMINAL_CODES.iter().any(|code| body.contains(code)))
-      .then(|| format!("{status}: {body}"))
-}
-
-pub fn token_set(
-   status: u16,
-   body: &str,
-   prior_refresh: Option<&str>,
-) -> Result<TokenSet, RefreshError> {
    if !(200..300).contains(&status) {
-      return Err(terminal(status, body).map_or_else(
-         || RefreshError::Transient(format!("{status}: {body}")),
-         RefreshError::Terminal,
-      ));
+      let detail = format!("{status}: {body}");
+      let dead = status == 403 || TERMINAL_CODES.iter().any(|code| body.contains(code));
+      return Err(if dead {
+         RefreshError::Terminal(detail)
+      } else {
+         RefreshError::Transient(detail)
+      });
    }
-   serde_json::from_str::<TokenResponse>(body)
+   serde_json::from_str::<TokenResponse>(&body)
       .map_err(|err| RefreshError::Transient(format!("bad token response: {err}")))?
-      .into_token_set(prior_refresh)
+      .into_token_set(prior)
       .ok_or_else(|| RefreshError::Transient("token response missing refresh_token".into()))
-}
-
-/// Note: auth.openai.com rotates refresh tokens.
-pub async fn refresh(refresh_token: &str) -> Result<TokenSet, RefreshError> {
-   let (status, body) = post_token(
-      TOKEN_URL,
-      &RefreshRequest {
-         client_id: CLIENT_ID,
-         grant_type: "refresh_token",
-         refresh_token,
-      },
-   )
-   .await?;
-   token_set(status, &body, None)
 }

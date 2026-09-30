@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
 
 use crate::clock;
-use crate::oauth::http;
+use crate::oauth::{http, ok_json};
 
 const CLI_OAUTH: &str = "https://zcode.z.ai/api/v1/oauth/cli";
 const BIZ_HOST: &str = "https://api.z.ai";
@@ -251,15 +251,7 @@ async fn envelope<T>(resp: Response, what: &str) -> Result<T>
 where
    T: DeserializeOwned,
 {
-   let status = resp.status();
-   if !status.is_success() {
-      let body = resp.text().await.unwrap_or_default();
-      bail!("{what} failed: {status}: {body}");
-   }
-   let envelope: Envelope<T> = resp
-      .json()
-      .await
-      .wrap_err_with(|| format!("parsing {what} response"))?;
+   let envelope: Envelope<T> = ok_json(resp, what).await?;
    let ok = match envelope.code {
       None => true,
       Some(Code::Number(code)) => matches!(code, 0 | 200),

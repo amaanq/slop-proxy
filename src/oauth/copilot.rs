@@ -7,7 +7,7 @@ use tokio::time::sleep;
 use crate::copilot::{USER_AGENT, editor};
 use crate::db::Db;
 use crate::oauth::refresh::RefreshError;
-use crate::oauth::{TokenSet, finish_login, http};
+use crate::oauth::{TokenSet, finish_login, http, ok_json};
 use crate::provider::Provider;
 
 const CLIENT_ID: &str = "Iv1.b507a08c87ecfe98";
@@ -136,13 +136,9 @@ pub async fn github_login(github_token: &str) -> Result<String> {
       .send()
       .await
       .wrap_err("reading github user")?;
-   if !resp.status().is_success() {
-      let status = resp.status();
-      let text = resp.text().await.unwrap_or_default();
-      bail!("reading github user: {status}: {text}");
-   }
-   let user: GithubUser = resp.json().await.wrap_err("parsing github user")?;
-   Ok(user.login)
+   Ok(ok_json::<GithubUser>(resp, "reading github user")
+      .await?
+      .login)
 }
 
 /// Exchanges the stored GitHub grant for a short-lived Copilot token. The

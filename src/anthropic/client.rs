@@ -44,9 +44,7 @@ fn sub_limit_rejected(headers: &HeaderMap) -> bool {
 pub struct Window {
    #[serde(default)]
    pub utilization: f64,
-   #[serde(default)]
    pub locked_reason: Option<String>,
-   #[serde(default)]
    pub resets_at: Option<String>,
 }
 
@@ -70,23 +68,18 @@ pub struct Limit {
    pub group: String,
    #[serde(default)]
    pub percent: f64,
-   #[serde(default)]
    pub scope: Option<Scope>,
-   #[serde(default)]
    pub is_active: Option<bool>,
-   #[serde(default)]
    pub resets_at: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct Scope {
-   #[serde(default)]
    pub model: Option<ScopedModel>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct ScopedModel {
-   #[serde(default)]
    pub display_name: Option<String>,
 }
 
@@ -110,9 +103,7 @@ impl Limit {
 
 #[derive(Debug, Default, Clone, serde::Deserialize)]
 pub struct Usage {
-   #[serde(default)]
    pub five_hour: Option<Window>,
-   #[serde(default)]
    pub seven_day: Option<Window>,
    #[serde(default)]
    pub limits: Vec<Limit>,

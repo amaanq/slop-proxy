@@ -8,6 +8,7 @@ use std::sync::{LazyLock, Mutex};
 /// Two generations rather than one map, because clearing on overflow drops
 /// every live conversation's signatures at the same instant and breaks all of
 /// them at once.
+#[derive(Default)]
 struct Cache {
    current: HashMap<String, String>,
    previous: HashMap<String, String>,
@@ -15,12 +16,7 @@ struct Cache {
 
 const MAX_SIGNATURES: usize = 8192;
 
-static CACHE: LazyLock<Mutex<Cache>> = LazyLock::new(|| {
-   Mutex::new(Cache {
-      current: HashMap::new(),
-      previous: HashMap::new(),
-   })
-});
+static CACHE: LazyLock<Mutex<Cache>> = LazyLock::new(|| Mutex::new(Cache::default()));
 
 impl Cache {
    fn put(&mut self, key: &str, signature: String) {
@@ -49,10 +45,7 @@ mod tests {
 
    #[test]
    fn an_overflow_keeps_the_generation_before_it() {
-      let mut cache = Cache {
-         current: HashMap::new(),
-         previous: HashMap::new(),
-      };
+      let mut cache = Cache::default();
       cache.put("first", "first".into());
       for key in 0..MAX_SIGNATURES as u64 {
          cache.put(&key.to_string(), "filler".into());

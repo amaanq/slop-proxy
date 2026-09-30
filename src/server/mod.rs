@@ -186,23 +186,12 @@ pub fn router(state: AppState) -> Router {
       .with_state(state)
 }
 
-/// Reasoning tokens are a subset of the output the provider already billed,
-/// so they are deliberately absent here.
-const fn billable(record: &UsageRecord) -> Tokens {
-   Tokens {
-      input: record.input_tokens,
-      output: record.output_tokens,
-      cache_read: record.cache_read_tokens,
-      cache_write: record.cache_write_tokens,
-   }
-}
-
 /// Logs the request on drop, so client disconnects mid-stream still get a row.
 pub struct LogGuard {
    state: AppState,
    capture: UsageCapture,
    record: UsageRecord,
-   start: Instant,
+   started: Instant,
 }
 
 impl LogGuard {
@@ -219,7 +208,7 @@ impl LogGuard {
          state,
          capture,
          record,
-         start: started,
+         started,
       }
    }
 }
@@ -228,7 +217,7 @@ impl Drop for LogGuard {
    fn drop(&mut self) {
       let mut record = mem::take(&mut self.record);
       let cap = self.capture.snapshot();
-      pipeline::apply_snapshot(&mut record, &cap, self.start);
+      pipeline::apply_snapshot(&mut record, &cap, self.started);
       let finished = cap.completed || cap.stop_reason.is_some();
       if !finished && record.error_kind.is_none() {
          record.error_kind = Some(if cap.upstream_eof {
@@ -246,7 +235,7 @@ impl Drop for LogGuard {
              kind = record.error_kind.as_deref().unwrap_or("?"),
              last_event = cap.last_event.as_deref().unwrap_or("none"),
              upstream_head = cap.upstream_head.as_deref().unwrap_or(""),
-             after_ms = self.start.elapsed().as_millis() as i64,
+             after_ms = self.started.elapsed().as_millis() as i64,
              idle_ms = cap.last_byte_at.map_or(-1, |last| last.elapsed().as_millis() as i64),
              egress = cap.egress.map_or(-1, |index| index as i64),
              "stream ended without usage"
@@ -284,7 +273,14 @@ pub fn log_error(state: &AppState, mut record: UsageRecord, status: i64, kind: &
 }
 
 fn price(prices: &Prices, record: &mut UsageRecord) {
-   let billable = billable(record);
+   // Reasoning tokens are a subset of the output the provider already billed,
+   // so they are deliberately absent here.
+   let billable = Tokens {
+      input: record.input_tokens,
+      output: record.output_tokens,
+      cache_read: record.cache_read_tokens,
+      cache_write: record.cache_write_tokens,
+   };
    record.cost_usd = prices.cost(&record.upstream_model, billable);
    record.list_cost_usd = prices.table().list_cost(&record.upstream_model, billable);
 }
@@ -306,7 +302,7 @@ pub fn cache_key(user: &str, req: &ResponsesRequest) -> String {
    hasher.update(user.as_bytes());
    hasher.update(&req.instructions);
    if let Some(first) = req.input.first() {
-      hasher.update(serde_json::to_string(first).unwrap_or_default());
+      hasher.update(serde_json::to_string(first).expect("a Value always serializes"));
    }
    let digest = hasher.finalize();
    let mut bytes = [0_u8; 16];

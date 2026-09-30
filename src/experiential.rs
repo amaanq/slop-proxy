@@ -27,15 +27,13 @@ impl ExperientialClient {
    ) -> Result<reqwest::Response, SendError> {
       let resp = self
          .egresses
-         .send(|http| async move {
+         .send(|http| {
             http
                .post(format!("{}{path}", self.cfg.base_url_or(BASE_URL)))
                .bearer_auth(key)
                .header("content-type", "application/json")
                .body(body.clone())
                .send()
-               .await
-               .map_err(|err| SendError::Network(err.to_string()))
          })
          .await?;
       classify(resp, Classify::STRICT).await

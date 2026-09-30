@@ -9,7 +9,7 @@ use axum::body::to_bytes;
 use axum::extract::ws::rejection::WebSocketUpgradeRejection;
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{OriginalUri, State};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use futures_util::{Sink, SinkExt as _, StreamExt as _};
 use serde::{Deserialize as _, Serialize};
@@ -169,7 +169,7 @@ impl Relay {
       {
          return Err(error_response(
             DIALECT,
-            403,
+            StatusCode::FORBIDDEN,
             "permission_error",
             "reconnect to use the pinned account",
          ));

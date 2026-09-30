@@ -9,7 +9,7 @@ use uuid::Uuid;
 use crate::anthropic::Model;
 use crate::config::RelayConfig;
 use crate::egress::Egresses;
-use crate::upstream::{Classify, SendError, classify};
+use crate::upstream::{Classify, SendError, classify, json};
 
 /// The client identity `ZCode` 3.14.4 sends with a coding-plan key.
 fn zcode(req: RequestBuilder, key: &str) -> RequestBuilder {
@@ -20,6 +20,16 @@ fn zcode(req: RequestBuilder, key: &str) -> RequestBuilder {
       .header("x-title", "Z Code@cli")
       .header("x-zcode-agent", "glm")
       .header("http-referer", "https://zcode.z.ai")
+}
+
+const RULES: Classify = Classify {
+   dead_key: &["Insufficient balance"],
+   ..Classify::STRICT
+};
+
+#[derive(serde::Deserialize)]
+struct Listing {
+   data: Vec<Model>,
 }
 
 const BASE_URL: &str = "https://api.z.ai/api/anthropic";
@@ -40,31 +50,11 @@ impl GlmClient {
    }
 
    pub async fn models(&self, key: &str) -> Result<Vec<Model>, SendError> {
-      #[derive(serde::Deserialize)]
-      struct Listing {
-         data: Vec<Model>,
-      }
       let resp = self
          .egresses
-         .send(|http| async move {
-            zcode(http.get(format!("{}/v1/models", self.base_url())), key)
-               .send()
-               .await
-               .map_err(|err| SendError::Network(err.to_string()))
-         })
+         .send(|http| zcode(http.get(format!("{}/v1/models", self.base_url())), key).send())
          .await?;
-      let resp = classify(resp, Classify::STRICT).await?;
-      let status = resp.status().as_u16();
-      let body = resp.text().await.map_err(|err| SendError::Upstream {
-         status,
-         body: format!("reading models response: {err}"),
-      })?;
-      serde_json::from_str::<Listing>(&body)
-         .map(|listing| listing.data)
-         .map_err(|err| SendError::Upstream {
-            status,
-            body: format!("parsing models response: {err}"),
-         })
+      Ok(json::<Listing>(resp, Classify::STRICT).await?.data)
    }
 
    pub async fn post(
@@ -76,7 +66,7 @@ impl GlmClient {
    ) -> Result<reqwest::Response, SendError> {
       let resp = self
          .egresses
-         .send(|http| async move {
+         .send(|http| {
             zcode(http.post(format!("{}{path}", self.base_url())), key)
                .header(CONTENT_TYPE, "application/json")
                .header("x-request-id", Uuid::new_v4().to_string())
@@ -84,17 +74,8 @@ impl GlmClient {
                .header("x-session-id", session)
                .body(body.clone())
                .send()
-               .await
-               .map_err(|err| SendError::Network(err.to_string()))
          })
          .await?;
-      match classify(resp, Classify::STRICT).await {
-         Err(SendError::RateLimited { body: text, .. })
-            if text.contains("Insufficient balance") =>
-         {
-            Err(SendError::Auth(text))
-         },
-         other => other,
-      }
+      classify(resp, RULES).await
    }
 }

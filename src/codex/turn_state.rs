@@ -2,8 +2,8 @@ use axum::http::HeaderMap;
 
 pub const HEADER: &str = "x-codex-turn-state";
 
-/// This will read this token's ciphertext block count as the backend's routing verdict,
-/// 10 blocks for a personal account and 11 for one it believes is flagged.
+/// The backend routes on this token's ciphertext block count, 10 blocks for
+/// a personal account and 11 for one it believes is flagged.
 #[derive(Debug, Clone)]
 pub struct TurnState {
    pub token: String,

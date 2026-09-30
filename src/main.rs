@@ -40,11 +40,7 @@ async fn main() -> Result<()> {
    tracing_subscriber::fmt()
       .with_env_filter(
          tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            if args.verbose {
-               "slop_proxy=debug".into()
-            } else {
-               "slop_proxy=info".into()
-            }
+            format!("slop_proxy={}", if args.verbose { "debug" } else { "info" }).into()
          }),
       )
       .init();

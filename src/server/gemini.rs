@@ -1,6 +1,6 @@
 use axum::body::Bytes;
 use axum::extract::{Path, RawQuery, State};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse as _, Response};
 use std::time::Instant;
 
@@ -156,7 +156,7 @@ pub async fn native(
    let Some((raw_model, action)) = spec.rsplit_once(':') else {
       return error_response(
          DIALECT,
-         404,
+         StatusCode::NOT_FOUND,
          "invalid_request_error",
          "expected /v1beta/models/{{model}}:{{generateContent|streamGenerateContent}}",
       );
@@ -164,7 +164,7 @@ pub async fn native(
    if !matches!(action, "generateContent" | "streamGenerateContent") {
       return error_response(
          DIALECT,
-         404,
+         StatusCode::NOT_FOUND,
          "invalid_request_error",
          "unsupported action on the native surface",
       );
@@ -175,7 +175,7 @@ pub async fn native(
       Ok(_) => {
          return error_response(
             DIALECT,
-            400,
+            StatusCode::BAD_REQUEST,
             "invalid_request_error",
             "this model is not served by the gemini backend",
          );
@@ -190,7 +190,7 @@ pub async fn native(
       Err(err) => {
          return error_response(
             DIALECT,
-            400,
+            StatusCode::BAD_REQUEST,
             "invalid_request_error",
             &format!("invalid request: {err}"),
          );

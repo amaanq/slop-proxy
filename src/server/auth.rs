@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use axum::extract::{Request, State};
-use axum::http::{HeaderMap, HeaderName, HeaderValue, Method};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::Response;
 use tokio::time;
@@ -52,7 +52,7 @@ pub async fn require_token(
    let Some(raw) = bearer_token(req.headers(), req.uri().query()) else {
       return error_response(
          dialect,
-         401,
+         StatusCode::UNAUTHORIZED,
          "authentication_error",
          "missing API token (x-api-key or Authorization: Bearer)",
       );
@@ -107,14 +107,19 @@ async fn authenticate(state: &AppState, dialect: Dialect, raw: &str) -> Result<A
          );
          Err(error_response(
             dialect,
-            401,
+            StatusCode::UNAUTHORIZED,
             "authentication_error",
             "invalid or revoked API token",
          ))
       },
       Err(err) => {
          tracing::error!("token lookup failed: {err}");
-         Err(error_response(dialect, 500, "api_error", "internal error"))
+         Err(error_response(
+            dialect,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "api_error",
+            "internal error",
+         ))
       },
    }
 }
@@ -136,13 +141,23 @@ pub async fn admit_token(
                ("API token token limit exceeded", retry_after)
             },
          };
-         let mut response = error_response(dialect, 429, "rate_limit_error", message);
+         let mut response = error_response(
+            dialect,
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate_limit_error",
+            message,
+         );
          insert_header(&mut response, "retry-after", retry_after);
          return Err(response);
       },
       Err(err) => {
          tracing::error!("token metering failed: {err}");
-         return Err(error_response(dialect, 500, "api_error", "internal error"));
+         return Err(error_response(
+            dialect,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "api_error",
+            "internal error",
+         ));
       },
    };
    if admission.slowdown_ms > 0 {

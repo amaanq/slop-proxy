@@ -1,7 +1,6 @@
 use std::time::Duration;
 
 use axum::body::Bytes;
-use axum::http::Response;
 use reqwest::header::CONTENT_TYPE;
 
 use crate::translate::bridge::BridgeProtocol;
@@ -11,38 +10,16 @@ use crate::config::GeminiConfig;
 use crate::egress::Egresses;
 use crate::gemini::native;
 use crate::gemini::types::{ListedModel, ModelList};
-use crate::upstream::{Classify, SendError, classify};
+use crate::upstream::{Classify, SendError, classify, json};
 
 const RULES: Classify = Classify {
    pass: |status| !matches!(status, 401 | 403 | 429 | 500..=599),
+   reset_headers: &["x-ratelimit-reset-requests", "x-ratelimit-reset-tokens"],
+   dead_key: &["API key not valid"],
    // A key restricted to an origin or with the API disabled answers
    // 403, and no retry on another account makes that key work.
-   auth: &[401, 403],
-   reset_headers: &["x-ratelimit-reset-requests", "x-ratelimit-reset-tokens"],
-   account_faults: &[],
+   ..Classify::STRICT
 };
-
-async fn cool_a_dead_key(resp: reqwest::Response) -> Result<reqwest::Response, SendError> {
-   if resp.status() != 400 {
-      return Ok(resp);
-   }
-   let mut rebuilt = Response::builder().status(resp.status());
-   if let Some(headers) = rebuilt.headers_mut() {
-      headers.clone_from(resp.headers());
-   }
-   let body = resp
-      .bytes()
-      .await
-      .map_err(|err| SendError::Network(err.to_string()))?;
-   let text = String::from_utf8_lossy(&body);
-   if text.contains("API key not valid") {
-      return Err(SendError::Auth(text.into_owned()));
-   }
-   rebuilt
-      .body(body)
-      .map(Into::into)
-      .map_err(|err| SendError::Network(err.to_string()))
-}
 
 pub struct GeminiClient {
    egresses: Egresses,
@@ -58,6 +35,21 @@ impl GeminiClient {
    pub fn new(cfg: GeminiConfig) -> eyre::Result<Self> {
       let egresses = Egresses::new(&cfg.egress.urls()?, "gemini", None)?;
       Ok(Self { egresses, cfg })
+   }
+
+   fn native_base(&self) -> &str {
+      let base = self.cfg.base_url.trim_end_matches('/');
+      base.strip_suffix("/openai").unwrap_or(base)
+   }
+
+   fn referer<'a>(&'a self, account_referer: Option<&'a str>) -> Option<&'a str> {
+      account_referer.or_else(|| {
+         self.cfg.headers.iter().find_map(|(name, value)| {
+            name
+               .eq_ignore_ascii_case("referer")
+               .then_some(value.as_str())
+         })
+      })
    }
 
    /// Config headers ride every call, minus a `Referer` an account already
@@ -92,12 +84,7 @@ impl GeminiClient {
       account_referer: Option<&str>,
       body: &ChatRequest,
    ) -> Result<GeminiResponse, SendError> {
-      let configured_referer = self.cfg.headers.iter().find_map(|(name, value)| {
-         name
-            .eq_ignore_ascii_case("referer")
-            .then_some(value.as_str())
-      });
-      let referer = account_referer.or(configured_referer);
+      let referer = self.referer(account_referer);
       // Translating once outside the retry keeps a failover from re-running
       // it, and a bad request has to fail before any egress is burned.
       let translated = referer
@@ -112,18 +99,20 @@ impl GeminiClient {
       let translated = translated.as_ref();
       let resp = self
          .egresses
-         .send(|http| async move {
+         .send(|http| {
             let req = match (referer, translated) {
                (Some(referer), Some(translated)) => {
-                  let base = self.cfg.base_url.trim_end_matches('/');
-                  let base = base.strip_suffix("/openai").unwrap_or(base);
                   let action = if translated.streaming {
                      "streamGenerateContent?alt=sse"
                   } else {
                      "generateContent"
                   };
                   http
-                     .post(format!("{base}/models/{}:{action}", translated.model))
+                     .post(format!(
+                        "{}/models/{}:{action}",
+                        self.native_base(),
+                        translated.model
+                     ))
                      .header("x-goog-api-key", api_key)
                      .header("referer", referer)
                      .json(&translated.body)
@@ -136,14 +125,10 @@ impl GeminiClient {
                   .bearer_auth(api_key)
                   .json(body),
             };
-            self
-               .with_headers(req, referer.is_some())
-               .send()
-               .await
-               .map_err(|err| SendError::Network(err.to_string()))
+            self.with_headers(req, referer.is_some()).send()
          })
          .await?;
-      let response = cool_a_dead_key(classify(resp, RULES).await?).await?;
+      let response = classify(resp, RULES).await?;
       Ok(GeminiResponse { response, protocol })
    }
 
@@ -158,20 +143,12 @@ impl GeminiClient {
       query: Option<&str>,
       body: &Bytes,
    ) -> Result<reqwest::Response, SendError> {
-      let base = self.cfg.base_url.trim_end_matches('/');
-      let base = base.strip_suffix("/openai").unwrap_or(base);
+      let base = self.native_base();
       let query = forwarded_query(query);
-      let query = query.as_str();
-      let referer = account_referer.or_else(|| {
-         self.cfg.headers.iter().find_map(|(name, value)| {
-            name
-               .eq_ignore_ascii_case("referer")
-               .then_some(value.as_str())
-         })
-      });
+      let referer = self.referer(account_referer);
       let resp = self
          .egresses
-         .send(|http| async move {
+         .send(|http| {
             let mut req = http
                .post(format!("{base}/models/{model}:{action}{query}"))
                .header("x-goog-api-key", api_key)
@@ -180,14 +157,10 @@ impl GeminiClient {
             if let Some(referer) = referer {
                req = req.header("referer", referer);
             }
-            self
-               .with_headers(req, referer.is_some())
-               .send()
-               .await
-               .map_err(|err| SendError::Network(err.to_string()))
+            self.with_headers(req, referer.is_some()).send()
          })
          .await?;
-      cool_a_dead_key(classify(resp, RULES).await?).await
+      classify(resp, RULES).await
    }
 
    /// The catalog carries no per-key state, so a restricted key can read it
@@ -197,38 +170,22 @@ impl GeminiClient {
       api_key: &str,
       account_referer: Option<&str>,
    ) -> Result<Vec<ListedModel>, SendError> {
-      let base = self.cfg.base_url.trim_end_matches('/');
-      let base = base.strip_suffix("/openai").unwrap_or(base);
+      let base = self.native_base();
       let resp = self
          .egresses
-         .send(|http| async move {
+         .send(|http| {
             let mut req = http
                .get(format!("{base}/models?pageSize=1000"))
                .header("x-goog-api-key", api_key);
             if let Some(referer) = account_referer {
                req = req.header("referer", referer);
             }
-            self
-               .with_headers(req, account_referer.is_some())
-               .send()
-               .await
-               .map_err(|err| SendError::Network(err.to_string()))
+            self.with_headers(req, account_referer.is_some()).send()
          })
          .await?;
-      let resp = classify(resp, Classify::STRICT).await?;
-      let status = resp.status().as_u16();
-      let body: ModelList = resp.json().await.map_err(|err| SendError::Upstream {
-         status,
-         body: format!("parsing models response: {err}"),
-      })?;
-      // The two surfaces name the array differently, and the native one
-      // prefixes every id with `models/`.
-      let entries = if body.data.is_empty() {
-         body.models
-      } else {
-         body.data
-      };
-      let listed = entries
+      let body: ModelList = json(resp, Classify::STRICT).await?;
+      let listed = body
+         .models
          .into_iter()
          .filter(|entry| {
             entry.supported_generation_methods.is_empty()
@@ -238,9 +195,8 @@ impl GeminiClient {
                   .any(|method| method == "generateContent")
          })
          .filter_map(|entry| {
-            let id = entry.id.or(entry.name)?;
             Some(ListedModel {
-               id: id.trim_start_matches("models/").to_owned(),
+               id: entry.name?.trim_start_matches("models/").to_owned(),
                context_window: entry.input_token_limit,
             })
          })

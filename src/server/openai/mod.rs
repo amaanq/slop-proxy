@@ -211,15 +211,7 @@ pub fn responses_upgrade_required() -> Response {
 }
 
 async fn messages_catalog(state: &AppState) -> Catalog {
-   let mut data = match state.pools.anthropic.models_raw().await {
-      Ok(body) => {
-         serde_json::from_str::<Catalog>(&body).map_or_else(|_| Vec::new(), |catalog| catalog.data)
-      },
-      Err(err) => {
-         tracing::debug!("anthropic model catalog: {err}");
-         Vec::new()
-      },
-   };
+   let mut data = state.pools.anthropic.catalog().await;
 
    let now = rfc3339(unix_now());
    let synthetic = |id: String| Model {
@@ -290,7 +282,7 @@ pub async fn models(
             || {
                error_response(
                   DIALECT,
-                  503,
+                  StatusCode::SERVICE_UNAVAILABLE,
                   "api_error",
                   "no usable codex account to read the model catalog from",
                )
@@ -906,7 +898,7 @@ fn upstream_eof(state: &AppState, record: UsageRecord) -> Response {
    log_error(state, record, 502, "upstream_eof");
    error_response(
       DIALECT,
-      502,
+      StatusCode::BAD_GATEWAY,
       "api_error",
       "upstream stream ended unexpectedly",
    )

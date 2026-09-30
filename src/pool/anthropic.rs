@@ -1,9 +1,8 @@
 use axum::body::Bytes;
 
-use crate::anthropic::{AnthropicClient, RelayHeaders};
+use crate::anthropic::{AnthropicClient, Model, RelayHeaders};
 use crate::pool::{
-   AccountUsage, AuthPolicy, Backend, Cooldown, ModelWindow, Pool, PoolError, Route, Slot,
-   UsageWindow,
+   AccountUsage, AuthPolicy, Backend, Cooldown, ModelWindow, Pool, Route, Slot, UsageWindow,
 };
 use crate::provider::Provider;
 use crate::upstream::SendError;
@@ -53,22 +52,11 @@ impl Backend for AnthropicClient {
 }
 
 impl Pool<AnthropicClient> {
-   /// The catalog body untouched, for relaying to an Anthropic client.
-   pub async fn models_raw(&self) -> Result<String, PoolError> {
+   pub async fn catalog(&self) -> Vec<Model> {
       self
-         .first_answer(async |backend, token, _| {
-            let (status, body) = backend
-               .models_raw(token)
-               .await
-               .map_err(|err| err.to_string())?;
-            if status.is_success() {
-               Ok(body)
-            } else {
-               Err(status.to_string())
-            }
-         })
+         .first_answer(async |backend, token, _| backend.models(token).await)
          .await
-         .ok_or(PoolError::NoAccounts(Provider::Anthropic))
+         .unwrap_or_default()
    }
 
    /// Reads each account's rolling-window consumption from the provider.

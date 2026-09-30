@@ -3,7 +3,7 @@
 //! The account's long-lived credential is the GitHub OAuth token from the
 //! device flow. It is stored as the refresh token and exchanged for a
 //! short-lived Copilot token (`copilot_internal/v2/token`) whenever the
-//! slot needs one, mirroring how the other OAuth pools refresh.
+//! slot needs one.
 
 use std::time::Duration;
 
@@ -13,17 +13,17 @@ use reqwest::header::CONTENT_TYPE;
 use serde::Deserialize;
 use uuid::Uuid;
 
+use crate::clock;
 use crate::config::CopilotConfig;
-use crate::upstream::{Classify, SendError, classify};
+use crate::upstream::{Classify, IdList, SendError, classify, json};
 
 pub const USER_AGENT: &str = "GitHubCopilotChat/0.26.7";
 
 const RULES: Classify = Classify {
-   pass: |_| false,
    // A seat that lost Copilot answers 404, which no other account fixes.
    auth: &[401, 403, 404],
    reset_headers: &["retry-after", "x-ratelimit-reset", "x-quota-reset"],
-   account_faults: &[],
+   ..Classify::STRICT
 };
 
 pub struct CopilotClient {
@@ -65,14 +65,8 @@ impl CopilotClient {
             .bearer_auth(copilot_token),
       )
       .send()
-      .await
-      .map_err(|err| SendError::Network(err.to_string()))?;
-      let resp = classify(resp, RULES).await?;
-      let status = resp.status().as_u16();
-      resp.json().await.map_err(|err| SendError::Upstream {
-         status,
-         body: format!("parsing copilot quota response: {err}"),
-      })
+      .await?;
+      json(resp, RULES).await
    }
 
    pub async fn models(&self, copilot_token: &str) -> Result<Vec<String>, SendError> {
@@ -83,14 +77,8 @@ impl CopilotClient {
             .bearer_auth(copilot_token),
       )
       .send()
-      .await
-      .map_err(|err| SendError::Network(err.to_string()))?;
-      let resp = classify(resp, RULES).await?;
-      let status = resp.status().as_u16();
-      let listed: ModelList = resp.json().await.map_err(|err| SendError::Upstream {
-         status,
-         body: format!("parsing copilot models response: {err}"),
-      })?;
+      .await?;
+      let listed: IdList = json(resp, RULES).await?;
       Ok(listed.data.into_iter().map(|model| model.id).collect())
    }
 
@@ -115,11 +103,7 @@ impl CopilotClient {
       if vision {
          req = req.header("copilot-vision-request", "true");
       }
-      let resp = req
-         .body(body.clone())
-         .send()
-         .await
-         .map_err(|err| SendError::Network(err.to_string()))?;
+      let resp = req.body(body.clone()).send().await?;
       classify(resp, RULES).await
    }
 }
@@ -148,12 +132,7 @@ pub struct QuotaDetail {
 
 impl QuotaReport {
    pub fn resets_at(&self) -> Option<i64> {
-      let reset = self
-         .quota_reset_date_utc
-         .as_deref()?
-         .parse::<jiff::Timestamp>()
-         .ok()?;
-      Some(reset.as_second())
+      clock::unix_seconds(self.quota_reset_date_utc.as_deref())
    }
 }
 
@@ -165,14 +144,4 @@ impl QuotaDetail {
       ((self.entitlement - self.remaining).max(0) as f64 / self.entitlement as f64)
          .clamp(0.0_f64, 1.0_f64)
    }
-}
-
-#[derive(Deserialize)]
-struct ModelList {
-   data: Vec<ModelEntry>,
-}
-
-#[derive(Deserialize)]
-struct ModelEntry {
-   id: String,
 }

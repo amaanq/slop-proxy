@@ -12,6 +12,13 @@ pub fn rfc3339(unix_secs: i64) -> String {
       .to_string()
 }
 
+pub fn unix_seconds(text: Option<&str>) -> Option<i64> {
+   text?
+      .parse::<jiff::Timestamp>()
+      .ok()
+      .map(jiff::Timestamp::as_second)
+}
+
 pub fn unix_now_ms() -> i64 {
    SystemTime::now()
       .duration_since(UNIX_EPOCH)

@@ -1,5 +1,5 @@
 use super::*;
-use crate::config::ModelAlias;
+use crate::config::{ExperientialConfig, ModelAlias};
 use axum::body::Bytes;
 use axum::http::HeaderMap;
 use std::time::Duration;
@@ -36,27 +36,20 @@ async fn gateway(
    tokio::spawn(async move {
       axum::serve(upstream_listener, upstream).await.unwrap();
    });
-   let db_path = env::temp_dir().join(format!("slop-gateway-{}.db", uuid::Uuid::new_v4()));
-   let db = Db::open(&db_path).unwrap();
-   db.create_token("alice", "sp-test", "sp-test")
-      .await
-      .unwrap();
-   db.upsert_account(NewAccount {
+   let tokens = TokenSet {
+      access_token: "upstream-key".into(),
+      ..fresh_tokens()
+   };
+   let accounts = [NewAccount {
       provider: Provider::Experiential,
       id: "gateway-key",
       email: None,
       label: None,
       plan: None,
-      tokens: &TokenSet {
-         access_token: "upstream-key".into(),
-         ..fresh_tokens()
-      },
+      tokens: &tokens,
       auth_mode: AuthMode::ApiKey,
-   })
-   .await
-   .unwrap();
+   }];
    let cfg = Config {
-      db_path: db_path.clone(),
       experiential: ExperientialConfig {
          base_url: upstream_url,
          ..ExperientialConfig::default()
@@ -75,18 +68,7 @@ async fn gateway(
       },
       ..Config::for_tests()
    };
-   let pools = Pools::load(&db, &cfg).await.unwrap();
-   let state = AppState(Arc::new(Inner {
-      db: db.clone(),
-      cfg,
-      prices: Prices::new(&db_path, PricingConfig::default().url),
-      pools,
-   }));
-   let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-   let base = format!("http://{}", proxy_listener.local_addr().unwrap());
-   tokio::spawn(async move {
-      axum::serve(proxy_listener, router(state)).await.unwrap();
-   });
+   let (base, db) = serve_proxy(cfg, &accounts).await;
    (base, db, requests)
 }
 

@@ -5,14 +5,16 @@ use axum::response::Response;
 
 use super::AppState;
 use super::auth::AuthInfo;
+use super::chat::{
+   force_usage, relay_chat_body, relay_chat_stream, session_key, upstream_rejected,
+};
 use super::error::{Dialect, error_response};
-use super::gemini::{relay_chat_body, relay_chat_stream, session_key, upstream_rejected};
 use super::pipeline::{dispatch_failed, read_body};
 use super::relay::forwarded_response;
 use crate::pool::Route;
 use crate::pool::copilot::Call;
 use crate::provider::Provider;
-use crate::translate::chat::{ChatContent, ChatPart, ChatRequest, StreamOptions};
+use crate::translate::chat::{ChatContent, ChatPart, ChatRequest};
 
 const DIALECT: Dialect = Dialect::OpenAi;
 
@@ -25,11 +27,8 @@ pub async fn chat_completions(
 ) -> Response {
    let started = Instant::now();
    let streaming = body.stream.unwrap_or(false);
-   // Without this the terminal chunk carries no usage and the request bills
-   // as zero tokens.
-   body.stream_options = streaming.then_some(StreamOptions {
-      include_usage: true,
-   });
+   body.stream_options = None;
+   force_usage(&mut body, streaming);
 
    let mut record = super::pipeline::record(
       &auth,

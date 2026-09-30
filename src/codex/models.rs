@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::zen::client::ZenModel;
+use crate::zen::ZenModel;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ModelInfo {
@@ -191,7 +191,7 @@ pub fn with_zen_entries(raw: &str, template: &str, zen: &[ZenModel]) -> Option<S
 #[cfg(test)]
 mod zen_entry_tests {
    use super::with_zen_entries;
-   use crate::zen::client::ZenModel;
+   use crate::zen::ZenModel;
 
    fn zen(id: &str) -> ZenModel {
       ZenModel {

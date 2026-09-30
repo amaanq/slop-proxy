@@ -1,5 +1,5 @@
 use super::{Backend, Pool, Relay, Route, Slot};
-use crate::experiential::client::ExperientialClient;
+use crate::experiential::ExperientialClient;
 use crate::provider::Provider;
 use crate::upstream::SendError;
 

@@ -34,7 +34,7 @@ use crate::translate::chat::ChatRequest;
 use crate::translate::openai_req;
 use crate::translate::openai_stream::{OpenAiStream, render_aggregated};
 use crate::translate::{StopKind, UsageCapture, aggregate, model_map, usable_cap};
-use crate::zen::client::ZenModel;
+use crate::zen::ZenModel;
 
 pub mod websocket;
 

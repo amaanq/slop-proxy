@@ -754,7 +754,7 @@ mod retry_tests {
 #[cfg(test)]
 mod reason_tests {
    use super::*;
-   use crate::anthropic::client::AnthropicClient;
+   use crate::anthropic::AnthropicClient;
    use crate::codex::client::CodexClient;
    use crate::gemini::client::GeminiClient;
 

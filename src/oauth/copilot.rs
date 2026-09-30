@@ -7,7 +7,7 @@ use tokio::time::sleep;
 use super::TokenSet;
 use super::http;
 use super::refresh::RefreshError;
-use crate::copilot::client::{USER_AGENT, editor};
+use crate::copilot::{USER_AGENT, editor};
 use crate::db::Db;
 use crate::provider::Provider;
 

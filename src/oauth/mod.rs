@@ -1,5 +1,6 @@
 pub mod anthropic;
 pub mod copilot;
+pub mod glm;
 pub mod jwt;
 pub mod refresh;
 

@@ -1,3 +1,7 @@
+use std::io::{self, Write};
+use std::mem;
+use std::time::{Duration, Instant};
+
 use axum::body::{Body, Bytes};
 use axum::http::HeaderMap;
 use axum::http::response::Builder;
@@ -5,8 +9,6 @@ use axum::response::Response;
 use futures_util::{StreamExt as _, stream};
 use serde::Deserialize;
 use serde_json::value::RawValue;
-use std::io::{self, Write};
-use std::time::{Duration, Instant};
 use tokio::time::timeout;
 
 use super::auth::AuthInfo;
@@ -221,8 +223,8 @@ fn anthropic_facts(body: &[u8], headers: &HeaderMap) -> super::facts::RequestFac
    )
 }
 
-fn normalized_body(body: &Bytes, peek: &Peek) -> Bytes {
-   if peek.model == peek.upstream_model {
+fn normalized_body(body: &Bytes, peek: &Peek, provider: Provider) -> Bytes {
+   if peek.model == peek.upstream_model && provider != Provider::Glm {
       return body.clone();
    }
    let Ok(mut value) = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(body)
@@ -233,7 +235,46 @@ fn normalized_body(body: &Bytes, peek: &Peek) -> Bytes {
       "model".into(),
       serde_json::Value::String(peek.upstream_model.clone()),
    );
+   if provider == Provider::Glm {
+      mark_cache_breakpoint(&mut value);
+   }
    Bytes::from(serde_json::to_vec(&value).expect("request serializes"))
+}
+
+/// `ZCode` marks its last message as a cache breakpoint, so the coding plan
+/// bills a cached prefix the way it does for its own client.
+fn mark_cache_breakpoint(value: &mut serde_json::Map<String, serde_json::Value>) {
+   let Some(last) = value
+      .get_mut("messages")
+      .and_then(serde_json::Value::as_array_mut)
+      .and_then(|messages| messages.last_mut())
+   else {
+      return;
+   };
+   if let Some(content) = last.get_mut("content")
+      && let serde_json::Value::String(ref mut text) = *content
+   {
+      let blocks = serde_json::json!([{ "type": "text", "text": mem::take(text) }]);
+      *content = blocks;
+   }
+   let Some(blocks) = last
+      .get_mut("content")
+      .and_then(serde_json::Value::as_array_mut)
+   else {
+      return;
+   };
+   if blocks
+      .iter()
+      .any(|block| block.get("cache_control").is_some())
+   {
+      return;
+   }
+   if let Some(block) = blocks.last_mut().and_then(serde_json::Value::as_object_mut) {
+      block.insert(
+         "cache_control".into(),
+         serde_json::json!({ "type": "ephemeral" }),
+      );
+   }
 }
 
 /// Z.ai answers the messages API directly, so this is the anthropic relay
@@ -279,7 +320,7 @@ pub async fn messages(
       prefer_trusted: false,
       reserved_only: auth.limits.reserved_only,
    };
-   let body = normalized_body(&body, &peek);
+   let body = normalized_body(&body, &peek, provider);
    let (result, first) = dispatch(&state, route, provider, body, &headers, &peek).await;
    let served = match result {
       Ok(served) => served,
@@ -529,7 +570,7 @@ pub async fn count_tokens(
          },
          AnthropicRelay {
             path: "/v1/messages/count_tokens",
-            body: normalized_body(&body, &peek),
+            body: normalized_body(&body, &peek, Provider::Anthropic),
             hdrs: hdrs.clone(),
          },
       )
@@ -730,6 +771,25 @@ mod tests {
          ("anthropic-beta", "oauth-2025-04-20"),
          ("user-agent", "python-httpx/0.27"),
       ])));
+   }
+
+   #[test]
+   fn only_glm_bodies_are_rewritten() {
+      use crate::config::ModelsConfig;
+      use crate::provider::Provider;
+
+      let body = super::Bytes::from_static(
+         br#"{"model":"glm-5","messages":[{"role":"user","content":"hi"}]}"#,
+      );
+      let peek = super::Peek::from_slice(&body, &ModelsConfig::default());
+      let anthropic = super::normalized_body(&body, &peek, Provider::Anthropic);
+      assert_eq!(anthropic, body);
+      let glm = super::normalized_body(&body, &peek, Provider::Glm);
+      let parsed: serde_json::Value = serde_json::from_slice(&glm).unwrap();
+      assert_eq!(
+         parsed["messages"][0]["content"][0]["cache_control"]["type"],
+         "ephemeral"
+      );
    }
 }
 

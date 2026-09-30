@@ -137,6 +137,17 @@ pub async fn chat_completions(
    } else {
       bytes
    };
+   relay_chat_body(&state, record, builder, bytes, started)
+}
+
+/// Meters usage out of a finished chat completion and hands it back as is.
+pub(super) fn relay_chat_body(
+   state: &AppState,
+   mut record: UsageRecord,
+   builder: Builder,
+   bytes: Bytes,
+   started: Instant,
+) -> Response {
    if let Ok(env) = serde_json::from_slice::<ChatEnvelope>(&bytes)
       && let Some(usage) = env.usage
    {
@@ -146,7 +157,7 @@ pub async fn chat_completions(
    }
    record.duration_ms = Some(started.elapsed().as_millis() as i64);
    record.response_bytes = bytes.len() as i64;
-   super::log_usage(&state, record);
+   super::log_usage(state, record);
    builder
       .body(Body::from(bytes))
       .unwrap_or_else(|err| error_response(DIALECT, 502, "api_error", &err.to_string()))

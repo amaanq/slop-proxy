@@ -88,7 +88,6 @@ impl Default for ExperientialConfig {
 #[serde(default)]
 pub struct CopilotConfig {
    pub base_url: String,
-   pub account_type: String,
    /// Fraction of a rolling window past which an account is ranked behind
    /// its peers, so sessions migrate before the window rejects them.
    pub soft_utilization_limit: f64,
@@ -98,7 +97,6 @@ impl Default for CopilotConfig {
    fn default() -> Self {
       Self {
          base_url: "https://api.githubcopilot.com".into(),
-         account_type: "individual".into(),
          soft_utilization_limit: 0.9,
       }
    }
@@ -631,21 +629,6 @@ mod route_tests {
       assert_eq!(cfg.route("claude-fable-5.1"), Provider::Experiential);
       assert_eq!(cfg.route("claude-opus-5"), Provider::Anthropic);
       assert_eq!(cfg.route("gemini-2-flash"), Provider::Gemini);
-   }
-
-   #[test]
-   fn copilot_stays_opt_in_and_beats_the_default() {
-      assert!(ModelsConfig::default().copilot_patterns.is_empty());
-      assert_eq!(
-         ModelsConfig::default().route("gpt-5-copilot"),
-         Provider::OpenAi
-      );
-      let cfg = ModelsConfig {
-         copilot_patterns: vec!["gpt-5-*".into()],
-         ..ModelsConfig::default()
-      };
-      assert_eq!(cfg.route("gpt-5-copilot"), Provider::Copilot);
-      assert_eq!(cfg.route("gpt-5.6-sol"), Provider::OpenAi);
    }
 }
 

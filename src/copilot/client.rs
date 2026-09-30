@@ -11,7 +11,7 @@ use crate::upstream::{Classify, SendError, classify};
 
 pub const USER_AGENT: &str = "GitHubCopilotChat/0.26.7";
 
-pub const RULES: Classify = Classify {
+const RULES: Classify = Classify {
    pass: |_| false,
    // A seat that lost Copilot answers 404, which no other account fixes.
    auth: &[401, 403, 404],

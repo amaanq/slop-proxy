@@ -1,7 +1,9 @@
 use std::collections::BTreeSet;
 
 use axum::body::Bytes;
+use futures_util::future::join_all;
 use reqwest::header::HeaderMap;
+use serde::Serialize;
 
 use crate::anthropic::AnthropicClient;
 use crate::codex::client::CodexClient;
@@ -24,7 +26,7 @@ use crate::pool::experiential::ExperientialPool;
 use crate::pool::gemini::{Call, GeminiPool};
 use crate::pool::glm::GlmPool;
 use crate::pool::zen::{ZenPool, satisfy_chat_tool_gate, satisfy_tool_gate};
-use crate::pool::{AccountSnapshot, Backend, PoolError, Relay, Route, Served};
+use crate::pool::{AccountSnapshot, Backend, PoolError, Relay, Route, Served, Slots};
 use crate::provider::Provider;
 use crate::translate::UsageCapture;
 use crate::translate::bridge;
@@ -102,23 +104,7 @@ impl Pools {
       )
       .await?;
       let copilot = CopilotPool::load(db.clone(), CopilotClient::new(cfg.copilot.clone())).await?;
-      announce("codex", codex.len().await, Some("slop-proxy login"));
-      announce(
-         "anthropic",
-         anthropic.len().await,
-         Some("slop-proxy login --provider anthropic"),
-      );
-      announce("gemini", gemini.len().await, None);
-      announce("zen", zen.len().await, None);
-      announce("glm", glm.len().await, None);
-      announce("deepseek", deepseek.len().await, None);
-      announce("experiential", experiential.len().await, None);
-      announce(
-         "copilot",
-         copilot.len().await,
-         Some("slop-proxy login --provider copilot"),
-      );
-      Ok(Self {
+      let pools = Self {
          codex,
          anthropic,
          gemini,
@@ -127,32 +113,31 @@ impl Pools {
          deepseek,
          experiential,
          copilot,
-      })
+      };
+      for slots in pools.slots() {
+         announce(slots.provider(), slots.len().await);
+      }
+      Ok(pools)
+   }
+
+   const fn slots(&self) -> [&Slots; 8] {
+      [
+         &self.codex.slots,
+         &self.anthropic.slots,
+         &self.gemini.slots,
+         &self.zen.slots,
+         &self.glm.slots,
+         &self.deepseek.slots,
+         &self.experiential.slots,
+         &self.copilot.slots,
+      ]
    }
 
    pub async fn reload(&self) {
-      let (codex, anthropic, gemini, zen, glm, deepseek, experiential, copilot) = tokio::join!(
-         self.codex.reload(),
-         self.anthropic.reload(),
-         self.gemini.reload(),
-         self.zen.reload(),
-         self.glm.reload(),
-         self.deepseek.reload(),
-         self.experiential.reload(),
-         self.copilot.reload()
-      );
-      for (provider, result) in [
-         (Provider::OpenAi, codex),
-         (Provider::Anthropic, anthropic),
-         (Provider::Gemini, gemini),
-         (Provider::Zen, zen),
-         (Provider::Glm, glm),
-         (Provider::DeepSeek, deepseek),
-         (Provider::Experiential, experiential),
-         (Provider::Copilot, copilot),
-      ] {
+      let results = join_all(self.slots().map(Slots::reload)).await;
+      for (slots, result) in self.slots().into_iter().zip(results) {
          if let Err(err) = result {
-            tracing::warn!("reloading {provider} accounts: {err}");
+            tracing::warn!("reloading {} accounts: {err}", slots.provider());
          }
       }
    }
@@ -172,9 +157,7 @@ impl Pools {
       route: Route<'_>,
       req: &ResponsesRequest,
    ) -> Result<Dispatched, PoolError> {
-      let body = serde_json::to_vec(req)
-         .map(Bytes::from)
-         .map_err(|err| PoolError::Upstream(format!("serializing request: {err}")))?;
+      let body = to_bytes(req)?;
       self
          .responses_raw(models, provider, route, body, Some(req), &HeaderMap::new())
          .await
@@ -205,37 +188,41 @@ impl Pools {
             "this request cannot be bridged to {backend}; see the proxy log for the field that failed"
          ),
       };
+      let chatted = |backend: &str| {
+         let req = typed.ok_or_else(|| unbridgeable(backend))?;
+         Ok::<_, PoolError>((custom_tools(req), to_chat(req)))
+      };
+      let bridged = |account_id, attempts, response, protocol, custom| Dispatched {
+         account_id,
+         attempts,
+         upstream: Upstream::Bridged {
+            response,
+            protocol,
+            custom,
+         },
+      };
       match provider {
          Provider::OpenAi => self.codex.post(route, body, headers.clone()).await.map(raw),
          Provider::Zen if models.zen_dialect(route.model) == ZenDialect::Chat => {
-            let Some(req) = typed else {
-               return Err(unbridgeable("zen"));
-            };
-            let custom = custom_tools(req);
-            let mut chat = to_chat(req);
+            let (custom, mut chat) = chatted("zen")?;
             satisfy_chat_tool_gate(&mut chat);
-            let bridged = serde_json::to_vec(&chat)
-               .map(Bytes::from)
-               .map_err(|err| PoolError::Upstream(format!("serializing request: {err}")))?;
             let served = self
                .zen
                .execute(
                   route,
                   Relay {
                      path: "/chat/completions",
-                     body: bridged,
+                     body: to_bytes(&chat)?,
                   },
                )
                .await?;
-            Ok(Dispatched {
-               account_id: served.account_id,
-               attempts: served.attempts,
-               upstream: Upstream::Bridged {
-                  response: served.response,
-                  protocol: BridgeProtocol::Chat,
-                  custom,
-               },
-            })
+            Ok(bridged(
+               served.account_id,
+               served.attempts,
+               served.response,
+               BridgeProtocol::Chat,
+               custom,
+            ))
          },
          Provider::Zen => self
             .zen
@@ -249,11 +236,7 @@ impl Pools {
             .await
             .map(raw),
          Provider::Gemini => {
-            let Some(req) = typed else {
-               return Err(unbridgeable("gemini"));
-            };
-            let custom = custom_tools(req);
-            let chat = to_chat(req);
+            let (custom, chat) = chatted("gemini")?;
             let served = self
                .gemini
                .execute(route, Call::OpenAi(Box::new(chat)))
@@ -269,15 +252,13 @@ impl Pools {
                   body: <GeminiClient as Backend>::reason(error_body),
                });
             }
-            Ok(Dispatched {
-               account_id: served.account_id,
-               attempts: served.attempts,
-               upstream: Upstream::Bridged {
-                  response: served.response.response,
-                  protocol: served.response.protocol,
-                  custom,
-               },
-            })
+            Ok(bridged(
+               served.account_id,
+               served.attempts,
+               served.response.response,
+               served.response.protocol,
+               custom,
+            ))
          },
          Provider::Anthropic
          | Provider::Glm
@@ -292,22 +273,34 @@ impl Pools {
    }
 
    pub async fn snapshots(&self) -> Vec<AccountSnapshot> {
-      let mut out = self.codex.snapshot().await;
-      out.extend(self.anthropic.snapshot().await);
-      out.extend(self.gemini.snapshot().await);
-      out.extend(self.zen.snapshot().await);
-      out.extend(self.glm.snapshot().await);
-      out.extend(self.deepseek.snapshot().await);
-      out.extend(self.experiential.snapshot().await);
-      out.extend(self.copilot.snapshot().await);
-      out
+      join_all(self.slots().map(Slots::snapshot))
+         .await
+         .into_iter()
+         .flatten()
+         .collect()
    }
 }
 
-fn announce(name: &str, count: usize, login: Option<&str>) {
+fn to_bytes(value: &impl Serialize) -> Result<Bytes, PoolError> {
+   serde_json::to_vec(value)
+      .map(Bytes::from)
+      .map_err(|err| PoolError::Upstream(format!("serializing request: {err}")))
+}
+
+fn announce(provider: Provider, count: usize) {
+   let login = match provider {
+      Provider::OpenAi => Some("slop-proxy login"),
+      Provider::Anthropic => Some("slop-proxy login --provider anthropic"),
+      Provider::Copilot => Some("slop-proxy login --provider copilot"),
+      Provider::Gemini
+      | Provider::Zen
+      | Provider::Glm
+      | Provider::DeepSeek
+      | Provider::Experiential => None,
+   };
    match (count, login) {
-      (0, Some(login)) => tracing::warn!("no {name} accounts in the database; run `{login}`"),
+      (0, Some(login)) => tracing::warn!("no {provider} accounts in the database; run `{login}`"),
       (0, None) => {},
-      (count, _) => tracing::info!("loaded {count} {name} account(s)"),
+      (count, _) => tracing::info!("loaded {count} {provider} account(s)"),
    }
 }

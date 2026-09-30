@@ -259,50 +259,47 @@ impl CodexClient {
       model: &str,
       headers: &header::HeaderMap,
    ) -> Result<reqwest::Response, SendError> {
-      let initial = self
-         .send_once(
-            access_token,
-            chatgpt_account_id,
-            req,
-            session_id,
-            model,
-            headers,
-         )
-         .await;
-      let retry_body = match initial.as_ref() {
-         Err(&SendError::BadRequest(ref body))
-            if body.contains("max_output_tokens")
-               && let Ok(mut retry) = serde_json::from_slice::<Retry>(req)
-               && retry.max_output_tokens.take().is_some()
-               && let Ok(retry) = serde_json::to_vec(&retry) =>
-         {
-            tracing::debug!("upstream rejected max_output_tokens; retrying without it");
-            Some(Bytes::from(retry))
-         },
-         Err(&SendError::BadRequest(ref body))
-            if body == UNDECRYPTABLE
-               && let Some(retry) = drop_undecryptable_payloads(req) =>
-         {
-            Some(retry)
-         },
-         // Cloudflare occasionally 403s fresh headless clients; the cookie
-         // jar picks up clearance on the first response, so retry once.
-         Err(&SendError::Upstream { status: 403, .. }) => Some(req.clone()),
-         _ => None,
-      };
-      let Some(body) = retry_body else {
-         return initial;
-      };
-      self
-         .send_once(
-            access_token,
-            chatgpt_account_id,
-            &body,
-            session_id,
-            model,
-            headers,
-         )
-         .await
+      let mut body = req.clone();
+      let mut retried = false;
+      loop {
+         let result = self
+            .send_once(
+               access_token,
+               chatgpt_account_id,
+               &body,
+               session_id,
+               model,
+               headers,
+            )
+            .await;
+         let retry_body = match result.as_ref() {
+            _ if retried => None,
+            Err(&SendError::BadRequest(ref text))
+               if text.contains("max_output_tokens")
+                  && let Ok(mut retry) = serde_json::from_slice::<Retry>(req)
+                  && retry.max_output_tokens.take().is_some()
+                  && let Ok(retry) = serde_json::to_vec(&retry) =>
+            {
+               tracing::debug!("upstream rejected max_output_tokens; retrying without it");
+               Some(Bytes::from(retry))
+            },
+            Err(&SendError::BadRequest(ref text))
+               if text == UNDECRYPTABLE
+                  && let Some(retry) = drop_undecryptable_payloads(req) =>
+            {
+               Some(retry)
+            },
+            // Cloudflare occasionally 403s fresh headless clients; the cookie
+            // jar picks up clearance on the first response, so retry once.
+            Err(&SendError::Upstream { status: 403, .. }) => Some(req.clone()),
+            _ => None,
+         };
+         let Some(next) = retry_body else {
+            return result;
+         };
+         body = next;
+         retried = true;
+      }
    }
 
    /// Quota without spending an inference request. The same figures ride on
@@ -354,23 +351,6 @@ impl CodexClient {
          .send()
          .await
          .map_err(|err| SendError::Network(err.to_string()))
-   }
-
-   pub async fn models_raw(
-      &self,
-      access_token: &str,
-      chatgpt_account_id: &str,
-   ) -> Result<(reqwest::StatusCode, String), SendError> {
-      let resp = self
-         .models_response(access_token, chatgpt_account_id)
-         .await?;
-      let status = resp.status();
-      let status_u16 = status.as_u16();
-      let body = resp.text().await.map_err(|err| SendError::Upstream {
-         status: status_u16,
-         body: format!("reading models response: {err}"),
-      })?;
-      Ok((status, body))
    }
 
    pub async fn catalog(

@@ -2,7 +2,7 @@ use crate::clock;
 use crate::codex::models::ModelsResponse;
 use crate::codex::turn_state::TurnState;
 use crate::db::Db;
-use crate::db::accounts::{Account, AccountStatus};
+use crate::db::accounts::{Account, AccountField, AccountStatus};
 use crate::oauth::anthropic;
 use crate::oauth::copilot;
 use crate::oauth::refresh;
@@ -62,6 +62,7 @@ struct Credentials {
    expires_at: Option<i64>,
 }
 
+#[derive(Default)]
 struct SlotState {
    status: Status,
    consecutive_fails: u32,
@@ -182,11 +183,23 @@ pub enum Band {
    Spent,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 enum Status {
+   #[default]
    Active,
-   Cooldown { until: i64 },
+   Cooldown {
+      until: i64,
+   },
    Disabled,
+}
+
+impl Status {
+   const fn cooling(self, now: i64) -> Option<i64> {
+      match self {
+         Self::Cooldown { until } if until > now => Some(until),
+         Self::Active | Self::Disabled | Self::Cooldown { .. } => None,
+      }
+   }
 }
 
 /// Point-in-time view of one account for the metrics endpoint.
@@ -240,22 +253,21 @@ impl Slots {
       let slots = self.list().await;
       let mut next = Vec::with_capacity(accounts.len());
       let mut added = 0_usize;
+      let stale = |credentials: &Credentials, slot: &Slot, account: &Account| {
+         credentials.refresh_token != account.refresh_token
+            || credentials.access_token != account.access_token
+            || slot.auth_mode != account.auth_mode
+      };
       for mut account in accounts {
          let mut existing = slots.iter().find(|slot| slot.id == account.id);
          if let Some(slot) = existing {
             let credentials = slot.credentials.lock().await;
-            if credentials.refresh_token != account.refresh_token
-               || credentials.access_token != account.access_token
-               || slot.auth_mode != account.auth_mode
-            {
+            if stale(&credentials, slot, &account) {
                let Some(current) = self.db.find_account(&account.id.to_string()).await? else {
                   continue;
                };
                account = current;
-               if credentials.refresh_token != account.refresh_token
-                  || credentials.access_token != account.access_token
-                  || slot.auth_mode != account.auth_mode
-               {
+               if stale(&credentials, slot, &account) {
                   existing = None;
                }
             }
@@ -265,7 +277,7 @@ impl Slots {
             // Swapping an unchanged slot would strand an in-flight
             // cooldown write on the orphaned Arc.
             Some(slot) if slot_matches(slot, &account) => Arc::clone(slot),
-            Some(slot) => Arc::new(reslot(&account, slot)),
+            Some(slot) => Arc::new(reslot(account, slot)),
             None => {
                added += 1_usize;
                Arc::new(slot_from_account(account))
@@ -273,10 +285,10 @@ impl Slots {
          };
 
          {
-            let mut state = slot.state.lock().await;
-            match (state.status == Status::Disabled, disabled) {
-               (false, true) => state.status = Status::Disabled,
-               (true, false) => state.status = Status::Active,
+            let mut runtime = slot.state.lock().await;
+            match (runtime.status == Status::Disabled, disabled) {
+               (false, true) => runtime.status = Status::Disabled,
+               (true, false) => runtime.status = Status::Active,
                (true, true) | (false, false) => {},
             }
          }
@@ -296,6 +308,10 @@ impl Slots {
       Ok(())
    }
 
+   pub const fn provider(&self) -> Provider {
+      self.provider
+   }
+
    pub async fn len(&self) -> usize {
       self.inner.read().await.len()
    }
@@ -308,14 +324,11 @@ impl Slots {
    pub async fn try_claim(&self, slot: &Slot) -> bool {
       let now = clock::unix_now();
       let mut state = slot.state.lock().await;
-      match state.status {
-         Status::Disabled => false,
-         Status::Cooldown { until } if until > now => false,
-         Status::Active | Status::Cooldown { .. } => {
-            state.status = Status::Active;
-            true
-         },
+      if state.status == Status::Disabled || state.status.cooling(now).is_some() {
+         return false;
       }
+      state.status = Status::Active;
+      true
    }
 
    pub async fn is_disabled(&self, slot: &Slot) -> bool {
@@ -364,7 +377,27 @@ impl Slots {
       slot.state.lock().await.consecutive_fails = 0;
    }
 
-   pub async fn clear_cooldown_if<F>(&self, slot: &Slot, is_obsolete: F) -> eyre::Result<bool>
+   pub async fn clear_cooldown_if<F>(&self, slot: &Slot, is_obsolete: F)
+   where
+      F: FnOnce(i64) -> bool,
+   {
+      match self.try_clear_cooldown(slot, is_obsolete).await {
+         Ok(true) => tracing::info!(
+            provider = %self.provider,
+            account = %slot.display,
+            "cleared a cooldown the account's own quota no longer justifies"
+         ),
+         Ok(false) => {},
+         Err(err) => tracing::warn!(
+            provider = %self.provider,
+            account = %slot.display,
+            error = %err,
+            "failed to clear an obsolete cooldown"
+         ),
+      }
+   }
+
+   async fn try_clear_cooldown<F>(&self, slot: &Slot, is_obsolete: F) -> eyre::Result<bool>
    where
       F: FnOnce(i64) -> bool,
    {
@@ -408,7 +441,7 @@ impl Slots {
       drop(state);
       if let Err(err) = self
          .db
-         .set_account_turn_state(slot.id, &observed.token)
+         .set_account(slot.id, AccountField::TurnState(observed.token.clone()))
          .await
       {
          tracing::warn!("persisting turn-state for {} failed: {err}", slot.display);
@@ -479,10 +512,11 @@ impl Slots {
       let mut out = Vec::with_capacity(slots.len());
       for slot in &slots {
          let state = slot.state.lock().await;
-         let (status, cooldown_seconds) = match state.status {
-            Status::Cooldown { until } if until > now => (1, until - now),
-            Status::Active | Status::Cooldown { .. } => (0, 0),
-            Status::Disabled => (2, 0),
+         let cooling = state.status.cooling(now);
+         let status = if state.status == Status::Disabled {
+            2
+         } else {
+            u8::from(cooling.is_some())
          };
          out.push(AccountSnapshot {
             provider: self.provider,
@@ -490,7 +524,7 @@ impl Slots {
             plan: slot.plan.clone(),
             trusted: slot.trusted,
             status,
-            cooldown_seconds,
+            cooldown_seconds: cooling.map_or(0, |until| until - now),
             consecutive_fails: state.consecutive_fails,
             usage: state.usage.clone(),
          });
@@ -523,21 +557,14 @@ impl Slots {
          Provider::OpenAi => refresh::refresh(&credentials.refresh_token).await,
          Provider::Anthropic => anthropic::refresh(&credentials.refresh_token).await,
          Provider::Copilot => copilot::mint(&credentials.refresh_token).await,
-         Provider::Gemini => Err(RefreshError::Terminal(
-            "google oauth grants are not implemented, add the account with an api key".into(),
-         )),
-         Provider::Glm => Err(RefreshError::Terminal(
-            "z.ai issues static keys, there is nothing to exchange".into(),
-         )),
-         Provider::DeepSeek => Err(RefreshError::Terminal(
-            "deepseek issues static keys, there is nothing to exchange".into(),
-         )),
-         Provider::Experiential => Err(RefreshError::Terminal(
-            "experiential issues static keys, there is nothing to exchange".into(),
-         )),
-         Provider::Zen => Err(RefreshError::Terminal(
-            "zen issues static keys, there is nothing to exchange".into(),
-         )),
+         Provider::Gemini
+         | Provider::Glm
+         | Provider::DeepSeek
+         | Provider::Experiential
+         | Provider::Zen => Err(RefreshError::Terminal(format!(
+            "{} issues static keys, there is nothing to exchange",
+            self.provider
+         ))),
       };
       match refreshed {
          Ok(tokens) => {
@@ -574,20 +601,18 @@ impl Slots {
       let until = clock::unix_now() + secs;
       let persist = {
          let mut state = slot.state.lock().await;
-         if state.status == Status::Disabled {
-            None
-         } else {
-            let extend = match state.status {
-               Status::Cooldown { until: current } => current < until,
-               Status::Active => true,
-               Status::Disabled => false,
-            };
+         let extend = match state.status {
+            Status::Cooldown { until: current } => current < until,
+            Status::Active => true,
+            Status::Disabled => false,
+         };
+         if state.status != Status::Disabled {
             state.consecutive_fails += 1;
-            extend.then(|| {
-               state.status = Status::Cooldown { until };
-               until
-            })
          }
+         extend.then(|| {
+            state.status = Status::Cooldown { until };
+            until
+         })
       };
       tracing::warn!("account {} cooling down {secs}s ({why})", slot.display);
       if let Some(cooldown_until) = persist {
@@ -644,10 +669,7 @@ impl Slots {
    pub async fn cooldown_left(&self, slot: &Slot) -> i64 {
       let now = clock::unix_now();
       let status = slot.state.lock().await.status;
-      match status {
-         Status::Cooldown { until } if until > now => until - now,
-         Status::Active | Status::Disabled | Status::Cooldown { .. } => 0,
-      }
+      status.cooling(now).map_or(0, |until| until - now)
    }
 
    pub async fn min_cooldown(&self) -> i64 {
@@ -712,21 +734,12 @@ fn slot_matches(slot: &Slot, account: &Account) -> bool {
 }
 
 /// A fresh slot carrying the previous one's cooldown, tokens and quota sample.
-fn reslot(account: &Account, prev: &Slot) -> Slot {
+fn reslot(account: Account, prev: &Slot) -> Slot {
    Slot {
-      id: account.id,
-      provider_account_id: account.provider_account_id.clone(),
-      trusted: account.trusted,
-      reserved: account.reserved,
-      egress: account.egress,
-      allowed_users: account.allowed_users.clone(),
-      auth_mode: account.auth_mode,
-      plan: account.plan_type.clone(),
-      http_referer: account.http_referer.clone(),
-      display: display_for(account),
       credentials: Arc::clone(&prev.credentials),
       catalog_refresh: Arc::clone(&prev.catalog_refresh),
       state: Arc::clone(&prev.state),
+      ..slot_from_account(account)
    }
 }
 
@@ -759,15 +772,39 @@ fn slot_from_account(account: Account) -> Slot {
       catalog_refresh: Arc::new(Mutex::new(())),
       state: Arc::new(Mutex::new(SlotState {
          status,
-         consecutive_fails: 0,
-         usage: None,
-         limit_windows: BTreeMap::new(),
-         model_cooldowns: BTreeMap::new(),
-         catalog: None,
-         catalog_at: 0,
          turn_state: account.turn_state.as_deref().and_then(TurnState::parse),
-         turn_state_refused_at: 0,
+         ..SlotState::default()
       })),
+   }
+}
+
+#[cfg(test)]
+fn test_slot(id: i64, trusted: bool, provider: Provider) -> Slot {
+   Slot {
+      id,
+      provider_account_id: format!("acct-{id}"),
+      display: format!("a{id}"),
+      trusted,
+      reserved: false,
+      egress: false,
+      allowed_users: Vec::new(),
+      auth_mode: match provider {
+         Provider::OpenAi | Provider::Anthropic | Provider::Copilot => AuthMode::OAuth,
+         Provider::Gemini
+         | Provider::Glm
+         | Provider::DeepSeek
+         | Provider::Zen
+         | Provider::Experiential => AuthMode::ApiKey,
+      },
+      plan: None,
+      http_referer: None,
+      credentials: Arc::new(Mutex::new(Credentials {
+         access_token: "at".into(),
+         refresh_token: "rt".into(),
+         expires_at: None,
+      })),
+      catalog_refresh: Arc::new(Mutex::new(())),
+      state: Arc::new(Mutex::new(SlotState::default())),
    }
 }
 
@@ -777,44 +814,7 @@ pub fn test_slots(db: Db, provider: Provider, ids: &[(i64, bool)]) -> Slots {
       provider,
       inner: RwLock::new(
          ids.iter()
-            .map(|&(id, trusted)| {
-               Arc::new(Slot {
-                  id,
-                  provider_account_id: format!("acct-{id}"),
-                  display: format!("a{id}"),
-                  trusted,
-                  reserved: false,
-                  egress: false,
-                  allowed_users: Vec::new(),
-                  auth_mode: match provider {
-                     Provider::OpenAi | Provider::Anthropic | Provider::Copilot => AuthMode::OAuth,
-                     Provider::Gemini
-                     | Provider::Glm
-                     | Provider::DeepSeek
-                     | Provider::Zen
-                     | Provider::Experiential => AuthMode::ApiKey,
-                  },
-                  plan: None,
-                  http_referer: None,
-                  credentials: Arc::new(Mutex::new(Credentials {
-                     access_token: "at".into(),
-                     refresh_token: "rt".into(),
-                     expires_at: None,
-                  })),
-                  catalog_refresh: Arc::new(Mutex::new(())),
-                  state: Arc::new(Mutex::new(SlotState {
-                     status: Status::Active,
-                     consecutive_fails: 0,
-                     usage: None,
-                     limit_windows: BTreeMap::new(),
-                     model_cooldowns: BTreeMap::new(),
-                     catalog: None,
-                     catalog_at: 0,
-                     turn_state: None,
-                     turn_state_refused_at: 0,
-                  })),
-               })
-            })
+            .map(|&(id, trusted)| Arc::new(test_slot(id, trusted, provider)))
             .collect(),
       ),
       db,
@@ -828,33 +828,8 @@ mod allowlist_tests {
 
    fn slot(allowed: &[&str]) -> Slot {
       Slot {
-         id: 1,
-         provider_account_id: "acct-1".into(),
-         display: "a1".into(),
-         trusted: false,
-         reserved: false,
-         egress: false,
          allowed_users: allowed.iter().map(|user| (*user).to_owned()).collect(),
-         auth_mode: AuthMode::OAuth,
-         plan: None,
-         http_referer: None,
-         credentials: Arc::new(Mutex::new(Credentials {
-            access_token: "at".into(),
-            refresh_token: "rt".into(),
-            expires_at: None,
-         })),
-         catalog_refresh: Arc::new(Mutex::new(())),
-         state: Arc::new(Mutex::new(SlotState {
-            status: Status::Active,
-            consecutive_fails: 0,
-            usage: None,
-            limit_windows: BTreeMap::new(),
-            model_cooldowns: BTreeMap::new(),
-            catalog: None,
-            catalog_at: 0,
-            turn_state: None,
-            turn_state_refused_at: 0,
-         })),
+         ..test_slot(1, false, Provider::OpenAi)
       }
    }
 
@@ -883,9 +858,7 @@ mod band_tests {
                resets_at: Some(now + resets_in),
             })
             .collect(),
-         model_windows: Vec::new(),
-         locked: false,
-         observed_at: 0,
+         ..AccountUsage::default()
       }
    }
 
@@ -991,7 +964,7 @@ mod concurrency_tests {
    async fn metadata_reload_keeps_in_flight_runtime_updates() {
       let (db, slots) = slots().await;
       let old = slots.list().await.remove(0);
-      db.set_account_trusted(&old.id.to_string(), true)
+      db.set_account(old.id, AccountField::Trusted(true))
          .await
          .unwrap();
       slots.reload().await.unwrap();
@@ -1028,9 +1001,7 @@ mod idle_window_tests {
                resets_at: Some(now + 100 * hour),
             },
          ],
-         model_windows: Vec::new(),
-         locked: false,
-         observed_at: 0,
+         ..AccountUsage::default()
       };
       assert_eq!(usage_data.band(0.9, now), Band::Spent);
    }

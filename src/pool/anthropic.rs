@@ -84,22 +84,10 @@ impl Pool<AnthropicClient> {
          };
          match self.backend.usage(&token).await {
             Ok(usage) => {
-               match self
+               self
                   .slots
                   .clear_cooldown_if(&slot, |until| usage.cooldown_is_obsolete(until))
-                  .await
-               {
-                  Ok(true) => tracing::info!(
-                     account = %slot.display,
-                     "cleared cooldown for an inactive Anthropic quota window"
-                  ),
-                  Ok(false) => {},
-                  Err(err) => tracing::warn!(
-                     account = %slot.display,
-                     error = %err,
-                     "failed to clear obsolete Anthropic cooldown"
-                  ),
-               }
+                  .await;
                let windows = usage
                   .windows()
                   .map(|(name, window)| UsageWindow {
@@ -127,7 +115,7 @@ impl Pool<AnthropicClient> {
                            })
                            .collect(),
                         locked: usage.locked(),
-                        observed_at: 0,
+                        ..AccountUsage::default()
                      },
                   )
                   .await;
@@ -224,9 +212,7 @@ mod tests {
                      utilization: used,
                      resets_at: Some(hours(resets_in)),
                   }],
-                  model_windows: Vec::new(),
-                  locked: false,
-                  observed_at: 0,
+                  ..AccountUsage::default()
                },
             )
             .await;
@@ -250,14 +236,12 @@ mod tests {
          .note_usage(
             &head,
             AccountUsage {
-               model_windows: Vec::new(),
                windows: vec![UsageWindow {
                   name: "5h".into(),
                   utilization: 0.97,
                   resets_at: None,
                }],
-               locked: false,
-               observed_at: 0,
+               ..AccountUsage::default()
             },
          )
          .await;
@@ -271,14 +255,13 @@ mod tests {
          .note_usage(
             &fresh,
             AccountUsage {
-               model_windows: Vec::new(),
                windows: vec![UsageWindow {
                   name: "5h".into(),
                   utilization: 0.01,
                   resets_at: None,
                }],
                locked: true,
-               observed_at: 0,
+               ..AccountUsage::default()
             },
          )
          .await;

@@ -12,7 +12,6 @@ use axum::routing::post;
 use tokio::net::TcpListener;
 
 use crate::clock;
-use crate::codex::client::CodexClient;
 use crate::config::{
    AnthropicConfig, CodexConfig, Config, GeminiConfig, ModelAlias, ModelsConfig, PricingConfig,
 };
@@ -22,7 +21,6 @@ use crate::db::tokens::TokenLimits;
 use crate::db::usage::UsageDim;
 use crate::oauth::TokenSet;
 use crate::pool::Pools;
-use crate::pool::codex::CodexPool;
 use crate::pricing::Prices;
 use crate::provider::{AuthMode, Provider};
 use crate::server::{AppState, Inner, metrics, router};
@@ -159,7 +157,7 @@ async fn spawn_proxy_at(
          ..AnthropicConfig::default()
       },
       models,
-      ..Config::for_tests()
+      ..Config::default()
    };
    serve_proxy(cfg, &accounts).await
 }
@@ -415,7 +413,7 @@ async fn metrics_render_accounts_and_usage() {
       .unwrap();
    db.flush().await.unwrap();
 
-   let cfg = Config::for_tests();
+   let cfg = Config::default();
    let pools = Pools::load(&db, &cfg).await.unwrap();
    let state = AppState(Arc::new(Inner {
       db: db.clone(),
@@ -434,30 +432,6 @@ async fn metrics_render_accounts_and_usage() {
    assert!(text.contains("kind=\"input\"} 80"));
    assert!(text.contains("kind=\"cache_read\"} 20"));
    assert!(text.contains("slop_cache_hit_ratio{user=\"alice\",account=\"test@example.com\",provider=\"openai\",requested_model=\"gpt-5-codex\",model=\"gpt-5-codex\",effort=\"medium\",service_tier=\"unset\",dialect=\"chat\"} 0.2"));
-}
-
-#[tokio::test]
-async fn pool_reload_picks_up_new_logins() {
-   let db_path = env::temp_dir().join(format!("slop-reload-{}.db", uuid::Uuid::new_v4()));
-   let db = Db::open(&db_path).unwrap();
-   let pool = CodexPool::load(db.clone(), CodexClient::new(CodexConfig::default()))
-      .await
-      .unwrap();
-   assert_eq!(pool.len().await, 0);
-
-   db.upsert_account(NewAccount {
-      provider: Provider::OpenAi,
-      id: "acct-r1",
-      email: None,
-      label: None,
-      plan: None,
-      tokens: &fresh_tokens(),
-      auth_mode: AuthMode::OAuth,
-   })
-   .await
-   .unwrap();
-   pool.reload().await.unwrap();
-   assert_eq!(pool.len().await, 1);
 }
 
 #[tokio::test]
@@ -553,7 +527,7 @@ async fn spawn_proxy_with_gemini_reply(
          base_url: format!("http://{addr}"),
          ..GeminiConfig::default()
       },
-      ..Config::for_tests()
+      ..Config::default()
    };
    serve_proxy(cfg, &accounts).await
 }

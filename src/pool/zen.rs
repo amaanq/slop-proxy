@@ -7,8 +7,8 @@ use rand::{Rng as _, thread_rng};
 use crate::clock::unix_now_ms;
 use crate::pool::{Backend, Pool, Relay, Route, Slot};
 use crate::provider::Provider;
-use crate::translate::anthropic_req::empty_schema;
 use crate::translate::chat::{ChatRequest, ChatToolDef, FunctionDef};
+use crate::translate::empty_schema;
 use crate::upstream::SendError;
 use crate::zen::{ZenClient, ZenModel};
 

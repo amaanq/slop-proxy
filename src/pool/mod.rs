@@ -117,10 +117,6 @@ pub trait Backend: Send + Sync + 'static {
    /// serve it. Ciphertext in a replayed history decrypts on any account,
    /// probed both ways on 2026-09-07, so moving is safe.
    const SESSION_AFFINITY: bool = false;
-   /// How long a bound session sleeps through its own account's cooldown.
-   /// Rate-limit cooldowns here are 60s, and the alternative is failing the
-   /// turn, since the session cannot be served anywhere else.
-   const BOUND_WAIT_SECS: i64 = 0;
    /// The backend serves without an account, zen's free tier.
    const ANONYMOUS: bool = false;
 
@@ -255,14 +251,10 @@ impl<B: Backend> Pool<B> {
       (clock::unix_now() - entry.seen < BINDING_TTL_SECS).then_some(entry.account_id)
    }
 
-   /// A bound session has nowhere else to go, so a short cooldown on its own
-   /// account is worth sleeping through rather than failing the turn.
-   async fn wait_out_own_cooldown(&self, route: Route<'_>, preferred: Option<&Arc<Slot>>) {
-      let wait = if self.bound_account(route.session_key).await.is_some() {
-         B::BOUND_WAIT_SECS
-      } else {
-         B::STICKY_WAIT_SECS
-      };
+   /// A short cooldown on the session's own account is worth sleeping through
+   /// rather than losing the prompt cache.
+   async fn wait_out_own_cooldown(&self, preferred: Option<&Arc<Slot>>) {
+      let wait = B::STICKY_WAIT_SECS;
       let Some(preferred) = preferred.filter(|_| wait > 0) else {
          return;
       };
@@ -295,8 +287,8 @@ impl<B: Backend> Pool<B> {
       );
    }
 
-   pub const fn backend(&self) -> &B {
-      &self.backend
+   pub async fn slot(&self, account_id: Option<i64>) -> Option<Arc<Slot>> {
+      self.slots.by_id(account_id?).await
    }
 
    /// Every account on one provider sees the same catalog, so the first that
@@ -316,18 +308,6 @@ impl<B: Backend> Pool<B> {
          }
       }
       None
-   }
-
-   pub async fn len(&self) -> usize {
-      self.slots.len().await
-   }
-
-   pub async fn reload(&self) -> eyre::Result<()> {
-      self.slots.reload().await
-   }
-
-   pub async fn snapshot(&self) -> Vec<AccountSnapshot> {
-      self.slots.snapshot().await
    }
 
    /// An account with an allowlist is invisible to everyone else, and a pinned
@@ -357,7 +337,7 @@ impl<B: Backend> Pool<B> {
          if slot.reserved != route.reserved_only {
             continue;
          }
-         if B::PROVIDER == Provider::OpenAi
+         if B::TIERED
             && let Some(tier) = route.explicit_tier()
             && !self.slots.serves_tier(&slot, route.model, tier).await
          {
@@ -394,6 +374,29 @@ impl<B: Backend> Pool<B> {
          self.slots.note_usage(slot, usage).await;
       }
       resp
+   }
+
+   fn bad_request(route: Route<'_>, body: String) -> PoolError {
+      PoolError::BadRequest {
+         provider: B::PROVIDER,
+         model: route.model.into(),
+         body,
+      }
+   }
+
+   async fn deliver(
+      &self,
+      slot: &Slot,
+      route: Route<'_>,
+      resp: B::Response,
+      attempts: u32,
+   ) -> Served<B::Response> {
+      self.bind_session(route.session_key, slot.id).await;
+      Served {
+         account_id: Some(slot.id),
+         response: self.served(slot, resp).await,
+         attempts,
+      }
    }
 
    /// Google refills a token bucket in 20-40s and the whole pool empties at
@@ -437,17 +440,16 @@ impl<B: Backend> Pool<B> {
    ) -> Result<Served<B::Response>, PoolError> {
       let ranked = self.ranked(route).await;
       if ranked.is_empty() {
-         if B::PROVIDER == Provider::OpenAi
+         if B::TIERED
             && let Some(tier) = route.explicit_tier()
          {
-            return Err(PoolError::BadRequest {
-               provider: B::PROVIDER,
-               model: route.model.to_owned(),
-               body: format!(
+            return Err(Self::bad_request(
+               route,
+               format!(
                   "no eligible account advertises service tier {tier} for {}",
                   route.model
                ),
-            });
+            ));
          }
          if B::ANONYMOUS {
             return match self.backend.send_anonymous(route, req).await {
@@ -456,11 +458,7 @@ impl<B: Backend> Pool<B> {
                   response: resp,
                   attempts: prior_attempts,
                }),
-               Err(SendError::BadRequest(body)) => Err(PoolError::BadRequest {
-                  provider: B::PROVIDER,
-                  model: route.model.into(),
-                  body: B::reason(body),
-               }),
+               Err(SendError::BadRequest(body)) => Err(Self::bad_request(route, B::reason(body))),
                Err(SendError::RateLimited { retry_after, .. }) => Err(PoolError::AllCoolingDown {
                   retry_after: retry_after.unwrap_or(30),
                   attempts: prior_attempts,
@@ -470,7 +468,7 @@ impl<B: Backend> Pool<B> {
          }
          return Err(PoolError::NoAccounts(B::PROVIDER));
       }
-      self.wait_out_own_cooldown(route, ranked.first()).await;
+      self.wait_out_own_cooldown(ranked.first()).await;
       let mut last_err = Option::<SendError>::None;
       let mut attempts = 0_u32;
       for slot in ranked {
@@ -487,12 +485,9 @@ impl<B: Backend> Pool<B> {
          };
          match self.backend.send(&token, &slot, route, req).await {
             Ok(resp) => {
-               self.bind_session(route.session_key, slot.id).await;
-               return Ok(Served {
-                  account_id: Some(slot.id),
-                  response: self.served(&slot, resp).await,
-                  attempts: prior_attempts.saturating_add(attempts),
-               });
+               return Ok(self
+                  .deliver(&slot, route, resp, prior_attempts.saturating_add(attempts))
+                  .await);
             },
             Err(SendError::Auth(text)) => match B::ON_AUTH {
                AuthPolicy::CoolKey(secs) => {
@@ -504,12 +499,9 @@ impl<B: Backend> Pool<B> {
                   if let Ok(fresh) = self.slots.fresh_token(&slot, true).await {
                      match self.backend.send(&fresh, &slot, route, req).await {
                         Ok(resp) => {
-                           self.bind_session(route.session_key, slot.id).await;
-                           return Ok(Served {
-                              account_id: Some(slot.id),
-                              response: self.served(&slot, resp).await,
-                              attempts: prior_attempts.saturating_add(attempts),
-                           });
+                           return Ok(self
+                              .deliver(&slot, route, resp, prior_attempts.saturating_add(attempts))
+                              .await);
                         },
                         Err(err) => {
                            self.slots.cool(&slot, 60, "post-refresh failure").await;
@@ -551,11 +543,7 @@ impl<B: Backend> Pool<B> {
                last_err = Some(SendError::Network(text));
             },
             Err(SendError::BadRequest(body)) => {
-               return Err(PoolError::BadRequest {
-                  provider: B::PROVIDER,
-                  model: route.model.into(),
-                  body: B::reason(body),
-               });
+               return Err(Self::bad_request(route, B::reason(body)));
             },
             Err(err) => {
                self.slots.cool_failure(&slot, &err.to_string()).await;
@@ -564,11 +552,7 @@ impl<B: Backend> Pool<B> {
          }
       }
       match last_err {
-         Some(SendError::BadRequest(body)) => Err(PoolError::BadRequest {
-            provider: B::PROVIDER,
-            model: route.model.into(),
-            body: B::reason(body),
-         }),
+         Some(SendError::BadRequest(body)) => Err(Self::bad_request(route, B::reason(body))),
          Some(SendError::RateLimited { .. } | SendError::ModelLimited { .. }) | None => {
             Err(PoolError::AllCoolingDown {
                retry_after: self.slots.min_cooldown().await.max(30),

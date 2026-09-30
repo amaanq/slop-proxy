@@ -72,7 +72,7 @@ async fn proxy(base_url: String) -> (String, Db) {
          .into(),
          ..ModelsConfig::default()
       },
-      ..Config::for_tests()
+      ..Config::default()
    };
    serve_proxy(cfg, &accounts).await
 }

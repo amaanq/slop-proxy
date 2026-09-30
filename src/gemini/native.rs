@@ -17,7 +17,6 @@ use crate::translate::chat::{
    ChatRequest, ChatToolCall, ChatToolChoice, ChatUsage, ChunkChoice, CompletionTokensDetails,
    ExtraContent, FunctionBody, ImageRef, PromptTokensDetails,
 };
-use crate::translate::chat_req::clamped_effort;
 
 #[derive(Debug, thiserror::Error)]
 pub enum NativeError {
@@ -115,7 +114,7 @@ pub fn request(req: &ChatRequest) -> Result<NativeRequest, NativeError> {
          parts = vec![Part {
             function_response: Some(FunctionResponse {
                name,
-               response: tool_response(message.content.as_ref()),
+               response: tool_response(message),
             }),
             ..Part::default()
          }];
@@ -193,21 +192,15 @@ fn media_part(url: &str, fallback_mime: &str) -> Result<Part, NativeError> {
    })
 }
 
-fn tool_response(content: Option<&ChatContent>) -> Box<RawValue> {
+fn tool_response(message: &ChatMessage) -> Box<RawValue> {
    #[derive(Serialize)]
    struct Wrapped {
       result: Box<RawValue>,
    }
-   let text = match content {
-      Some(&ChatContent::Text(ref raw)) => raw.clone(),
-      Some(&ChatContent::Parts(ref parts)) => parts
-         .iter()
-         .filter_map(|part| match *part {
-            ChatPart::Text { ref text } => Some(text.as_str()),
-            ChatPart::ImageUrl { .. } | ChatPart::InputAudio { .. } | ChatPart::Other => None,
-         })
-         .collect(),
-      None => "null".into(),
+   let text = if message.content.is_none() {
+      "null".into()
+   } else {
+      message.text()
    };
    let wrap = |result| to_raw_value(&Wrapped { result }).expect("response serializes");
    match RawValue::from_string(text.clone()) {
@@ -244,8 +237,7 @@ fn generation_config(req: &ChatRequest) -> Option<GenerationConfig> {
       stop_sequences: req.stop.clone().map(chat::StopSequences::into_vec),
       response_mime_type: mime,
       response_json_schema: schema,
-      thinking_config: req.reasoning_effort.as_deref().map(|effort| {
-         let level = clamped_effort(effort);
+      thinking_config: req.reasoning_effort.as_deref().map(|level| {
          let gemini_three = req
             .model
             .trim_start_matches("models/")
@@ -298,16 +290,12 @@ fn tools(req: &ChatRequest) -> Result<Option<Vec<Tool>>, NativeError> {
 
 fn tool_config(req: &ChatRequest) -> Option<ToolConfig> {
    let config = match *req.tool_choice.as_ref()? {
-      ChatToolChoice::Mode(ref mode) if mode == "none" => FunctionCallingConfig {
-         mode: FunctionCallingMode::None,
-         allowed_function_names: None,
-      },
-      ChatToolChoice::Mode(ref mode) if mode == "required" => FunctionCallingConfig {
-         mode: FunctionCallingMode::Any,
-         allowed_function_names: None,
-      },
-      ChatToolChoice::Mode(_) => FunctionCallingConfig {
-         mode: FunctionCallingMode::Auto,
+      ChatToolChoice::Mode(ref mode) => FunctionCallingConfig {
+         mode: match mode.as_str() {
+            "none" => FunctionCallingMode::None,
+            "required" => FunctionCallingMode::Any,
+            _ => FunctionCallingMode::Auto,
+         },
          allowed_function_names: None,
       },
       ChatToolChoice::Named { ref function, .. } => FunctionCallingConfig {
@@ -331,7 +319,7 @@ pub fn response(body: &[u8], requested_model: &str) -> Result<ChatCompletion, Na
       .iter()
       .enumerate()
       .map(|(index, candidate)| {
-         let (index, message, finish_reason) = choice(candidate, index, false);
+         let (index, message, finish_reason) = choice(candidate, index);
          ChatChoice {
             index,
             message,
@@ -359,7 +347,6 @@ pub fn response(body: &[u8], requested_model: &str) -> Result<ChatCompletion, Na
 fn choice(
    candidate: &Candidate,
    fallback_index: usize,
-   streaming: bool,
 ) -> (u64, ChatMessage, Option<chat::FinishReason>) {
    let mut text = String::new();
    let mut reasoning = String::new();
@@ -376,12 +363,7 @@ fn choice(
          text.push_str(value);
       }
       if let Some(call) = part.function_call.as_ref() {
-         tool_calls.push(tool_call(
-            call,
-            part.thought_signature.as_deref(),
-            tool_calls.len(),
-            streaming,
-         ));
+         tool_calls.push(tool_call(call, part.thought_signature.as_deref()));
       }
       if let Some(data) = part.inline_data.as_ref()
          && !data.data.is_empty()
@@ -416,12 +398,7 @@ fn choice(
    )
 }
 
-fn tool_call(
-   call: &FunctionCall,
-   signature: Option<&str>,
-   index: usize,
-   streaming: bool,
-) -> ChatToolCall {
+fn tool_call(call: &FunctionCall, signature: Option<&str>) -> ChatToolCall {
    let args = call
       .args
       .clone()
@@ -433,7 +410,7 @@ fn tool_call(
             .clone()
             .unwrap_or_else(|| format!("call_{}", uuid::Uuid::new_v4().simple())),
       ),
-      index: streaming.then_some(index as u64),
+      index: None,
       kind: Some("function".into()),
       function: FunctionBody {
          name: Some(call.name.clone()),
@@ -545,7 +522,7 @@ impl NativeStream {
       let mut choices = Vec::new();
       let mut finished = false;
       for (fallback_index, candidate) in event.candidates.iter().enumerate() {
-         let (index, mut message, mut finish_reason) = choice(candidate, fallback_index, true);
+         let (index, mut message, mut finish_reason) = choice(candidate, fallback_index);
          let count = self.tool_counts.entry(index).or_default();
          for call in message.tool_calls.iter_mut().flatten() {
             call.index = Some(*count);
@@ -705,7 +682,7 @@ mod signature_tests {
               "thoughtSignature": "EtUBCtIB"
           }]}
       }));
-      let (_, message, _) = choice(&candidate, 0, false);
+      let (_, message, _) = choice(&candidate, 0);
       let call = serde_json::to_value(&message.tool_calls.unwrap()[0]).unwrap();
       assert_eq!(
          call["extra_content"]["google"]["thought_signature"],

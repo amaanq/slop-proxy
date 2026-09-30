@@ -167,30 +167,24 @@ pub enum FunctionCallingMode {
    None,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct GenerateContentResponse {
-   #[serde(skip_serializing_if = "Option::is_none")]
    pub response_id: Option<String>,
    pub candidates: Vec<Candidate>,
-   #[serde(skip_serializing_if = "Option::is_none")]
    pub usage_metadata: Option<UsageMetadata>,
-   #[serde(skip_serializing_if = "Option::is_none")]
    pub error: Option<ApiError>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Candidate {
-   #[serde(skip_serializing_if = "Option::is_none")]
    pub index: Option<u64>,
-   #[serde(skip_serializing_if = "Option::is_none")]
    pub content: Option<Content>,
-   #[serde(skip_serializing_if = "Option::is_none")]
    pub finish_reason: Option<FinishReason>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum FinishReason {
    #[serde(rename = "FINISH_REASON_UNSPECIFIED")]
@@ -216,13 +210,12 @@ impl FinishReason {
    }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct UsageMetadata {
    pub prompt_token_count: i64,
    pub candidates_token_count: i64,
    pub thoughts_token_count: i64,
-   #[serde(skip_serializing_if = "Option::is_none")]
    pub total_token_count: Option<i64>,
    pub cached_content_token_count: i64,
 }
@@ -240,25 +233,21 @@ pub struct ApiError {
    pub details: Option<Vec<Box<RawValue>>>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ModelList {
    pub data: Vec<ModelEntry>,
    pub models: Vec<ModelEntry>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ModelEntry {
-   #[serde(skip_serializing_if = "Option::is_none")]
    pub id: Option<String>,
-   #[serde(skip_serializing_if = "Option::is_none")]
    pub name: Option<String>,
    /// Only the native surface sends this. `embedContent`, `bidiGenerateContent`
    /// and `predictLongRunning` name models this proxy carries no path for.
-   #[serde(skip_serializing_if = "Vec::is_empty")]
    pub supported_generation_methods: Vec<String>,
-   #[serde(skip_serializing_if = "Option::is_none")]
    pub input_token_limit: Option<i64>,
 }
 

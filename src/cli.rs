@@ -4,20 +4,18 @@ use eyre::{Result, bail, eyre};
 use pound::Parse;
 
 use crate::clock;
-use crate::codex;
 use crate::codex::client::CodexClient;
 use crate::codex::models::ModelInfo;
 use crate::config::Config;
 use crate::db::Db;
-use crate::db::accounts::AccountStatus;
 use crate::db::accounts::NewAccount;
+use crate::db::accounts::{Account, AccountField, AccountStatus};
 use crate::db::tokens;
 use crate::db::tokens::TokenLimits;
 use crate::oauth;
 use crate::oauth::anthropic;
 use crate::oauth::copilot;
 use crate::oauth::glm;
-use crate::oauth::refresh;
 use crate::pool::codex::CodexPool;
 use crate::provider::{AuthMode, Provider};
 use crate::server;
@@ -81,12 +79,6 @@ pub enum Command {
    },
    /// List the models available from the codex backend, as JSON
    Models,
-   /// Debug helpers
-   #[pound(hidden)]
-   Debug {
-      #[pound(subcommand)]
-      command: DebugCommand,
-   },
 }
 
 #[derive(Parse)]
@@ -150,15 +142,15 @@ pub enum TokenCommand {
       #[pound(long)]
       user: String,
       /// Maximum requests in each rolling window
-      #[pound(long)]
+      #[pound(long, min = "1")]
       requests: Option<i64>,
       /// Maximum input plus output tokens in each rolling window
-      #[pound(long)]
+      #[pound(long, min = "1")]
       tokens: Option<i64>,
-      #[pound(long, default = "3600")]
+      #[pound(long, default = "3600", min = "1")]
       window_seconds: i64,
       /// Delay every admitted request by this many milliseconds
-      #[pound(long, default = "0")]
+      #[pound(long, default = "0", min = "0")]
       slowdown_ms: i64,
       /// Serve this token from trusted accounts when any are available
       #[pound(long)]
@@ -180,13 +172,13 @@ pub enum TokenCommand {
    /// Replace limits for a token id or prefix; omitted limits are unlimited
    Limits {
       token: String,
-      #[pound(long)]
+      #[pound(long, min = "1")]
       requests: Option<i64>,
-      #[pound(long)]
+      #[pound(long, min = "1")]
       tokens: Option<i64>,
-      #[pound(long, default = "3600")]
+      #[pound(long, default = "3600", min = "1")]
       window_seconds: i64,
-      #[pound(long, default = "0")]
+      #[pound(long, default = "0", min = "0")]
       slowdown_ms: i64,
       #[pound(long)]
       prefer_trusted: bool,
@@ -204,21 +196,6 @@ pub enum TokenCommand {
    Usage { token: String },
 }
 
-#[derive(Parse)]
-pub enum DebugCommand {
-   /// Send a raw request upstream and dump the SSE events
-   Ping {
-      #[pound(long)]
-      model: Option<String>,
-      #[pound(long, default = "Say the word: pong")]
-      prompt: String,
-   },
-   /// Force a token refresh for an account
-   Refresh { account: String },
-   /// Dump the raw models endpoint response from the codex backend
-   Models,
-}
-
 pub async fn run(args: Cli, cfg: Config) -> Result<()> {
    let db = Db::open(&cfg.db_path)?;
 
@@ -227,22 +204,13 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
          Provider::OpenAi => oauth::login(&db, label).await,
          Provider::Anthropic => anthropic::login(&db, label).await,
          Provider::Copilot => copilot::login(&db, label).await,
-         Provider::Gemini => Err(eyre::eyre!(
-            "google has no device-code flow here, use `accounts add-key --provider gemini`"
-         )),
-         Provider::DeepSeek => Err(eyre::eyre!(
-            "deepseek issues static keys, use `accounts add-key --provider deepseek`"
-         )),
+         Provider::Gemini | Provider::DeepSeek | Provider::Experiential | Provider::Zen => {
+            bail!("{provider} has no login flow, use `accounts add-key --provider {provider}`")
+         },
          Provider::Glm => {
             let key = glm::login().await?;
             accounts_add_key(&db, Provider::Glm, &key, label.as_deref(), None, false).await
          },
-         Provider::Experiential => Err(eyre::eyre!(
-            "experiential issues static keys, use `accounts add-key --provider experiential`"
-         )),
-         Provider::Zen => Err(eyre::eyre!(
-            "zen serves its free models without a credential, use `accounts add-key --provider zen` if you have one"
-         )),
       },
       Command::Accounts { command } => match command {
          AccountsCommand::List => accounts_list(&db).await,
@@ -264,9 +232,36 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
             .await
          },
          AccountsCommand::Remove { account } => accounts_remove(&db, &account).await,
-         AccountsCommand::Trust { account, off } => accounts_trust(&db, &account, !off).await,
-         AccountsCommand::Reserve { account, off } => accounts_reserve(&db, &account, !off).await,
-         AccountsCommand::Egress { account, off } => accounts_egress(&db, &account, !off).await,
+         AccountsCommand::Trust { account, off } => {
+            accounts_toggle(
+               &db,
+               &account,
+               AccountField::Trusted,
+               !off,
+               ["trusted", "untrusted"],
+            )
+            .await
+         },
+         AccountsCommand::Reserve { account, off } => {
+            accounts_toggle(
+               &db,
+               &account,
+               AccountField::Reserved,
+               !off,
+               ["reserved", "unreserved"],
+            )
+            .await
+         },
+         AccountsCommand::Egress { account, off } => {
+            accounts_toggle(
+               &db,
+               &account,
+               AccountField::Egress,
+               !off,
+               ["egressed", "direct"],
+            )
+            .await
+         },
          AccountsCommand::Users { account, allow } => {
             accounts_users(&db, &account, allow.as_deref().unwrap_or_default()).await
          },
@@ -334,11 +329,6 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
       },
       Command::Stats { since, until } => stats::run(&db, since, until).await,
       Command::Models => models(&db, &cfg).await,
-      Command::Debug { command } => match command {
-         DebugCommand::Ping { model, prompt } => codex::debug_ping(&db, &cfg, model, prompt).await,
-         DebugCommand::Refresh { account } => debug_refresh(&db, &account).await,
-         DebugCommand::Models => codex::debug_models(&db, &cfg).await,
-      },
    }
 }
 
@@ -356,15 +346,19 @@ async fn accounts_add_key(
    if referer.is_some() && provider != Provider::Gemini {
       bail!("--referer is only supported for gemini keys");
    }
-   if provider == Provider::Copilot {
-      return accounts_add_copilot_key(db, key, label).await;
-   }
-   let mut hasher = hmac_sha256::Hash::new();
-   hasher.update(key.as_bytes());
-   let account_id = data_encoding::HEXLOWER.encode(&hasher.finalize()[..8]);
+   let (account_id, email, refresh_token, auth_mode, token) = if provider == Provider::Copilot {
+      let token = key.trim();
+      let login = copilot::github_login(token).await?;
+      (login.clone(), Some(login), token, AuthMode::OAuth, token)
+   } else {
+      let mut hasher = hmac_sha256::Hash::new();
+      hasher.update(key.as_bytes());
+      let hash = data_encoding::HEXLOWER.encode(&hasher.finalize()[..8]);
+      (hash, None, "", AuthMode::ApiKey, key)
+   };
    let tokens = oauth::TokenSet {
-      access_token: key.to_owned(),
-      refresh_token: String::new(),
+      access_token: token.to_owned(),
+      refresh_token: refresh_token.to_owned(),
       id_token: None,
       expires_at: None,
    };
@@ -372,46 +366,22 @@ async fn accounts_add_key(
       .upsert_account(NewAccount {
          provider,
          id: &account_id,
-         email: None,
+         email: email.as_deref(),
          label,
          plan: None,
          tokens: &tokens,
-         auth_mode: AuthMode::ApiKey,
+         auth_mode,
       })
       .await?;
    if let Some(referer) = referer {
-      let referer = (!referer.is_empty()).then_some(referer);
-      db.set_account_http_referer(id, referer).await?;
+      let referer = (!referer.is_empty()).then(|| referer.to_owned());
+      db.set_account(id, AccountField::HttpReferer(referer))
+         .await?;
    }
    if egress {
-      db.set_account_egress(id, true).await?;
+      db.set_account(id, AccountField::Egress(true)).await?;
    }
    println!("stored {provider} account {id} ({account_id})");
-   Ok(())
-}
-
-/// A pasted GitHub token is stored as the grant the device flow would mint.
-async fn accounts_add_copilot_key(db: &Db, key: &str, label: Option<&str>) -> Result<()> {
-   let key = key.trim();
-   let login = copilot::github_login(key).await?;
-   let tokens = oauth::TokenSet {
-      access_token: key.to_owned(),
-      refresh_token: key.to_owned(),
-      id_token: None,
-      expires_at: None,
-   };
-   let id = db
-      .upsert_account(NewAccount {
-         provider: Provider::Copilot,
-         id: &login,
-         email: Some(&login),
-         label,
-         plan: None,
-         tokens: &tokens,
-         auth_mode: AuthMode::OAuth,
-      })
-      .await?;
-   println!("stored copilot account {id} ({login})");
    Ok(())
 }
 
@@ -458,38 +428,22 @@ async fn accounts_list(db: &Db) -> Result<()> {
    Ok(())
 }
 
-async fn accounts_trust(db: &Db, account: &str, trusted: bool) -> Result<()> {
-   if db.set_account_trusted(account, trusted).await? == 0 {
-      bail!("no account matched {account:?}");
-   }
-   println!(
-      "account {account} is now {}",
-      if trusted { "trusted" } else { "untrusted" }
-   );
-   Ok(())
+async fn lookup(db: &Db, key: &str) -> Result<Account> {
+   db.find_account(key)
+      .await?
+      .ok_or_else(|| eyre!("no account matched {key:?}"))
 }
 
-async fn accounts_reserve(db: &Db, account: &str, reserved: bool) -> Result<()> {
-   let Some(found) = db.find_account(account).await? else {
-      bail!("no account matched {account:?}");
-   };
-   db.set_account_reserved(found.id, reserved).await?;
-   println!(
-      "account {account} is now {}",
-      if reserved { "reserved" } else { "unreserved" }
-   );
-   Ok(())
-}
-
-async fn accounts_egress(db: &Db, account: &str, egress: bool) -> Result<()> {
-   let Some(found) = db.find_account(account).await? else {
-      bail!("no account matched {account:?}");
-   };
-   db.set_account_egress(found.id, egress).await?;
-   println!(
-      "account {account} is now {}",
-      if egress { "egressed" } else { "direct" }
-   );
+async fn accounts_toggle(
+   db: &Db,
+   key: &str,
+   field: fn(bool) -> AccountField,
+   enabled: bool,
+   words: [&str; 2],
+) -> Result<()> {
+   let found = lookup(db, key).await?;
+   db.set_account(found.id, field(enabled)).await?;
+   println!("account {key} is now {}", words[usize::from(!enabled)]);
    Ok(())
 }
 
@@ -499,9 +453,7 @@ async fn accounts_status(
    status: AccountStatus,
    reason: Option<&str>,
 ) -> Result<()> {
-   let Some(found) = db.find_account(account).await? else {
-      bail!("no account matched {account:?}");
-   };
+   let found = lookup(db, account).await?;
    db.set_account_status(found.id, status, None, reason)
       .await?;
    println!("account {account} is now {}", status.as_str());
@@ -514,13 +466,9 @@ async fn accounts_users(db: &Db, account: &str, allow: &str) -> Result<()> {
       .map(str::trim)
       .filter(|user| !user.is_empty())
       .collect();
-   if db
-      .set_account_allowed_users(account, &users.join(","))
-      .await?
-      == 0
-   {
-      bail!("no account matched {account:?}");
-   }
+   let found = lookup(db, account).await?;
+   db.set_account(found.id, AccountField::AllowedUsers(users.join(",")))
+      .await?;
    if users.is_empty() {
       println!("account {account} is now open to every user");
    } else {
@@ -530,10 +478,8 @@ async fn accounts_users(db: &Db, account: &str, allow: &str) -> Result<()> {
 }
 
 async fn accounts_remove(db: &Db, account: &str) -> Result<()> {
-   let count = db.remove_account(account).await?;
-   if count == 0 {
-      bail!("no account matched {account:?}");
-   }
+   let found = lookup(db, account).await?;
+   let count = db.remove_account(found.id).await?;
    println!("removed {count} account(s)");
    Ok(())
 }
@@ -553,10 +499,7 @@ async fn resolve_pin(db: &Db, account: Option<String>) -> Result<Option<i64>> {
    let Some(key) = account else {
       return Ok(None);
    };
-   let Some(found) = db.find_account(&key).await? else {
-      bail!("no account matched {key:?}");
-   };
-   Ok(Some(found.id))
+   Ok(Some(lookup(db, &key).await?.id))
 }
 
 #[expect(
@@ -573,25 +516,11 @@ fn token_limits(
    providers: Option<String>,
    pinned_account: Option<i64>,
 ) -> Result<TokenLimits> {
-   if requests.is_some_and(|value| value <= 0) {
-      bail!("--requests must be greater than zero");
-   }
-   if tokens.is_some_and(|value| value <= 0) {
-      bail!("--tokens must be greater than zero");
-   }
-   if window_seconds <= 0 {
-      bail!("--window-seconds must be greater than zero");
-   }
-   if slowdown_ms < 0 {
-      bail!("--slowdown-ms cannot be negative");
-   }
    let providers = providers
       .filter(|csv| !csv.trim().is_empty())
       .map(|raw| {
          raw.split(',')
-            .map(|part| {
-               Provider::from_str(part).ok_or_else(|| eyre::eyre!("unknown provider: {part}"))
-            })
+            .map(|part| part.parse::<Provider>().map_err(eyre::Report::msg))
             .collect::<Result<Vec<_>>>()
       })
       .transpose()?
@@ -696,29 +625,5 @@ async fn models(db: &Db, cfg: &Config) -> Result<()> {
       })
       .collect::<Vec<_>>();
    println!("{}", serde_json::to_string_pretty(&arr)?);
-   Ok(())
-}
-
-async fn debug_refresh(db: &Db, account: &str) -> Result<()> {
-   let acc = db
-      .find_account(account)
-      .await?
-      .ok_or_else(|| eyre!("no account matched"))?;
-   let tokens = match acc.provider {
-      Provider::OpenAi => refresh::refresh(&acc.refresh_token).await?,
-      Provider::Anthropic => anthropic::refresh(&acc.refresh_token).await?,
-      Provider::Copilot => copilot::mint(&acc.refresh_token).await?,
-      Provider::Gemini
-      | Provider::Zen
-      | Provider::Glm
-      | Provider::DeepSeek
-      | Provider::Experiential => bail!("this provider has no refresh flow"),
-   };
-   db.update_account_tokens(acc.id, &tokens).await?;
-   println!(
-      "refreshed account {} ({})",
-      acc.id,
-      acc.email.as_deref().unwrap_or("-")
-   );
    Ok(())
 }

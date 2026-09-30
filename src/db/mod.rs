@@ -8,7 +8,7 @@ use std::sync::mpsc;
 use std::thread;
 
 use eyre::{Result, WrapErr as _};
-use rusqlite::Connection;
+use rusqlite::{Connection, Params, Row};
 use tokio::sync::oneshot;
 
 #[derive(Clone)]
@@ -50,6 +50,25 @@ impl Worker {
          }))
          .map_err(|_| eyre::eyre!("database worker stopped"))?;
       receiver.await.wrap_err("database worker stopped")?
+   }
+
+   async fn rows<T>(
+      &self,
+      sql: impl Into<String>,
+      params: impl Params + Send + 'static,
+      map: impl FnMut(&Row) -> rusqlite::Result<T> + Send + 'static,
+   ) -> Result<Vec<T>>
+   where
+      T: Send + 'static,
+   {
+      let sql = sql.into();
+      self
+         .call(move |conn| {
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(params, map)?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+         })
+         .await
    }
 }
 

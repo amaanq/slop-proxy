@@ -1,7 +1,7 @@
 use std::result::Result as StdResult;
 
 use eyre::Result;
-use rusqlite::{OptionalExtension as _, TransactionBehavior, params};
+use rusqlite::{Row, TransactionBehavior, params};
 use serde::Serialize;
 
 use crate::clock;
@@ -52,6 +52,7 @@ pub struct UsageRecord {
 
 #[derive(Debug, Serialize, Default)]
 pub struct UsageAgg {
+   #[serde(rename = "name", skip_serializing_if = "String::is_empty")]
    pub key: String,
    pub requests: i64,
    pub errors: i64,
@@ -59,7 +60,25 @@ pub struct UsageAgg {
    pub output_tokens: i64,
    pub cache_read_tokens: i64,
    pub cache_write_tokens: i64,
+   pub cache_hit_ratio: f64,
    pub reasoning_tokens: i64,
+}
+
+fn agg_from_row(key: String, row: &Row, base: usize) -> rusqlite::Result<UsageAgg> {
+   let input_tokens = row.get(base + 2)?;
+   let cache_read_tokens = row.get(base + 4)?;
+   let cache_write_tokens = row.get(base + 5)?;
+   Ok(UsageAgg {
+      key,
+      requests: row.get(base)?,
+      errors: row.get::<_, Option<i64>>(base + 1)?.unwrap_or(0),
+      input_tokens,
+      output_tokens: row.get(base + 3)?,
+      cache_read_tokens,
+      cache_write_tokens,
+      cache_hit_ratio: cache_hit_ratio(input_tokens, cache_read_tokens, cache_write_tokens),
+      reasoning_tokens: row.get(base + 6)?,
+   })
 }
 
 #[derive(Debug)]
@@ -221,121 +240,73 @@ impl Db {
 
    pub async fn token_meter(&self, key: &str) -> Result<Option<TokenMeter>> {
       let now = clock::unix_now_ms();
-      let id = key.parse::<i64>().unwrap_or(-1);
-      let key = key.to_owned();
-      self
+      let Some(token) = self.find_token(key).await? else {
+         return Ok(None);
+      };
+      let limits = token.limits;
+      let since = now.saturating_sub(limits.window_seconds.saturating_mul(1000));
+      let (requests, tokens, oldest): (i64, i64, Option<i64>) = self
          .call(move |conn| {
-            let token = conn
-         .query_row(
-            "SELECT id, user, token_prefix, request_limit, token_limit, window_seconds, slowdown_ms
-                 FROM api_tokens WHERE id = ?1 OR token_prefix = ?2 ORDER BY id LIMIT 1",
-            params![id, key],
-            |row| {
-               Ok((
-                  row.get::<_, i64>(0)?,
-                  row.get::<_, String>(1)?,
-                  row.get::<_, String>(2)?,
-                  row.get::<_, Option<i64>>(3)?,
-                  row.get::<_, Option<i64>>(4)?,
-                  row.get::<_, i64>(5)?,
-                  row.get::<_, i64>(6)?,
-               ))
-            },
-         )
-         .optional()?;
-            let Some((
-               token_id,
-               user,
-               prefix,
-               request_limit,
-               token_limit,
-               window_seconds,
-               slowdown_ms,
-            )) = token
-            else {
-               return Ok(None);
-            };
-            let since = now.saturating_sub(window_seconds.saturating_mul(1000));
-            let (requests, tokens, oldest): (i64, i64, Option<i64>) = conn.query_row(
+            Ok(conn.query_row(
                "SELECT COUNT(*), COALESCE(SUM(input_tokens + output_tokens), 0), MIN(ts_ms)
              FROM api_meter WHERE token_id = ?1 AND ts_ms > ?2",
-               params![token_id, since],
+               params![token.id, since],
                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )?;
-            Ok(Some(TokenMeter {
-               id: token_id,
-               user,
-               prefix,
-               window_seconds,
-               request_limit,
-               requests,
-               requests_remaining: request_limit.map(|limit| (limit - requests).max(0)),
-               token_limit,
-               tokens,
-               tokens_remaining: token_limit.map(|limit| (limit - tokens).max(0)),
-               slowdown_ms,
-               reset_after_seconds: retry_after(oldest, window_seconds.saturating_mul(1000), now),
-            }))
+            )?)
          })
-         .await
+         .await?;
+      Ok(Some(TokenMeter {
+         id: token.id,
+         user: token.user,
+         prefix: token.token_prefix,
+         window_seconds: limits.window_seconds,
+         request_limit: limits.requests,
+         requests,
+         requests_remaining: limits.requests.map(|limit| (limit - requests).max(0)),
+         token_limit: limits.tokens,
+         tokens,
+         tokens_remaining: limits.tokens.map(|limit| (limit - tokens).max(0)),
+         slowdown_ms: limits.slowdown_ms,
+         reset_after_seconds: retry_after(oldest, limits.window_seconds.saturating_mul(1000), now),
+      }))
    }
 
    pub async fn usage_totals(&self, since: i64, until: i64) -> Result<UsageAgg> {
-      self.reports.call(move |conn| {
-      let agg = conn.query_row(
-            "SELECT COUNT(*), SUM(status >= 400), COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
+      self
+         .reports
+         .call(move |conn| {
+            Ok(conn.query_row(
+               "SELECT COUNT(*), SUM(status >= 400), COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
                     COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(cache_write_tokens),0),
                     COALESCE(SUM(reasoning_tokens),0)
              FROM usage_log WHERE ts >= ?1 AND ts < ?2",
-            params![since, until],
-            |row| {
-                Ok(UsageAgg {
-                    key: "total".into(),
-                    requests: row.get(0)?,
-                    errors: row.get::<_, Option<i64>>(1)?.unwrap_or(0),
-                    input_tokens: row.get(2)?,
-                    output_tokens: row.get(3)?,
-                    cache_read_tokens: row.get(4)?,
-                    cache_write_tokens: row.get(5)?,
-                    reasoning_tokens: row.get(6)?,
-                })
-            },
-        )?;
-      Ok(agg)
-      }).await
+               params![since, until],
+               |row| agg_from_row(String::new(), row, 0),
+            )?)
+         })
+         .await
    }
 
    pub async fn usage_by(&self, dim: UsageDim, since: i64, until: i64) -> Result<Vec<UsageAgg>> {
       let key_expr = match dim {
          UsageDim::User => "u.user",
-         UsageDim::Account => {
-            "COALESCE((SELECT COALESCE(a.label, a.email, 'account#' || a.id) FROM accounts a WHERE a.id = u.account_id), NULLIF(u.provider, ''), 'none')"
-         },
+         UsageDim::Account => ACCOUNT_LABEL,
          UsageDim::Model => "u.upstream_model",
       };
-      self.reports.call(move |conn| {
-      let sql = format!(
-            "SELECT {key_expr} AS k, COUNT(*), SUM(u.status >= 400 OR u.error_kind IS NOT NULL), COALESCE(SUM(u.input_tokens),0),
+      self
+         .reports
+         .rows(
+            format!(
+               "SELECT {key_expr} AS k, COUNT(*), SUM(u.status >= 400 OR u.error_kind IS NOT NULL), COALESCE(SUM(u.input_tokens),0),
                     COALESCE(SUM(u.output_tokens),0), COALESCE(SUM(u.cache_read_tokens),0),
                     COALESCE(SUM(u.cache_write_tokens),0), COALESCE(SUM(u.reasoning_tokens),0)
              FROM usage_log u WHERE u.ts >= ?1 AND u.ts < ?2
              GROUP BY k ORDER BY SUM(u.input_tokens) + SUM(u.output_tokens) DESC"
-        );
-      let mut stmt = conn.prepare(&sql)?;
-      let rows = stmt.query_map(params![since, until], |row| {
-         Ok(UsageAgg {
-            key: row.get(0)?,
-            requests: row.get(1)?,
-            errors: row.get::<_, Option<i64>>(2)?.unwrap_or(0),
-            input_tokens: row.get(3)?,
-            output_tokens: row.get(4)?,
-            cache_read_tokens: row.get(5)?,
-            cache_write_tokens: row.get(6)?,
-            reasoning_tokens: row.get(7)?,
-         })
-      })?;
-      Ok(rows.collect::<rusqlite::Result<_>>()?)
-      }).await
+            ),
+            (since, until),
+            |row| agg_from_row(row.get(0)?, row, 1),
+         )
+         .await
    }
 }
 
@@ -362,26 +333,24 @@ pub fn cache_hit_ratio(input_tokens: i64, cache_read_tokens: i64, cache_write_to
    cached / prompt
 }
 
+const ACCOUNT_LABEL: &str = "COALESCE((SELECT COALESCE(a.label, a.email, 'account#' || a.id)
+                 FROM accounts a WHERE a.id = u.account_id),
+                CASE WHEN u.provider <> '' AND NOT EXISTS
+                       (SELECT 1 FROM accounts a2 WHERE a2.provider = u.provider)
+                     THEN u.provider END,
+                'none')";
+
+const PROVIDER_LABEL: &str = "COALESCE(NULLIF(u.provider, ''),
+                (SELECT a.provider FROM accounts a WHERE a.id = u.account_id),
+                'none')";
+
 /// Every column `usage_metrics` groups by, against its exported label. A
 /// column missing here duplicates a label set, and Prometheus keeps whichever
 /// the scrape emitted first.
 pub const USAGE_DIMENSIONS: [(&str, &str); 8] = [
    ("user", "u.user"),
-   (
-      "account",
-      "COALESCE((SELECT COALESCE(a.label, a.email, 'account#' || a.id)
-                 FROM accounts a WHERE a.id = u.account_id),
-                CASE WHEN u.provider <> '' AND NOT EXISTS
-                       (SELECT 1 FROM accounts a2 WHERE a2.provider = u.provider)
-                     THEN u.provider END,
-                'none')",
-   ),
-   (
-      "provider",
-      "COALESCE(NULLIF(u.provider, ''),
-                (SELECT a.provider FROM accounts a WHERE a.id = u.account_id),
-                'none')",
-   ),
+   ("account", ACCOUNT_LABEL),
+   ("provider", PROVIDER_LABEL),
    ("requested_model", "u.requested_model"),
    ("model", "u.upstream_model"),
    ("effort", "u.effort"),
@@ -408,20 +377,21 @@ impl Db {
    /// Whole-table sums per [`USAGE_DIMENSIONS`]. The log is append-only, so
    /// these are monotonic and safe to expose as Prometheus counters.
    pub async fn usage_metrics(&self) -> Result<Vec<MetricsRow>> {
+      let selected = USAGE_DIMENSIONS
+         .into_iter()
+         .map(|(label, expr)| format!("{expr} AS {label}"))
+         .collect::<Vec<_>>()
+         .join(", ");
+      let grouped = USAGE_DIMENSIONS
+         .into_iter()
+         .map(|(label, _)| label)
+         .collect::<Vec<_>>()
+         .join(", ");
+      let after = USAGE_DIMENSIONS.len();
       self
          .reports
-         .call(move |conn| {
-            let selected = USAGE_DIMENSIONS
-               .into_iter()
-               .map(|(label, expr)| format!("{expr} AS {label}"))
-               .collect::<Vec<_>>()
-               .join(", ");
-            let grouped = USAGE_DIMENSIONS
-               .into_iter()
-               .map(|(label, _)| label)
-               .collect::<Vec<_>>()
-               .join(", ");
-            let mut stmt = conn.prepare(&format!(
+         .rows(
+            format!(
                "SELECT {selected}, COUNT(*),
                     SUM(u.status >= 400 OR u.error_kind IS NOT NULL),
                     COALESCE(SUM(u.input_tokens),0), COALESCE(SUM(u.output_tokens),0),
@@ -431,9 +401,9 @@ impl Db {
                     COALESCE(SUM(u.duration_ms),0)
              FROM usage_log u
              GROUP BY {grouped}",
-            ))?;
-            let after = USAGE_DIMENSIONS.len();
-            let rows = stmt.query_map([], |row| {
+            ),
+            [],
+            move |row| {
                let mut dimensions = USAGE_DIMENSIONS.map(|_| String::new());
                for (index, value) in dimensions.iter_mut().enumerate() {
                   *value = row.get(index)?;
@@ -451,9 +421,8 @@ impl Db {
                   list_cost_usd: row.get(after + 8)?,
                   duration_ms: row.get(after + 9)?,
                })
-            })?;
-            Ok(rows.collect::<rusqlite::Result<_>>()?)
-         })
+            },
+         )
          .await
    }
 
@@ -462,15 +431,14 @@ impl Db {
    pub async fn unpriced_usage(&self) -> Result<Vec<UnpricedRow>> {
       self
          .reports
-         .call(move |conn| {
-            let mut stmt = conn.prepare(
-               "SELECT id, upstream_model, input_tokens, output_tokens,
+         .rows(
+            "SELECT id, upstream_model, input_tokens, output_tokens,
                     cache_read_tokens, cache_write_tokens
              FROM usage_log
              WHERE (cost_usd = 0 OR list_cost_usd = 0)
                AND input_tokens + output_tokens + cache_read_tokens + cache_write_tokens > 0",
-            )?;
-            let rows = stmt.query_map([], |row| {
+            [],
+            |row| {
                Ok(UnpricedRow {
                   id: row.get(0)?,
                   model: row.get(1)?,
@@ -481,9 +449,8 @@ impl Db {
                      cache_write: row.get(5)?,
                   },
                })
-            })?;
-            Ok(rows.collect::<rusqlite::Result<_>>()?)
-         })
+            },
+         )
          .await
    }
 
@@ -511,8 +478,9 @@ impl Db {
    /// `tools_called` holds a comma-joined list, so the split has to happen in
    /// SQL to yield one row per tool.
    pub async fn tool_metrics(&self) -> Result<Vec<ToolRow>> {
-      self.reports.call(move |conn| {
-      let mut stmt = conn.prepare(
+      self
+         .reports
+         .rows(
             "WITH RECURSIVE split(user, failed, tool, rest) AS (
                SELECT user, (status >= 400 OR error_kind IS NOT NULL), '', tools_called || ','
                FROM usage_log WHERE tools_called <> ''
@@ -522,31 +490,26 @@ impl Db {
              )
              SELECT user, tool, COUNT(*), SUM(failed)
              FROM split WHERE tool <> '' GROUP BY user, tool",
-        )?;
-      let rows = stmt.query_map([], |row| {
-         Ok(ToolRow {
-            user: row.get(0)?,
-            tool: row.get(1)?,
-            count: row.get(2)?,
-            errors: row.get::<_, Option<i64>>(3)?.unwrap_or(0),
-         })
-      })?;
-      Ok(rows.collect::<rusqlite::Result<_>>()?)
-      }).await
+            [],
+            |row| {
+               Ok(ToolRow {
+                  user: row.get(0)?,
+                  tool: row.get(1)?,
+                  count: row.get(2)?,
+                  errors: row.get::<_, Option<i64>>(3)?.unwrap_or(0),
+               })
+            },
+         )
+         .await
    }
 
    pub async fn insight_metrics(&self) -> Result<Vec<InsightRow>> {
       self
          .reports
-         .call(move |conn| {
-            let mut stmt = conn.prepare(
+         .rows(
+            format!(
                "SELECT u.user,
-                    COALESCE((SELECT COALESCE(a.label, a.email, 'account#' || a.id)
-                              FROM accounts a WHERE a.id = u.account_id),
-                             CASE WHEN u.provider <> '' AND NOT EXISTS
-                                    (SELECT 1 FROM accounts a2 WHERE a2.provider = u.provider)
-                                  THEN u.provider END,
-                             'none') AS account,
+                    {ACCOUNT_LABEL} AS account,
                     COALESCE(NULLIF(u.stop_reason, ''), u.error_kind,
                              CASE WHEN u.status >= 400
                                   THEN 'http_' || (u.status / 100) || 'xx' END,
@@ -558,9 +521,10 @@ impl Db {
                     COALESCE(SUM(u.ttft_ms),0), SUM(u.ttft_ms IS NOT NULL),
                     COALESCE(SUM(u.attempts),0)
              FROM usage_log u
-             GROUP BY u.user, account, stop_reason",
-            )?;
-            let rows = stmt.query_map([], |row| {
+             GROUP BY u.user, account, stop_reason"
+            ),
+            [],
+            |row| {
                Ok(InsightRow {
                   user: row.get(0)?,
                   account: row.get(1)?,
@@ -576,9 +540,8 @@ impl Db {
                   ttft_samples: row.get::<_, Option<i64>>(11)?.unwrap_or(0),
                   attempts: row.get(12)?,
                })
-            })?;
-            Ok(rows.collect::<rusqlite::Result<_>>()?)
-         })
+            },
+         )
          .await
    }
 
@@ -587,9 +550,8 @@ impl Db {
    pub async fn session_metrics(&self) -> Result<Vec<SessionRow>> {
       self
          .reports
-         .call(move |conn| {
-            let mut stmt = conn.prepare(
-               "SELECT user, COUNT(*), COALESCE(MAX(deepest),0),
+         .rows(
+            "SELECT user, COUNT(*), COALESCE(MAX(deepest),0),
                     COALESCE(SUM(MAX(accounts - 1, 0)),0),
                     COALESCE(MAX(tokens),0)
              FROM (SELECT user, COUNT(DISTINCT account_id) AS accounts,
@@ -600,8 +562,8 @@ impl Db {
                    WHERE session_key <> '' AND (account_id IS NOT NULL OR provider <> '')
                    GROUP BY user, session_key)
              GROUP BY user",
-            )?;
-            let rows = stmt.query_map([], |row| {
+            [],
+            |row| {
                Ok(SessionRow {
                   user: row.get(0)?,
                   sessions: row.get(1)?,
@@ -609,37 +571,34 @@ impl Db {
                   switches: row.get(3)?,
                   tokens_max: row.get(4)?,
                })
-            })?;
-            Ok(rows.collect::<rusqlite::Result<_>>()?)
-         })
+            },
+         )
          .await
    }
 
    pub async fn error_metrics(&self) -> Result<Vec<ErrorRow>> {
       self
          .reports
-         .call(move |conn| {
-            let mut stmt = conn.prepare(
+         .rows(
+            format!(
                "SELECT u.user,
-                    COALESCE(NULLIF(u.provider, ''),
-                             (SELECT a.provider FROM accounts a WHERE a.id = u.account_id),
-                             'none') AS provider,
+                    {PROVIDER_LABEL} AS provider,
                     COALESCE(u.error_kind, 'http_' || (u.status / 100) || 'xx') AS kind,
                     COUNT(*)
              FROM usage_log u
              WHERE u.status >= 400 OR u.error_kind IS NOT NULL
-             GROUP BY u.user, provider, kind",
-            )?;
-            let rows = stmt.query_map([], |row| {
+             GROUP BY u.user, provider, kind"
+            ),
+            [],
+            |row| {
                Ok(ErrorRow {
                   user: row.get(0)?,
                   provider: row.get(1)?,
                   kind: row.get(2)?,
                   count: row.get(3)?,
                })
-            })?;
-            Ok(rows.collect::<rusqlite::Result<_>>()?)
-         })
+            },
+         )
          .await
    }
 }

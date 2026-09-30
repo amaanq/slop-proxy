@@ -47,7 +47,9 @@ impl TokenLimits {
    }
 
    fn decode(raw: &str) -> Vec<Provider> {
-      raw.split(',').filter_map(Provider::from_str).collect()
+      raw.split(',')
+         .filter_map(|name| name.parse().ok())
+         .collect()
    }
 }
 
@@ -88,26 +90,30 @@ impl Db {
 
    pub async fn list_tokens(&self) -> Result<Vec<ApiToken>> {
       self
-         .call(move |conn| {
-            let mut stmt = conn.prepare(
-               "SELECT id, user, token_prefix, created_at, revoked_at,
-                    request_limit, token_limit, window_seconds, slowdown_ms, prefer_trusted,
-                    reserved_only, pinned_account, allowed_providers
-             FROM api_tokens ORDER BY id",
-            )?;
-            let rows = stmt.query_map([], |row| {
-               Ok(ApiToken {
-                  id: row.get(0)?,
-                  user: row.get(1)?,
-                  token_prefix: row.get(2)?,
-                  created_at: row.get(3)?,
-                  revoked_at: row.get(4)?,
-                  limits: limits_from_row(row, 5)?,
-               })
-            })?;
-            Ok(rows.collect::<rusqlite::Result<_>>()?)
-         })
+         .writer
+         .rows(
+            format!("SELECT {API_TOKEN_COLS} FROM api_tokens ORDER BY id"),
+            [],
+            api_token_from_row,
+         )
          .await
+   }
+
+   pub async fn find_token(&self, key: &str) -> Result<Option<ApiToken>> {
+      let id = key.parse::<i64>().unwrap_or(-1);
+      let key = key.to_owned();
+      let mut found = self
+         .writer
+         .rows(
+            format!(
+               "SELECT {API_TOKEN_COLS} FROM api_tokens
+                WHERE id = ?1 OR token_prefix = ?2 ORDER BY id LIMIT 1"
+            ),
+            (id, key),
+            api_token_from_row,
+         )
+         .await?;
+      Ok(found.pop())
    }
 
    pub async fn revoke_token(&self, key: &str) -> Result<usize> {
@@ -172,6 +178,21 @@ impl Db {
          })
          .await
    }
+}
+
+const API_TOKEN_COLS: &str = "id, user, token_prefix, created_at, revoked_at,
+   request_limit, token_limit, window_seconds, slowdown_ms, prefer_trusted,
+   reserved_only, pinned_account, allowed_providers";
+
+fn api_token_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ApiToken> {
+   Ok(ApiToken {
+      id: row.get(0)?,
+      user: row.get(1)?,
+      token_prefix: row.get(2)?,
+      created_at: row.get(3)?,
+      revoked_at: row.get(4)?,
+      limits: limits_from_row(row, 5)?,
+   })
 }
 
 fn limits_from_row(row: &rusqlite::Row<'_>, base: usize) -> rusqlite::Result<TokenLimits> {

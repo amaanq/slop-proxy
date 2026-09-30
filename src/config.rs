@@ -10,8 +10,10 @@ use crate::provider::Provider;
 
 pub const DEFAULT_INSTRUCTIONS: &str = "You are Codex, based on GPT-5. You are running as a coding agent on a user's computer. Answer the user's requests directly and concisely.";
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default)]
 pub struct Config {
+   #[serde(rename = "db")]
    pub db_path: PathBuf,
    pub bind: String,
    /// Extra unauthenticated listener serving GET /metrics when set.
@@ -20,9 +22,9 @@ pub struct Config {
    pub anthropic: AnthropicConfig,
    pub gemini: GeminiConfig,
    pub zen: ZenConfig,
-   pub glm: GlmConfig,
-   pub deepseek: DeepSeekConfig,
-   pub experiential: ExperientialConfig,
+   pub glm: RelayConfig,
+   pub deepseek: RelayConfig,
+   pub experiential: RelayConfig,
    pub copilot: CopilotConfig,
    pub pricing: PricingConfig,
    pub models: ModelsConfig,
@@ -64,23 +66,6 @@ impl Default for PricingConfig {
       Self {
             url: "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json".into(),
         }
-   }
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(default)]
-pub struct ExperientialConfig {
-   pub base_url: String,
-   #[serde(flatten)]
-   pub egress: EgressConfig,
-}
-
-impl Default for ExperientialConfig {
-   fn default() -> Self {
-      Self {
-         base_url: "https://api.experientiallabs.ai".into(),
-         egress: EgressConfig::default(),
-      }
    }
 }
 
@@ -129,39 +114,23 @@ impl EgressConfig {
    }
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+/// Z.ai, `DeepSeek` and Experiential all relay verbatim and differ only in the
+/// URL, which each client falls back to when `base_url` is unset.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(default)]
-pub struct GlmConfig {
-   pub base_url: String,
+pub struct RelayConfig {
+   pub base_url: Option<String>,
    #[serde(flatten)]
    pub egress: EgressConfig,
 }
 
-impl Default for GlmConfig {
-   fn default() -> Self {
-      Self {
-         base_url: "https://api.z.ai/api/anthropic".into(),
-         egress: EgressConfig::default(),
-      }
-   }
-}
-
-/// The site root, not the messages surface. `DeepSeek` serves its catalog from
-/// the root and its Anthropic dialect from `/anthropic` under it.
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(default)]
-pub struct DeepSeekConfig {
-   pub base_url: String,
-   #[serde(flatten)]
-   pub egress: EgressConfig,
-}
-
-impl Default for DeepSeekConfig {
-   fn default() -> Self {
-      Self {
-         base_url: "https://api.deepseek.com".into(),
-         egress: EgressConfig::default(),
-      }
+impl RelayConfig {
+   pub fn base_url_or<'a>(&'a self, default: &'a str) -> &'a str {
+      self
+         .base_url
+         .as_deref()
+         .unwrap_or(default)
+         .trim_end_matches('/')
    }
 }
 
@@ -331,10 +300,7 @@ pub enum ZenDialect {
 
 impl ModelsConfig {
    pub fn blocked(&self, model: &str) -> bool {
-      self
-         .blocked_patterns
-         .iter()
-         .any(|pattern| pattern_specificity(pattern, model).is_some())
+      best_match(&self.blocked_patterns, model).is_some()
    }
 
    /// Which backend serves this model. The most specific pattern wins, and a
@@ -347,11 +313,7 @@ impl ModelsConfig {
    pub fn matched(&self, model: &str) -> Option<Provider> {
       let mut best = Option::<(usize, Provider)>::None;
       for (provider, patterns) in self.sets() {
-         let Some(score) = patterns
-            .iter()
-            .filter_map(|pattern| pattern_specificity(pattern, model))
-            .max()
-         else {
+         let Some(score) = best_match(patterns, model) else {
             continue;
          };
          if best.is_none_or(|(seen, _)| score > seen) {
@@ -379,18 +341,15 @@ impl ModelsConfig {
    /// two. `union-alpha` takes `/messages`, the mimo family takes
    /// `/chat/completions`.
    pub fn zen_dialect(&self, model: &str) -> ZenDialect {
-      let best = |patterns: &Vec<String>| {
-         patterns
-            .iter()
-            .filter_map(|pattern| pattern_specificity(pattern, model))
-            .max()
-      };
       // Listed least specific first so `max_by_key`, which keeps the last of
       // a tie, leaves a name in two lists on the responses endpoint.
       [
-         (ZenDialect::Chat, best(&self.zen_chat_patterns)),
-         (ZenDialect::Messages, best(&self.zen_messages_patterns)),
-         (ZenDialect::Responses, best(&self.zen_patterns)),
+         (ZenDialect::Chat, best_match(&self.zen_chat_patterns, model)),
+         (
+            ZenDialect::Messages,
+            best_match(&self.zen_messages_patterns, model),
+         ),
+         (ZenDialect::Responses, best_match(&self.zen_patterns, model)),
       ]
       .into_iter()
       .filter_map(|(dialect, score)| Some((dialect, score?)))
@@ -431,29 +390,18 @@ pub fn pattern_specificity(pattern: &str, model: &str) -> Option<usize> {
    }
 }
 
+fn best_match(patterns: &[String], model: &str) -> Option<usize> {
+   patterns
+      .iter()
+      .filter_map(|pattern| pattern_specificity(pattern, model))
+      .max()
+}
+
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct ModelAlias {
    pub model: String,
    #[serde(default)]
    pub effort: Option<String>,
-}
-
-#[derive(Debug, Default, serde::Deserialize)]
-#[serde(default)]
-struct FileConfig {
-   bind: Option<String>,
-   metrics_bind: Option<String>,
-   db: Option<PathBuf>,
-   codex: Option<CodexConfig>,
-   anthropic: Option<AnthropicConfig>,
-   gemini: Option<GeminiConfig>,
-   zen: Option<ZenConfig>,
-   glm: Option<GlmConfig>,
-   deepseek: Option<DeepSeekConfig>,
-   experiential: Option<ExperientialConfig>,
-   copilot: Option<CopilotConfig>,
-   pricing: Option<PricingConfig>,
-   models: Option<ModelsConfig>,
 }
 
 impl Config {
@@ -464,63 +412,32 @@ impl Config {
          .or_else(|| env::var("SLOP_CONFIG").ok().map(PathBuf::from))
          .unwrap_or_else(|| xdg_dir("XDG_CONFIG_HOME", ".config").join("slop-proxy/config.toml"));
 
-      let file = if config_path.exists() {
+      let mut cfg = if config_path.exists() {
          let raw = fs::read_to_string(&config_path)
             .wrap_err_with(|| format!("reading {}", config_path.display()))?;
-         toml::from_str::<FileConfig>(&raw)
+         toml::from_str::<Self>(&raw)
             .wrap_err_with(|| format!("parsing {}", config_path.display()))?
       } else {
-         FileConfig::default()
+         Self::default()
       };
 
-      let db_path = args
+      if let Some(path) = args
          .db
          .clone()
          .or_else(|| env::var("SLOP_DB").ok().map(PathBuf::from))
-         .or(file.db)
-         .unwrap_or_else(|| xdg_dir("XDG_DATA_HOME", ".local/share").join("slop-proxy/slop.db"));
-
-      let bind = env::var("SLOP_BIND")
-         .ok()
-         .or(file.bind)
-         .unwrap_or_else(|| "[::1]:8484".into());
-
-      Ok(Self {
-         db_path,
-         bind,
-         metrics_bind: file.metrics_bind,
-         codex: file.codex.unwrap_or_default(),
-         anthropic: file.anthropic.unwrap_or_default(),
-         gemini: file.gemini.unwrap_or_default(),
-         zen: file.zen.unwrap_or_default(),
-         glm: file.glm.unwrap_or_default(),
-         deepseek: file.deepseek.unwrap_or_default(),
-         experiential: file.experiential.unwrap_or_default(),
-         copilot: file.copilot.unwrap_or_default(),
-         pricing: file.pricing.unwrap_or_default(),
-         models: file.models.unwrap_or_default(),
-      })
-   }
-}
-
-#[cfg(test)]
-impl Config {
-   pub fn for_tests() -> Self {
-      Self {
-         db_path: PathBuf::new(),
-         bind: String::new(),
-         metrics_bind: None,
-         codex: CodexConfig::default(),
-         anthropic: AnthropicConfig::default(),
-         gemini: GeminiConfig::default(),
-         zen: ZenConfig::default(),
-         glm: GlmConfig::default(),
-         deepseek: DeepSeekConfig::default(),
-         experiential: ExperientialConfig::default(),
-         copilot: CopilotConfig::default(),
-         pricing: PricingConfig::default(),
-         models: ModelsConfig::default(),
+      {
+         cfg.db_path = path;
       }
+      if cfg.db_path.as_os_str().is_empty() {
+         cfg.db_path = xdg_dir("XDG_DATA_HOME", ".local/share").join("slop-proxy/slop.db");
+      }
+      if let Ok(bind) = env::var("SLOP_BIND") {
+         cfg.bind = bind;
+      }
+      if cfg.bind.is_empty() {
+         cfg.bind = "[::1]:8484".into();
+      }
+      Ok(cfg)
    }
 }
 

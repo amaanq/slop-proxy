@@ -33,7 +33,7 @@ async fn spawn_proxy_with_codex_status(status: StatusCode) -> (String, Db) {
          anthropic_patterns: Vec::new(),
          ..ModelsConfig::default()
       },
-      ..Config::for_tests()
+      ..Config::default()
    };
    serve_proxy(cfg, &accounts).await
 }

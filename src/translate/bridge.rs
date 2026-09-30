@@ -37,23 +37,6 @@ pub struct ChatToResponses {
    finish_reason: Option<FinishReason>,
    usage: Option<Usage>,
    completed: bool,
-   frames: usize,
-   emitted: usize,
-   first_frame: Option<String>,
-}
-
-/// A stream that produced nothing is the failure this path keeps hitting, and
-/// the frame count separates nothing arriving from nothing being understood.
-impl Drop for ChatToResponses {
-   fn drop(&mut self) {
-      if self.emitted == 0 {
-         tracing::warn!(
-            frames = self.frames,
-            first = self.first_frame.as_deref().unwrap_or("<none>"),
-            "chat bridge produced no content"
-         );
-      }
-   }
 }
 
 #[derive(Default)]
@@ -64,6 +47,29 @@ struct OpenCall {
    arguments: String,
    index: u64,
    announced: bool,
+}
+
+impl OpenCall {
+   fn item(&self, custom: bool, body: String, status: Option<&str>) -> OutputItem {
+      let status = status.map(str::to_owned);
+      if custom {
+         OutputItem::CustomToolCall {
+            id: Some(self.item_id.clone()),
+            call_id: self.id.clone(),
+            name: self.name.clone(),
+            input: body,
+            status,
+         }
+      } else {
+         OutputItem::FunctionCall {
+            id: Some(self.item_id.clone()),
+            call_id: self.id.clone(),
+            name: self.name.clone(),
+            arguments: Some(body),
+            status,
+         }
+      }
+   }
 }
 
 struct TextOutput {
@@ -86,9 +92,10 @@ impl TextOutput {
 
 impl ChatToResponses {
    pub fn with_custom(custom: BTreeSet<String>) -> Self {
-      let mut bridge = Self::default();
-      bridge.custom = custom;
-      bridge
+      Self {
+         custom,
+         ..Self::default()
+      }
    }
 
    #[expect(
@@ -96,16 +103,6 @@ impl ChatToResponses {
       reason = "one chunk in, every Responses event it implies out; the arms are the frame kinds"
    )]
    pub fn feed(&mut self, chunk: &ChatChunk) -> Vec<ResponsesEvent> {
-      self.frames += 1;
-      if self.first_frame.is_none() {
-         self.first_frame = Some(
-            serde_json::to_string(chunk)
-               .unwrap_or_default()
-               .chars()
-               .take(400)
-               .collect(),
-         );
-      }
       let first_frame = self.response_id.is_none();
       let response_id = Some(
          self
@@ -126,7 +123,6 @@ impl ChatToResponses {
       if let Some(err) = chunk.error.as_ref() {
          self.completed = true;
          self.calls.clear();
-         self.emitted += 1;
          out.push(ResponsesEvent::Failed {
             response: ResponseObj {
                id: response_id,
@@ -247,42 +243,31 @@ impl ChatToResponses {
             }
             // A freeform tool takes raw text, so the single string it was
             // offered as is unwrapped before the item is handed back.
-            if self.custom.contains(&call.name) {
-               let input = serde_json::from_str::<HashMap<String, String>>(&call.arguments)
+            let custom = self.custom.contains(&call.name);
+            let body = if custom {
+               serde_json::from_str::<HashMap<String, String>>(&call.arguments)
                   .ok()
                   .and_then(|mut args| args.remove(FREEFORM_ARG))
-                  .unwrap_or_else(|| call.arguments.clone());
-               out.push(ResponsesEvent::CustomToolCallInputDone {
+                  .unwrap_or_else(|| call.arguments.clone())
+            } else {
+               call.arguments.clone()
+            };
+            out.push(if custom {
+               ResponsesEvent::CustomToolCallInputDone {
                   item_id: Some(call.item_id.clone()),
                   output_index: call.index,
-                  input: input.clone(),
-               });
-               out.push(ResponsesEvent::OutputItemDone {
+                  input: body.clone(),
+               }
+            } else {
+               ResponsesEvent::FunctionCallArgumentsDone {
+                  item_id: Some(call.item_id.clone()),
                   output_index: call.index,
-                  item: OutputItem::CustomToolCall {
-                     id: Some(call.item_id.clone()),
-                     call_id: call.id.clone(),
-                     name: call.name.clone(),
-                     input,
-                     status: Some("completed".into()),
-                  },
-               });
-               continue;
-            }
-            out.push(ResponsesEvent::FunctionCallArgumentsDone {
-               item_id: Some(call.item_id.clone()),
-               output_index: call.index,
-               arguments: call.arguments.clone(),
+                  arguments: body.clone(),
+               }
             });
             out.push(ResponsesEvent::OutputItemDone {
                output_index: call.index,
-               item: OutputItem::FunctionCall {
-                  id: Some(call.item_id.clone()),
-                  call_id: call.id.clone(),
-                  name: call.name.clone(),
-                  arguments: Some(call.arguments.clone()),
-                  status: Some("completed".into()),
-               },
+               item: call.item(custom, body, Some("completed")),
             });
          }
          self.calls.clear();
@@ -328,17 +313,6 @@ impl ChatToResponses {
          self.completed = true;
          out.push(self.terminal(response_id, Some(usage)));
       }
-      // `created` and `completed` carry no answer, so they do not count as
-      // content when deciding whether the bridge produced anything.
-      self.emitted += out
-         .iter()
-         .filter(|event| {
-            !matches!(
-               event,
-               ResponsesEvent::Created { .. } | ResponsesEvent::Completed { .. }
-            )
-         })
-         .count();
       out
    }
 
@@ -355,9 +329,7 @@ impl ChatToResponses {
       if let Some(args) = call.function.arguments.as_ref() {
          slot.arguments.push_str(args);
       }
-      if let Some(sig) = call.thought_signature()
-         && !slot.id.is_empty()
-      {
+      if let Some(sig) = call.thought_signature() {
          signatures::put(&slot.id, sig);
       }
       if !slot.announced && !slot.name.is_empty() {
@@ -365,27 +337,9 @@ impl ChatToResponses {
          slot.item_id = format!("fc_{}", uuid::Uuid::new_v4().simple());
          slot.index = self.next_index;
          self.next_index += 1;
-         let ready = &*slot;
-         let item = if self.custom.contains(&ready.name) {
-            OutputItem::CustomToolCall {
-               id: Some(ready.item_id.clone()),
-               call_id: ready.id.clone(),
-               name: ready.name.clone(),
-               input: String::new(),
-               status: None,
-            }
-         } else {
-            OutputItem::FunctionCall {
-               id: Some(ready.item_id.clone()),
-               call_id: ready.id.clone(),
-               name: ready.name.clone(),
-               arguments: Some(String::new()),
-               status: None,
-            }
-         };
          out.push(ResponsesEvent::OutputItemAdded {
-            output_index: ready.index,
-            item,
+            output_index: slot.index,
+            item: slot.item(self.custom.contains(&slot.name), String::new(), None),
          });
       }
       let args = if was_announced {

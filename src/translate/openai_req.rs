@@ -1,15 +1,18 @@
 use crate::codex::types::{
-   ContentPart, InputItem, ReasoningConfig, ResponsesRequest, ToolChoice, ToolDef, ToolOutput,
+   ContentPart, InputItem, ResponsesRequest, ToolChoice, ToolDef, ToolOutput,
 };
 use crate::config::Config;
 use crate::translate::TranslateError;
-use crate::translate::anthropic_req::empty_schema;
 use crate::translate::chat::{ChatContent, ChatMessage, ChatPart, ChatRequest, ChatToolChoice};
-use crate::translate::{model_map, usable_cap};
+use crate::translate::responses_request;
 
 pub fn to_responses(req: &ChatRequest, cfg: &Config) -> Result<ResponsesRequest, TranslateError> {
-   let resolved = model_map::resolve(&cfg.models, &req.model);
-   let mut out = ResponsesRequest::new(resolved.model.clone(), cfg.codex.instructions());
+   let mut out = responses_request(
+      cfg,
+      &req.model,
+      req.reasoning_effort.clone(),
+      req.max_completion_tokens.or(req.max_tokens),
+   );
 
    for msg in &req.messages {
       convert_message(msg, &mut out.input)?;
@@ -21,13 +24,11 @@ pub fn to_responses(req: &ChatRequest, cfg: &Config) -> Result<ResponsesRequest,
          let Some(name) = def.name.as_ref() else {
             continue;
          };
-         out.tools.push(ToolDef {
-            kind: "function".into(),
-            name: name.clone(),
-            description: def.description.clone(),
-            strict: false,
-            parameters: Some(def.parameters.clone().unwrap_or_else(empty_schema)),
-         });
+         out.tools.push(ToolDef::function(
+            name.clone(),
+            def.description.clone(),
+            def.parameters.clone(),
+         ));
       }
    }
 
@@ -43,20 +44,6 @@ pub fn to_responses(req: &ChatRequest, cfg: &Config) -> Result<ResponsesRequest,
       });
    }
    out.parallel_tool_calls = req.parallel_tool_calls;
-
-   let effort = req
-      .reasoning_effort
-      .clone()
-      .or(resolved.effort)
-      .unwrap_or_else(|| "medium".into());
-   out.reasoning = Some(ReasoningConfig {
-      effort: model_map::clamp_effort(&out.model, &effort),
-      summary: "auto".into(),
-   });
-
-   if cfg.codex.forward_max_tokens {
-      out.max_output_tokens = usable_cap(req.max_completion_tokens.or(req.max_tokens));
-   }
 
    Ok(out)
 }

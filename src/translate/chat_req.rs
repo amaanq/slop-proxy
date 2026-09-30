@@ -11,7 +11,10 @@ use crate::translate::chat::{
 };
 use crate::translate::empty_schema;
 
-fn tool_call_message(call_id: &str, name: &str, arguments: String) -> ChatMessage {
+/// One assistant turn becomes one message. Strict backends (zen's Console
+/// upstream) 400 an assistant tool call that is not followed by its result,
+/// and omp sends parallel calls and their narration as separate items.
+fn push_tool_call(messages: &mut Vec<ChatMessage>, call_id: &str, name: &str, arguments: String) {
    let call = ChatToolCall {
       id: Some(call_id.to_owned()),
       kind: Some("function".into()),
@@ -24,11 +27,19 @@ fn tool_call_message(call_id: &str, name: &str, arguments: String) -> ChatMessag
          .map(ExtraContent::with_signature),
       ..Default::default()
    };
-   ChatMessage {
+
+   if let Some(last) = messages.last_mut()
+      && last.role == "assistant"
+   {
+      last.tool_calls.get_or_insert_default().push(call);
+      return;
+   }
+
+   messages.push(ChatMessage {
       role: "assistant".into(),
       tool_calls: Some(vec![call]),
       ..Default::default()
-   }
+   });
 }
 
 /// Codex's shell tool is a grammar-constrained freeform tool taking raw text.
@@ -83,6 +94,16 @@ pub fn to_chat(req: &ResponsesRequest) -> ChatRequest {
          InputItem::Message {
             ref role,
             ref content,
+         } if role == "assistant"
+            && let Some(last) = messages.last_mut()
+            && last.role == "assistant"
+            && last.content.is_none() =>
+         {
+            last.content = Some(parts(content));
+         },
+         InputItem::Message {
+            ref role,
+            ref content,
          } => messages.push(ChatMessage {
             // Chat completions has no `developer` role.
             role: match role.as_str() {
@@ -97,7 +118,7 @@ pub fn to_chat(req: &ResponsesRequest) -> ChatRequest {
             ref call_id,
             ref name,
             ref arguments,
-         } => messages.push(tool_call_message(call_id, name, arguments.clone())),
+         } => push_tool_call(&mut messages, call_id, name, arguments.clone()),
          InputItem::FunctionCallOutput {
             ref call_id,
             ref output,
@@ -115,11 +136,12 @@ pub fn to_chat(req: &ResponsesRequest) -> ChatRequest {
             ref call_id,
             ref name,
             ref input,
-         } => messages.push(tool_call_message(
+         } => push_tool_call(
+            &mut messages,
             call_id,
             name,
             serde_json::to_string(&Freeform { input }).unwrap_or_default(),
-         )),
+         ),
          // Gemini rejects an unknown role rather than ignoring it.
          InputItem::Reasoning { .. } | InputItem::AdditionalTools { .. } | InputItem::Other => {},
       }

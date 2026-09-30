@@ -23,7 +23,7 @@ use crate::provider::{AuthMode, Provider};
 use crate::server;
 use crate::stats;
 
-/// Anthropic/OpenAI API proxy backed by Codex subscription accounts
+/// Anthropic/OpenAI API proxy backed by pooled provider accounts
 #[derive(Parse)]
 #[pound(name = "slop-proxy")]
 pub struct Cli {
@@ -712,9 +712,7 @@ async fn debug_refresh(db: &Db, account: &str) -> Result<()> {
       | Provider::Zen
       | Provider::Glm
       | Provider::DeepSeek
-      | Provider::Experiential => {
-         bail!("this provider has no refresh flow")
-      },
+      | Provider::Experiential => bail!("this provider has no refresh flow"),
    };
    db.update_account_tokens(acc.id, &tokens).await?;
    println!(

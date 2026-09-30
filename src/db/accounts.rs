@@ -1,7 +1,8 @@
 use std::str::FromStr;
 
 use eyre::Result;
-use rusqlite::{Row, params, types::FromSqlError};
+use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ValueRef};
+use rusqlite::{Row, params};
 
 use super::Db;
 use crate::oauth::TokenSet;
@@ -33,6 +34,15 @@ impl FromStr for AccountStatus {
          "disabled" => Ok(Self::Disabled),
          other => Err(format!("unknown account status {other:?}")),
       }
+   }
+}
+
+impl FromSql for AccountStatus {
+   fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+      value
+         .as_str()?
+         .parse()
+         .map_err(|err: String| FromSqlError::Other(err.into()))
    }
 }
 
@@ -86,11 +96,7 @@ fn from_row(row: &Row) -> rusqlite::Result<Account> {
       http_referer: row.get("http_referer")?,
       turn_state: row.get("turn_state")?,
       access_expires_at: row.get("access_expires_at")?,
-      status: {
-         let raw: String = row.get("status")?;
-         raw.parse()
-            .map_err(|err: String| FromSqlError::Other(err.into()))?
-      },
+      status: row.get("status")?,
       cooldown_until: row.get("cooldown_until")?,
       disabled_reason: row.get("disabled_reason")?,
    })

@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use eyre::{Result, WrapErr as _, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
 
 use super::TokenSet;
@@ -15,6 +15,19 @@ const CLIENT_ID: &str = "Iv1.b507a08c87ecfe98";
 const DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
 const ACCESS_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 const COPILOT_TOKEN_URL: &str = "https://api.github.com/copilot_internal/v2/token";
+
+#[derive(Serialize)]
+struct DeviceCodeRequest<'body> {
+   client_id: &'body str,
+   scope: &'body str,
+}
+
+#[derive(Serialize)]
+struct AccessTokenRequest<'body> {
+   client_id: &'body str,
+   device_code: &'body str,
+   grant_type: &'body str,
+}
 
 #[derive(Deserialize)]
 struct DeviceCode {
@@ -46,7 +59,10 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
    let code: DeviceCode = http()
       .post(DEVICE_CODE_URL)
       .header("accept", "application/json")
-      .json(&serde_json::json!({"client_id": CLIENT_ID, "scope": "read:user"}))
+      .json(&DeviceCodeRequest {
+         client_id: CLIENT_ID,
+         scope: "read:user",
+      })
       .send()
       .await
       .wrap_err("requesting device code")?
@@ -69,11 +85,11 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
       let grant: AccessGrant = http()
          .post(ACCESS_TOKEN_URL)
          .header("accept", "application/json")
-         .json(&serde_json::json!({
-            "client_id": CLIENT_ID,
-            "device_code": code.device_code,
-            "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-         }))
+         .json(&AccessTokenRequest {
+            client_id: CLIENT_ID,
+            device_code: &code.device_code,
+            grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+         })
          .send()
          .await
          .wrap_err("polling device authorization")?

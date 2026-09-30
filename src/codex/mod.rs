@@ -48,12 +48,11 @@ pub async fn debug_ping(
 ) -> Result<()> {
    let accounts = db.list_accounts().await?;
    let account = accounts
-      .iter()
+      .into_iter()
       .find(|account| {
          account.provider == Provider::OpenAi && account.status != AccountStatus::Disabled
       })
-      .ok_or_else(|| eyre!("no usable account; run `slop-proxy login`"))?
-      .clone();
+      .ok_or_else(|| eyre!("no usable account; run `slop-proxy login`"))?;
 
    let now = clock::unix_now();
    let account = if account.access_expires_at.unwrap_or(0) < now + 60 {

@@ -3,7 +3,7 @@ use serde_json::value::RawValue;
 
 use crate::codex::types::{ResponsesEvent, Usage};
 use crate::translate::{
-   Aggregated, Block, BlockEvent, Step, StopKind, UsageCapture, Walker, input_token_partition,
+   Aggregated, Block, BlockEvent, Step, UsageCapture, Walker, input_token_partition,
 };
 
 pub struct AnthropicStream {
@@ -64,8 +64,8 @@ impl AnthEvent {
          Self::MessageStop => "message_stop",
          Self::Error { .. } => "error",
       };
-      let value = serde_json::to_value(self).expect("event serializes");
-      (name, value.to_string())
+      let value = serde_json::to_string(&self).expect("event serializes");
+      (name, value)
    }
 }
 
@@ -172,9 +172,11 @@ impl AnthropicStream {
          .walker
          .eof()
          .into_iter()
-         .filter_map(|step| match step {
-            Step::Failed { message, .. } => Some(error("overloaded_error", message)),
-            Step::Start { .. } | Step::Block { .. } | Step::Stop { .. } => None,
+         .filter_map(|step| {
+            let Step::Failed { message, .. } = step else {
+               return None;
+            };
+            Some(error("overloaded_error", message))
          })
          .collect()
    }
@@ -361,11 +363,7 @@ pub fn render_aggregated(agg: &Aggregated, model: &str, emit_thinking: bool) -> 
          },
       }
    }
-   let stop_reason = match agg.stop {
-      StopKind::ToolUse => "tool_use",
-      StopKind::MaxTokens => "max_tokens",
-      StopKind::EndTurn | StopKind::Error => "end_turn",
-   };
+   let stop_reason = agg.stop.anthropic_stop_reason();
    RenderedMessage {
       id: agg.id.clone(),
       kind: "message",

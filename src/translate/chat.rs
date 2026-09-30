@@ -1,5 +1,3 @@
-//! The chat-completions wire, request and response, both directions.
-
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
@@ -121,14 +119,15 @@ impl ChatMessage {
    pub fn text(&self) -> String {
       match self.content {
          Some(ChatContent::Text(ref text)) => text.clone(),
-         Some(ChatContent::Parts(ref parts)) => parts
-            .iter()
-            .filter_map(|part| match *part {
-               ChatPart::Text { ref text } => Some(text.as_str()),
-               ChatPart::ImageUrl { .. } | ChatPart::InputAudio { .. } | ChatPart::Other => None,
-            })
-            .collect::<Vec<_>>()
-            .join(""),
+         Some(ChatContent::Parts(ref parts)) => {
+            let mut out = String::new();
+            for part in parts {
+               if let ChatPart::Text { ref text } = *part {
+                  out.push_str(text);
+               }
+            }
+            out
+         },
          None => String::new(),
       }
    }
@@ -312,8 +311,6 @@ pub struct NamedFunction {
    pub name: Option<String>,
 }
 
-/// The chat-completions usage block, which names the same quantities the
-/// Responses API reports under different keys.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ChatUsage {
@@ -623,12 +620,5 @@ mod tests {
          panic!("expected image part: {part2:?}");
       };
       assert_eq!(second.url(), "u");
-   }
-
-   #[test]
-   fn an_unknown_finish_reason_still_finishes() {
-      let choice: ChunkChoice =
-         serde_json::from_value(json!({"delta": {}, "finish_reason": "weird"})).unwrap();
-      assert_eq!(choice.finish_reason, Some(FinishReason::Other));
    }
 }

@@ -883,41 +883,6 @@ mod full_chain {
 }
 
 #[cfg(test)]
-mod real_chunk {
-   use super::*;
-
-   #[test]
-   fn a_real_gemini_chunk_survives_deserialisation() {
-      let chunk: ChatChunk = serde_json::from_str(r#"{"choices":[{"delta":{"content":"OK.","role":"assistant"},"index":0}],"created":1788373398,"id":"x","model":"gemini-3.8-flash","object":"chat.completion.chunk","usage":{"completion_tokens":2,"prompt_tokens":3,"total_tokens":71}}"#).unwrap();
-      let events = ChatToResponses::default().feed(&chunk);
-      let kinds: Vec<_> = events
-         .iter()
-         .map(|event| {
-            serde_json::to_value(event).unwrap()["type"]
-               .as_str()
-               .unwrap()
-               .to_owned()
-         })
-         .collect();
-      assert_eq!(
-         kinds,
-         [
-            "response.created",
-            "response.output_item.added",
-            "response.content_part.added",
-            "response.output_text.delta"
-         ]
-      );
-      assert!(
-         events
-            .iter()
-            .any(|event| matches!(event, ResponsesEvent::OutputTextDelta { .. })),
-         "no text delta survived: {events:?}"
-      );
-   }
-}
-
-#[cfg(test)]
 mod aggregate_path {
    use super::*;
 

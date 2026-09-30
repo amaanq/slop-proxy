@@ -59,7 +59,6 @@ fn request_tools(req: &ResponsesRequest) -> impl Iterator<Item = &ToolDef> {
    )
 }
 
-/// The single argument a custom tool is presented as taking.
 pub(super) const FREEFORM_ARG: &str = "input";
 
 #[derive(Serialize)]

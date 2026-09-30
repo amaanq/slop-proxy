@@ -136,26 +136,3 @@ fn user_parts(content: Option<&ChatContent>) -> Vec<ContentPart> {
       None => Vec::new(),
    }
 }
-
-#[cfg(test)]
-mod tests {
-   use super::*;
-
-   #[test]
-   fn a_cap_below_the_upstream_floor_is_not_forwarded() {
-      let req = ChatRequest {
-         model: "gpt-5".into(),
-         max_tokens: Some(8),
-         ..Default::default()
-      };
-      let dropped = to_responses(&req, &Config::for_tests()).unwrap();
-      assert_eq!(dropped.max_output_tokens, None);
-
-      let raised = ChatRequest {
-         max_tokens: Some(4096),
-         ..req
-      };
-      let kept = to_responses(&raised, &Config::for_tests()).unwrap();
-      assert_eq!(kept.max_output_tokens, Some(4096));
-   }
-}

@@ -7,7 +7,7 @@ use reqwest::header::CONTENT_TYPE;
 use uuid::Uuid;
 
 use crate::anthropic::Model;
-use crate::config::GlmConfig;
+use crate::config::RelayConfig;
 use crate::egress::Egresses;
 use crate::upstream::{Classify, SendError, classify};
 
@@ -22,19 +22,21 @@ fn zcode(req: RequestBuilder, key: &str) -> RequestBuilder {
       .header("http-referer", "https://zcode.z.ai")
 }
 
+const BASE_URL: &str = "https://api.z.ai/api/anthropic";
+
 pub struct GlmClient {
    egresses: Egresses,
-   cfg: GlmConfig,
+   cfg: RelayConfig,
 }
 
 impl GlmClient {
-   pub fn new(cfg: GlmConfig) -> eyre::Result<Self> {
+   pub fn new(cfg: RelayConfig) -> eyre::Result<Self> {
       let egresses = Egresses::new(&cfg.egress.urls()?, "glm", None)?;
       Ok(Self { egresses, cfg })
    }
 
    fn base_url(&self) -> &str {
-      self.cfg.base_url.trim_end_matches('/')
+      self.cfg.base_url_or(BASE_URL)
    }
 
    pub async fn models(&self, key: &str) -> Result<Vec<Model>, SendError> {

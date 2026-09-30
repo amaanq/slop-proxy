@@ -8,10 +8,6 @@ use crate::zen::ZenModel;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ModelInfo {
    pub slug: String,
-   pub display_name: Option<String>,
-   pub default_reasoning_level: Option<String>,
-   #[serde(default)]
-   pub supported_reasoning_levels: Vec<ReasoningLevel>,
    pub visibility: Option<String>,
    pub supported_in_api: Option<bool>,
    pub context_window: Option<i64>,
@@ -28,14 +24,6 @@ pub struct ServiceTier {
    pub id: String,
    pub name: String,
    pub description: String,
-   #[serde(flatten)]
-   pub rest: BTreeMap<String, Value>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ReasoningLevel {
-   #[serde(default)]
-   pub effort: String,
    #[serde(flatten)]
    pub rest: BTreeMap<String, Value>,
 }
@@ -61,19 +49,9 @@ impl ModelsResponse {
 
    pub fn merge(&mut self, incoming: &Self) {
       for candidate in &incoming.models {
-         if let Some(model) = self
-            .models
-            .iter_mut()
-            .find(|model| model.slug == candidate.slug)
-         {
+         if self.models.iter().any(|model| model.slug == candidate.slug) {
             for tier in &candidate.service_tiers {
-               if !model
-                  .service_tiers
-                  .iter()
-                  .any(|existing| existing.id == tier.id)
-               {
-                  model.service_tiers.push(tier.clone());
-               }
+               self.add_service_tier(&candidate.slug, tier.clone());
             }
          } else {
             self.models.push(candidate.clone());

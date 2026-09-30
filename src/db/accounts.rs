@@ -1,7 +1,5 @@
-use std::str::FromStr;
-
 use eyre::Result;
-use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ValueRef};
+use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, Value, ValueRef};
 use rusqlite::{Row, params};
 
 use crate::db::Db;
@@ -25,24 +23,13 @@ impl AccountStatus {
    }
 }
 
-impl FromStr for AccountStatus {
-   type Err = String;
-   fn from_str(s: &str) -> Result<Self, Self::Err> {
-      match s {
-         "active" => Ok(Self::Active),
-         "cooldown" => Ok(Self::Cooldown),
-         "disabled" => Ok(Self::Disabled),
-         other => Err(format!("unknown account status {other:?}")),
-      }
-   }
-}
-
 impl FromSql for AccountStatus {
    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
-      value
-         .as_str()?
-         .parse()
-         .map_err(|err: String| FromSqlError::Other(err.into()))
+      let text = value.as_str()?;
+      [Self::Active, Self::Cooldown, Self::Disabled]
+         .into_iter()
+         .find(|status| status.as_str() == text)
+         .ok_or_else(|| FromSqlError::Other(format!("unknown account status {text:?}").into()))
    }
 }
 
@@ -103,6 +90,28 @@ fn from_row(row: &Row) -> rusqlite::Result<Account> {
 }
 
 const COLS: &str = "id, provider, provider_account_id, trusted, reserved, egress, auth_mode, email, label, plan_type, access_token, refresh_token, http_referer, turn_state, access_expires_at, status, cooldown_until, disabled_reason, allowed_users";
+
+pub enum AccountField {
+   Trusted(bool),
+   Egress(bool),
+   Reserved(bool),
+   AllowedUsers(String),
+   HttpReferer(Option<String>),
+   TurnState(String),
+}
+
+impl AccountField {
+   fn column(self) -> (&'static str, Value) {
+      match self {
+         Self::Trusted(enabled) => ("trusted", enabled.into()),
+         Self::Egress(enabled) => ("egress", enabled.into()),
+         Self::Reserved(enabled) => ("reserved", enabled.into()),
+         Self::AllowedUsers(users) => ("allowed_users", users.into()),
+         Self::HttpReferer(referer) => ("http_referer", referer.into()),
+         Self::TurnState(token) => ("turn_state", token.into()),
+      }
+   }
+}
 
 pub struct NewAccount<'a> {
    pub provider: Provider,
@@ -170,11 +179,12 @@ impl Db {
 
    pub async fn list_accounts(&self) -> Result<Vec<Account>> {
       self
-         .call(move |conn| {
-            let mut stmt = conn.prepare(&format!("SELECT {COLS} FROM accounts ORDER BY id"))?;
-            let rows = stmt.query_map([], from_row)?;
-            Ok(rows.collect::<rusqlite::Result<_>>()?)
-         })
+         .writer
+         .rows(
+            format!("SELECT {COLS} FROM accounts ORDER BY id"),
+            [],
+            from_row,
+         )
          .await
    }
 
@@ -192,21 +202,15 @@ impl Db {
          .await
    }
 
-   pub async fn remove_account(&self, key: &str) -> Result<usize> {
-      let key = key.to_owned();
+   pub async fn remove_account(&self, id: i64) -> Result<usize> {
       self
          .call(move |conn| {
-            let id = key.parse::<i64>().unwrap_or(-1);
             let txn = conn.transaction()?;
             txn.execute(
-               "UPDATE usage_log SET account_id = NULL WHERE account_id IN
-                  (SELECT id FROM accounts WHERE id = ?1 OR email = ?2 OR label = ?2)",
-               params![id, key],
+               "UPDATE usage_log SET account_id = NULL WHERE account_id = ?1",
+               params![id],
             )?;
-            let removed = txn.execute(
-               "DELETE FROM accounts WHERE id = ?1 OR email = ?2 OR label = ?2",
-               params![id, key],
-            )?;
+            let removed = txn.execute("DELETE FROM accounts WHERE id = ?1", params![id])?;
             txn.commit()?;
             Ok(removed)
          })
@@ -234,81 +238,16 @@ impl Db {
          .await
    }
 
-   pub async fn set_account_trusted(&self, key: &str, trusted: bool) -> Result<usize> {
-      let key = key.to_owned();
+   pub async fn set_account(&self, id: i64, field: AccountField) -> Result<usize> {
+      let (column, value) = field.column();
       self
          .call(move |conn| {
-            let id = key.parse::<i64>().unwrap_or(-1);
             Ok(conn.execute(
-               "UPDATE accounts SET trusted = ?3, updated_at = unixepoch()
-             WHERE id = ?1 OR email = ?2 OR label = ?2",
-               params![id, key, trusted],
+               &format!(
+                  "UPDATE accounts SET {column} = ?2, updated_at = unixepoch() WHERE id = ?1"
+               ),
+               params![id, value],
             )?)
-         })
-         .await
-   }
-
-   pub async fn set_account_allowed_users(&self, key: &str, users: &str) -> Result<usize> {
-      let key = key.to_owned();
-      let users = users.to_owned();
-      self
-         .call(move |conn| {
-            let id = key.parse::<i64>().unwrap_or(-1);
-            Ok(conn.execute(
-               "UPDATE accounts SET allowed_users = ?3, updated_at = unixepoch()
-                   WHERE id = ?1 OR email = ?2 OR label = ?2",
-               params![id, key, users],
-            )?)
-         })
-         .await
-   }
-
-   pub async fn set_account_http_referer(&self, id: i64, referer: Option<&str>) -> Result<()> {
-      let referer = referer.map(str::to_owned);
-      self
-         .call(move |conn| {
-            conn.execute(
-               "UPDATE accounts SET http_referer = ?2, updated_at = unixepoch() WHERE id = ?1",
-               params![id, referer],
-            )?;
-            Ok(())
-         })
-         .await
-   }
-
-   pub async fn set_account_reserved(&self, id: i64, reserved: bool) -> Result<()> {
-      self
-         .call(move |conn| {
-            conn.execute(
-               "UPDATE accounts SET reserved = ?2, updated_at = unixepoch() WHERE id = ?1",
-               params![id, reserved],
-            )?;
-            Ok(())
-         })
-         .await
-   }
-
-   pub async fn set_account_egress(&self, id: i64, egress: bool) -> Result<()> {
-      self
-         .call(move |conn| {
-            conn.execute(
-               "UPDATE accounts SET egress = ?2, updated_at = unixepoch() WHERE id = ?1",
-               params![id, egress],
-            )?;
-            Ok(())
-         })
-         .await
-   }
-
-   pub async fn set_account_turn_state(&self, id: i64, token: &str) -> Result<()> {
-      let token = token.to_owned();
-      self
-         .call(move |conn| {
-            conn.execute(
-               "UPDATE accounts SET turn_state = ?2, updated_at = unixepoch() WHERE id = ?1",
-               params![id, token],
-            )?;
-            Ok(())
          })
          .await
    }

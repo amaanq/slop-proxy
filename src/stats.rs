@@ -3,54 +3,16 @@ use serde::Serialize;
 
 use crate::clock;
 use crate::db::Db;
-use crate::db::usage::{UsageAgg, UsageDim, cache_hit_ratio};
-
-#[derive(Serialize)]
-struct Tokens {
-   requests: i64,
-   errors: i64,
-   input_tokens: i64,
-   output_tokens: i64,
-   cache_read_tokens: i64,
-   cache_write_tokens: i64,
-   cache_hit_ratio: f64,
-   reasoning_tokens: i64,
-}
-
-impl From<&UsageAgg> for Tokens {
-   fn from(agg: &UsageAgg) -> Self {
-      Self {
-         requests: agg.requests,
-         errors: agg.errors,
-         input_tokens: agg.input_tokens,
-         output_tokens: agg.output_tokens,
-         cache_read_tokens: agg.cache_read_tokens,
-         cache_write_tokens: agg.cache_write_tokens,
-         cache_hit_ratio: cache_hit_ratio(
-            agg.input_tokens,
-            agg.cache_read_tokens,
-            agg.cache_write_tokens,
-         ),
-         reasoning_tokens: agg.reasoning_tokens,
-      }
-   }
-}
-
-#[derive(Serialize)]
-struct KeyedTokens {
-   name: String,
-   #[serde(flatten)]
-   tokens: Tokens,
-}
+use crate::db::usage::{UsageAgg, UsageDim};
 
 #[derive(Serialize)]
 struct Report {
    since: Option<String>,
    until: Option<String>,
-   totals: Tokens,
-   by_user: Vec<KeyedTokens>,
-   by_account: Vec<KeyedTokens>,
-   by_model: Vec<KeyedTokens>,
+   totals: UsageAgg,
+   by_user: Vec<UsageAgg>,
+   by_account: Vec<UsageAgg>,
+   by_model: Vec<UsageAgg>,
 }
 
 pub async fn run(db: &Db, since: Option<String>, until: Option<String>) -> Result<()> {
@@ -69,15 +31,6 @@ pub async fn run(db: &Db, since: Option<String>, until: Option<String>) -> Resul
    let by_account = db.usage_by(UsageDim::Account, since_ts, until_ts).await?;
    let by_model = db.usage_by(UsageDim::Model, since_ts, until_ts).await?;
 
-   let keyed = |rows: &[UsageAgg]| {
-      rows
-         .iter()
-         .map(|agg| KeyedTokens {
-            name: agg.key.clone(),
-            tokens: agg.into(),
-         })
-         .collect()
-   };
    let stamp = |timestamp| {
       jiff::Timestamp::from_second(timestamp)
          .ok()
@@ -86,10 +39,10 @@ pub async fn run(db: &Db, since: Option<String>, until: Option<String>) -> Resul
    let report = Report {
       since: stamp(since_ts),
       until: stamp(until_ts),
-      totals: (&totals).into(),
-      by_user: keyed(&by_user),
-      by_account: keyed(&by_account),
-      by_model: keyed(&by_model),
+      totals,
+      by_user,
+      by_account,
+      by_model,
    };
    println!("{}", serde_json::to_string_pretty(&report)?);
    Ok(())

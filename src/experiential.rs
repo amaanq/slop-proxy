@@ -2,17 +2,19 @@
 
 use axum::body::Bytes;
 
-use crate::config::ExperientialConfig;
+use crate::config::RelayConfig;
 use crate::egress::Egresses;
 use crate::upstream::{Classify, SendError, classify};
 
+const BASE_URL: &str = "https://api.experientiallabs.ai";
+
 pub struct ExperientialClient {
    egresses: Egresses,
-   cfg: ExperientialConfig,
+   cfg: RelayConfig,
 }
 
 impl ExperientialClient {
-   pub fn new(cfg: ExperientialConfig) -> eyre::Result<Self> {
+   pub fn new(cfg: RelayConfig) -> eyre::Result<Self> {
       let egresses = Egresses::new(&cfg.egress.urls()?, "experiential", None)?;
       Ok(Self { egresses, cfg })
    }
@@ -27,7 +29,7 @@ impl ExperientialClient {
          .egresses
          .send(|http| async move {
             http
-               .post(format!("{}{path}", self.cfg.base_url.trim_end_matches('/')))
+               .post(format!("{}{path}", self.cfg.base_url_or(BASE_URL)))
                .bearer_auth(key)
                .header("content-type", "application/json")
                .body(body.clone())

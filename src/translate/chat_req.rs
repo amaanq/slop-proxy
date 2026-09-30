@@ -5,11 +5,11 @@ use serde_json::value::{RawValue, to_raw_value};
 
 use crate::codex::types::{ContentPart, InputItem, ResponsesRequest, ToolChoice, ToolDef};
 use crate::gemini::signatures;
-use crate::translate::anthropic_req::empty_schema;
 use crate::translate::chat::{
    ChatContent, ChatMessage, ChatPart, ChatRequest, ChatToolCall, ChatToolChoice, ChatToolDef,
    ExtraContent, FunctionBody, FunctionDef, ImageRef, StreamOptions,
 };
+use crate::translate::empty_schema;
 
 fn tool_call_message(call_id: &str, name: &str, arguments: String) -> ChatMessage {
    let call = ChatToolCall {
@@ -87,7 +87,12 @@ pub fn to_chat(req: &ResponsesRequest) -> ChatRequest {
             ref role,
             ref content,
          } => messages.push(ChatMessage {
-            role: chat_role(role).to_owned(),
+            // Chat completions has no `developer` role.
+            role: match role.as_str() {
+               "developer" => "system",
+               other => other,
+            }
+            .to_owned(),
             content: Some(parts(content)),
             ..Default::default()
          }),
@@ -172,14 +177,6 @@ pub fn clamped_effort(effort: &str) -> &str {
       "low" => "low",
       "medium" => "medium",
       _ => "high",
-   }
-}
-
-/// Chat completions has no `developer` role.
-fn chat_role(role: &str) -> &str {
-   match role {
-      "developer" => "system",
-      other => other,
    }
 }
 

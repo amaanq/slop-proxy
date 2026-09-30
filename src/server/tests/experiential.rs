@@ -1,5 +1,5 @@
 use super::*;
-use crate::config::{ExperientialConfig, ModelAlias};
+use crate::config::{ModelAlias, RelayConfig};
 use axum::body::Bytes;
 use axum::http::HeaderMap;
 use std::time::Duration;
@@ -50,9 +50,9 @@ async fn gateway(
       auth_mode: AuthMode::ApiKey,
    }];
    let cfg = Config {
-      experiential: ExperientialConfig {
-         base_url: upstream_url,
-         ..ExperientialConfig::default()
+      experiential: RelayConfig {
+         base_url: Some(upstream_url),
+         ..RelayConfig::default()
       },
       models: ModelsConfig {
          experiential_patterns: vec!["gateway-model".into()],
@@ -66,7 +66,7 @@ async fn gateway(
          .into(),
          ..ModelsConfig::default()
       },
-      ..Config::for_tests()
+      ..Config::default()
    };
    let (base, db) = serve_proxy(cfg, &accounts).await;
    (base, db, requests)

@@ -230,8 +230,16 @@ impl AnthropicStream {
                   Channel::Call,
                ),
             };
-            self.blocks.push(Some((self.next_index, channel)));
-            self.open(out, content);
+            let index = self.next_index;
+            self.blocks.push(Some((index, channel)));
+            self.next_index += 1;
+            out.push(
+               AnthEvent::ContentBlockStart {
+                  index,
+                  content_block: content,
+               }
+               .out(),
+            );
          },
          Step::Block { index, event } => {
             let Some((index, channel)) = self.blocks[index] else {
@@ -250,7 +258,7 @@ impl AnthropicStream {
                },
                BlockEvent::Open(_) => return,
             };
-            out.push(Self::delta(index, delta));
+            out.push(AnthEvent::ContentBlockDelta { index, delta }.out());
          },
          Step::Stop { kind, usage } => {
             out.push(
@@ -276,22 +284,6 @@ impl AnthropicStream {
             out.push(error(kind, message));
          },
       }
-   }
-
-   fn open(&mut self, out: &mut Vec<OutEvent>, content_block: ContentBlockStart) {
-      let index = self.next_index;
-      self.next_index += 1;
-      out.push(
-         AnthEvent::ContentBlockStart {
-            index,
-            content_block,
-         }
-         .out(),
-      );
-   }
-
-   fn delta(index: usize, delta: BlockDelta) -> OutEvent {
-      AnthEvent::ContentBlockDelta { index, delta }.out()
    }
 }
 
@@ -363,7 +355,7 @@ pub fn render_aggregated(agg: &Aggregated, model: &str, emit_thinking: bool) -> 
          },
       }
    }
-   let stop_reason = agg.stop.anthropic_stop_reason();
+   let stop_reason = agg.stop.as_str();
    RenderedMessage {
       id: agg.id.clone(),
       kind: "message",

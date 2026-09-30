@@ -108,11 +108,10 @@ pub fn response_error(event: &Value) -> Option<ResponseError> {
       .and_then(Value::as_u64)
       .or_else(|| event.get("status_code").and_then(Value::as_u64))
       .unwrap_or(fallback);
-   let fault = match fault {
-      Fault::Transient if status < 500 && status != 429 => Fault::Caller,
-      Fault::Caller => Fault::Caller,
-      Fault::Exhausted => Fault::Exhausted,
-      Fault::Transient => Fault::Transient,
+   let fault = if fault == Fault::Transient && status < 500 && status != 429 {
+      Fault::Caller
+   } else {
+      fault
    };
    (400..600).contains(&status).then_some(ResponseError {
       status: status as u16,

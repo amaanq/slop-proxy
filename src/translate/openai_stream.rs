@@ -82,14 +82,14 @@ impl OpenAiStream {
             if let Some(id) = id {
                self.id = format!("chatcmpl-{id}");
             }
-            out.push(self.chunk(
+            out.push(to_json(self.chunk(
                ChatDelta {
                   role: Some("assistant".into()),
                   content: Some(String::new()),
                   ..Default::default()
                },
                None,
-            ));
+            )));
          },
          Step::Block {
             event: BlockEvent::Open(Block::Text { .. }),
@@ -109,7 +109,7 @@ impl OpenAiStream {
             let index = self.tool_count;
             self.tool_count += 1;
             self.blocks.push(Channel::Call(index));
-            out.push(self.chunk(
+            out.push(to_json(self.chunk(
                ChatDelta {
                   tool_calls: Some(vec![ChatToolCall {
                      index: Some(index),
@@ -124,7 +124,7 @@ impl OpenAiStream {
                   ..Default::default()
                },
                None,
-            ));
+            )));
          },
          Step::Block {
             index,
@@ -152,19 +152,17 @@ impl OpenAiStream {
                   }]);
                },
             }
-            out.push(self.chunk(delta, None));
+            out.push(to_json(self.chunk(delta, None)));
          },
          Step::Stop { kind, usage } => {
-            out.push(self.chunk(ChatDelta::default(), Some(kind.chat_finish_reason())));
+            out.push(to_json(
+               self.chunk(ChatDelta::default(), Some(kind.chat_finish_reason())),
+            ));
             if self.include_usage {
                out.push(to_json(ChatChunk {
-                  id: self.id.clone(),
-                  object: "chat.completion.chunk".into(),
-                  created: self.created,
-                  model: self.model.clone(),
                   choices: Vec::new(),
                   usage: Some(ChatUsage::from(&usage)),
-                  error: None,
+                  ..self.chunk(ChatDelta::default(), None)
                }));
             }
          },
@@ -173,8 +171,8 @@ impl OpenAiStream {
       }
    }
 
-   fn chunk(&self, delta: ChatDelta, finish_reason: Option<FinishReason>) -> String {
-      to_json(ChatChunk {
+   fn chunk(&self, delta: ChatDelta, finish_reason: Option<FinishReason>) -> ChatChunk {
+      ChatChunk {
          id: self.id.clone(),
          object: "chat.completion.chunk".into(),
          created: self.created,
@@ -187,7 +185,7 @@ impl OpenAiStream {
          }],
          usage: None,
          error: None,
-      })
+      }
    }
 }
 

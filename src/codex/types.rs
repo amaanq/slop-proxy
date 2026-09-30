@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
+use crate::translate::empty_schema;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ResponsesRequest {
@@ -246,6 +248,22 @@ pub struct ToolDef {
    pub strict: bool,
    #[serde(skip_serializing_if = "Option::is_none")]
    pub parameters: Option<Box<RawValue>>,
+}
+
+impl ToolDef {
+   pub fn function(
+      name: String,
+      description: Option<String>,
+      parameters: Option<Box<RawValue>>,
+   ) -> Self {
+      Self {
+         kind: "function".into(),
+         name,
+         description,
+         strict: false,
+         parameters: Some(parameters.unwrap_or_else(empty_schema)),
+      }
+   }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

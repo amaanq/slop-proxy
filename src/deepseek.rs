@@ -6,23 +6,27 @@
 use axum::body::Bytes;
 use reqwest::header::CONTENT_TYPE;
 
-use crate::config::DeepSeekConfig;
+use crate::config::RelayConfig;
 use crate::egress::Egresses;
 use crate::upstream::{Classify, SendError, classify};
 
+/// The site root, not the messages surface. `DeepSeek` serves its catalog from
+/// the root and its Anthropic dialect from `/anthropic` under it.
+const BASE_URL: &str = "https://api.deepseek.com";
+
 pub struct DeepSeekClient {
    egresses: Egresses,
-   cfg: DeepSeekConfig,
+   cfg: RelayConfig,
 }
 
 impl DeepSeekClient {
-   pub fn new(cfg: DeepSeekConfig) -> eyre::Result<Self> {
+   pub fn new(cfg: RelayConfig) -> eyre::Result<Self> {
       let egresses = Egresses::new(&cfg.egress.urls()?, "deepseek", None)?;
       Ok(Self { egresses, cfg })
    }
 
    fn root(&self) -> &str {
-      self.cfg.base_url.trim_end_matches('/')
+      self.cfg.base_url_or(BASE_URL)
    }
 
    pub async fn models(&self, key: &str) -> Result<Vec<String>, SendError> {

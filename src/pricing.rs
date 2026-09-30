@@ -5,8 +5,6 @@ use std::sync::{Arc, RwLock};
 use eyre::{Result, WrapErr as _};
 use tokio::fs;
 
-use crate::clock;
-
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Rates {
    pub input: f64,
@@ -97,14 +95,7 @@ impl PriceTable {
    }
 
    pub fn cost(&self, model: &str, tokens: Tokens) -> f64 {
-      self.cost_at(model, tokens, clock::unix_now())
-   }
-
-   fn cost_at(&self, model: &str, tokens: Tokens, now: i64) -> f64 {
-      self
-         .find(model)
-         .or_else(|| unpublished(model, now))
-         .map_or(0.0, |price| price.cost(tokens))
+      self.find(model).map_or(0.0, |price| price.cost(tokens))
    }
 
    /// What the same tokens would have cost at the model's own list price.
@@ -133,28 +124,6 @@ impl PriceTable {
             .collect(),
       ))
    }
-}
-
-/// Rates litellm has not published, consulted only when the fetched table
-/// misses so an upstream entry takes over the moment one appears. Google is
-/// running Gemini 3.8 Flash at an introductory rate that doubles on
-/// 2027-01-01, per <https://ai.google.dev/gemini-api/docs/pricing>.
-pub fn unpublished(model: &str, now: i64) -> Option<ModelPrice> {
-   const INTRO_ENDS: i64 = 1_798_761_600;
-   let scale = if now < INTRO_ENDS { 1.0_f64 } else { 2.0_f64 };
-   let base = match model {
-      "gemini-3.8-flash" => Rates {
-         input: 0.75e-6 * scale,
-         output: 3.75e-6 * scale,
-         cache_write: 0.0,
-         cache_read: 0.075e-6 * scale,
-      },
-      _ => return None,
-   };
-   Some(ModelPrice {
-      base,
-      long_context: None,
-   })
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -354,37 +323,6 @@ mod tests {
          ..Tokens::default()
       };
       assert!((table.cost("gpt-daybreak-blue-latest", tokens) - 1.25).abs() < 1e-9_f64);
-   }
-
-   #[test]
-   fn an_unpublished_model_still_bills() {
-      let prices = table();
-      let tokens = Tokens {
-         input: 1_000_000,
-         output: 1_000_000,
-         cache_read: 1_000_000,
-         ..Tokens::default()
-      };
-      assert!(
-         (prices.cost_at("gemini-3.8-flash", tokens, 1_798_761_599) - 4.575_f64).abs() < 1e-9_f64
-      );
-      assert!(prices.cost("gemini-3.8-pro", tokens).abs() < f64::EPSILON);
-   }
-
-   #[test]
-   fn the_introductory_rate_expires() {
-      let intro = unpublished("gemini-3.8-flash", 1_798_761_599).unwrap();
-      let after = unpublished("gemini-3.8-flash", 1_798_761_600).unwrap();
-      assert!(intro.base.input.mul_add(-2.0_f64, after.base.input).abs() < 1e-12_f64);
-   }
-
-   #[test]
-   fn a_published_price_beats_the_builtin() {
-      let table = PriceTable::parse(
-         r#"{"gemini-3.8-flash": {"input_cost_per_token": 0.001, "output_cost_per_token": 0.0}}"#,
-      )
-      .unwrap();
-      assert!((table.find("gemini-3.8-flash").unwrap().base.input - 0.001).abs() < f64::EPSILON);
    }
 
    #[test]

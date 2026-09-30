@@ -54,9 +54,8 @@ impl Pool<CopilotClient> {
             Ok(report) => {
                let usage = AccountUsage {
                   windows: quota_windows(&report),
-                  model_windows: Vec::new(),
                   locked: quota_locked(&report),
-                  observed_at: 0,
+                  ..AccountUsage::default()
                };
                self.slots.note_usage(&slot, usage).await;
             },

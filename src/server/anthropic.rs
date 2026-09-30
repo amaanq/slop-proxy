@@ -158,10 +158,12 @@ pub async fn count_tokens(
 
    let peek = super::relay::Peek::from_slice(&body, &state.cfg.models);
    if state.cfg.models.blocked(&peek.upstream_model) {
+      log_rejected(&state, &auth, "count_tokens", &peek.model);
       return super::error::blocked_model(DIALECT, &peek.upstream_model);
    }
    let provider = state.cfg.models.route(&peek.upstream_model);
    if !auth.may_use(provider) {
+      log_rejected(&state, &auth, "count_tokens", &peek.model);
       return super::error::out_of_scope(DIALECT, provider);
    }
    match provider {

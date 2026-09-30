@@ -6,16 +6,16 @@ use futures_util::{StreamExt as _, stream};
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::{Value, json};
 
-use super::{
-   AccountUsage, AuthPolicy, Backend, Cooldown, Pool, PoolError, Route, Served, Slot, UsageWindow,
-   window_seconds,
-};
 use crate::clock::unix_now;
 use crate::codex::client::CodexClient;
 use crate::codex::models::{ModelInfo, ModelsResponse, ServiceTier};
 use crate::codex::turn_state::{self, TurnState};
 use crate::codex::types::ErrorEnvelope;
 use crate::codex::websocket::Connection;
+use crate::pool::{
+   AccountUsage, AuthPolicy, Backend, Cooldown, Pool, PoolError, Route, Served, Slot, UsageWindow,
+   window_seconds,
+};
 use crate::provider::Provider;
 use crate::upstream::SendError;
 

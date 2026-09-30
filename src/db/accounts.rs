@@ -4,7 +4,7 @@ use eyre::Result;
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ValueRef};
 use rusqlite::{Row, params};
 
-use super::Db;
+use crate::db::Db;
 use crate::oauth::TokenSet;
 use crate::provider::{AuthMode, Provider};
 

@@ -5,8 +5,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use futures_util::stream;
 
-use super::chat::{ChatChunk, ChatErrorBody, ChatToolCall, ErrorCode, FinishReason};
-use super::chat_req::FREEFORM_ARG;
 use crate::codex::sse::EventStream;
 use crate::codex::types::{
    OutputContentPart, OutputItem, ResponseObj, ResponsesEvent, SummaryPart, UpstreamError, Usage,
@@ -15,6 +13,8 @@ use crate::gemini::native::{NativeEvent, NativeStream};
 use crate::gemini::signatures;
 use crate::gemini::sse::Frames;
 use crate::translate::UsageCapture;
+use crate::translate::chat::{ChatChunk, ChatErrorBody, ChatToolCall, ErrorCode, FinishReason};
+use crate::translate::chat_req::FREEFORM_ARG;
 
 /// Which wire the upstream answered in, since only Google's native surface
 /// frames something other than chat completions.

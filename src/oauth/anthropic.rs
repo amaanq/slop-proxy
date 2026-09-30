@@ -5,9 +5,9 @@ use rand::RngCore as _;
 use reqwest::Url;
 use serde::Deserialize;
 
-use super::TokenSet;
-use super::refresh::{RefreshError, RefreshRequest, post_token, token_set};
 use crate::db::Db;
+use crate::oauth::refresh::{RefreshError, RefreshRequest, post_token, token_set};
+use crate::oauth::{TokenSet, exchanged, finish_login, http};
 use crate::provider::Provider;
 
 pub const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
@@ -62,7 +62,7 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
       bail!("state mismatch, paste the whole code");
    }
 
-   let resp = super::http()
+   let resp = http()
       .post(TOKEN_URL)
       .json(&ExchangeRequest {
          grant_type: "authorization_code",
@@ -75,7 +75,7 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
       .send()
       .await
       .wrap_err("token exchange request failed")?;
-   let mut parsed = super::exchanged(resp).await?;
+   let mut parsed = exchanged(resp).await?;
 
    let account = parsed.account.take().unwrap_or_default();
    let account_id = account
@@ -87,7 +87,7 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
       .into_token_set(None)
       .ok_or_else(|| eyre!("no refresh_token in token response"))?;
 
-   super::finish_login(
+   finish_login(
       db,
       Provider::Anthropic,
       &account_id,
@@ -110,7 +110,7 @@ async fn subscription_tier(access_token: &str) -> Option<String> {
    struct Org {
       rate_limit_tier: Option<String>,
    }
-   super::http()
+   http()
       .get(PROFILE_URL)
       .bearer_auth(access_token)
       .header("anthropic-beta", "oauth-2025-04-20")

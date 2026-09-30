@@ -16,10 +16,6 @@ use futures_util::StreamExt as _;
 use serde_json::Value;
 use serde_json::value::RawValue;
 
-use super::auth::AuthInfo;
-use super::error::{Dialect, translation_error};
-use super::pipeline::{self, apply_snapshot, dispatch_failed, translated};
-use super::{AppState, LogGuard, cache_key, log_error, log_rejected, log_usage};
 use crate::anthropic::{Catalog, Model};
 use crate::clock::{rfc3339, unix_now};
 use crate::codex::models::with_zen_entries;
@@ -30,6 +26,15 @@ use crate::egress::egress_of;
 use crate::pool::pools::{Dispatched, Upstream};
 use crate::pool::{PoolError, Route, UsageWindow, window_seconds};
 use crate::provider::Provider;
+use crate::server::auth::AuthInfo;
+use crate::server::error::{
+   Dialect, blocked_model, error_response, out_of_scope, translation_error,
+};
+use crate::server::facts::RequestFacts;
+use crate::server::pipeline::{self, apply_snapshot, dispatch_failed, translated};
+use crate::server::{
+   AppState, LogGuard, cache_key, copilot, gemini, log_error, log_rejected, log_usage,
+};
 use crate::translate::chat::ChatRequest;
 use crate::translate::openai_req;
 use crate::translate::openai_stream::{OpenAiStream, render_aggregated};
@@ -129,16 +134,16 @@ pub async fn chat_completions(
          return translation_error(DIALECT, &format!("invalid request: {err}"));
       },
    };
-   let facts = super::facts::RequestFacts::from_chat(&req, &headers);
+   let facts = RequestFacts::from_chat(&req, &headers);
    let resolved = model_map::resolve(&state.cfg.models, &req.model);
    if state.cfg.models.blocked(&resolved.model) {
       log_rejected(&state, &auth, "chat", &req.model);
-      return super::error::blocked_model(DIALECT, &resolved.model);
+      return blocked_model(DIALECT, &resolved.model);
    }
    let provider = state.cfg.models.route(&resolved.model);
    if !auth.may_use(provider) {
       log_rejected(&state, &auth, "chat", &req.model);
-      return super::error::out_of_scope(DIALECT, provider);
+      return out_of_scope(DIALECT, provider);
    }
    match provider {
       Provider::Anthropic => {
@@ -152,13 +157,13 @@ pub async fn chat_completions(
          let model = req.model.clone();
          req.model = resolved.model;
          req.reasoning_effort = req.reasoning_effort.or(resolved.effort);
-         return super::gemini::chat_completions(state, auth, req, model, facts).await;
+         return gemini::chat_completions(state, auth, req, model, facts).await;
       },
       Provider::Copilot => {
          let model = req.model.clone();
          req.model = resolved.model;
          req.reasoning_effort = req.reasoning_effort.or(resolved.effort);
-         return super::copilot::chat_completions(state, auth, req, model, facts).await;
+         return copilot::chat_completions(state, auth, req, model, facts).await;
       },
       Provider::Glm | Provider::DeepSeek | Provider::Experiential => {
          log_rejected(&state, &auth, "chat", &req.model);
@@ -250,7 +255,7 @@ pub async fn chat_completions(
             .unwrap_or_else(|| "upstream failure".into());
          record.status = 502;
          log_usage(&state, record);
-         return super::error::error_response(DIALECT, 502, "api_error", &msg);
+         return error_response(DIALECT, 502, "api_error", &msg);
       }
       record.error_kind = snap.error_kind;
       pipeline::logged_json(&state, record, render_aggregated(&agg, &req.model))
@@ -338,8 +343,8 @@ pub async fn models(
    if headers.contains_key("anthropic-version") {
       return match messages_catalog(&state).await {
          Ok(body) => ([("content-type", "application/json")], body).into_response(),
-         Err(err) => super::error::error_response(
-            super::error::Dialect::Anthropic,
+         Err(err) => error_response(
+            Dialect::Anthropic,
             503,
             "api_error",
             &format!("reading the model catalog: {err}"),
@@ -363,7 +368,7 @@ pub async fn models(
          .await
          .map_or_else(
             || {
-               super::error::error_response(
+               error_response(
                   DIALECT,
                   503,
                   "api_error",
@@ -374,7 +379,7 @@ pub async fn models(
                let body = match serde_json::to_string(&catalog) {
                   Ok(body) => body,
                   Err(error) => {
-                     return super::error::error_response(
+                     return error_response(
                         DIALECT,
                         500,
                         "api_error",
@@ -919,10 +924,7 @@ fn prepare_request(
       .unwrap_or_else(|| state.cfg.models.default.clone());
    let resolved = model_map::resolve(&state.cfg.models, &requested_model);
    if state.cfg.models.blocked(&resolved.model) {
-      return Err(Box::new(super::error::blocked_model(
-         DIALECT,
-         &resolved.model,
-      )));
+      return Err(Box::new(blocked_model(DIALECT, &resolved.model)));
    }
    // Scope is decided by where the model resolves, not by the endpoint. This
    // surface is the Responses API, which zen speaks as well as codex does.
@@ -943,7 +945,7 @@ fn prepare_request(
       )));
    }
    if !auth.may_use(provider) {
-      return Err(Box::new(super::error::out_of_scope(DIALECT, provider)));
+      return Err(Box::new(out_of_scope(DIALECT, provider)));
    }
    req.model = Some(resolved.model.clone());
    if req
@@ -1041,7 +1043,7 @@ pub async fn responses_passthrough(
    };
    let facts = typed
       .as_ref()
-      .map(|typed| super::facts::RequestFacts::from_responses(typed, &headers))
+      .map(|typed| RequestFacts::from_responses(typed, &headers))
       .unwrap_or_default();
    let mut record = pipeline::record(
       &auth,
@@ -1137,7 +1139,7 @@ pub async fn responses_passthrough(
 
 fn upstream_eof(state: &AppState, record: UsageRecord) -> Response {
    log_error(state, record, 502, "upstream_eof");
-   super::error::error_response(
+   error_response(
       DIALECT,
       502,
       "api_error",

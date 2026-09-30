@@ -2,7 +2,7 @@ use eyre::Result;
 use rand::RngCore as _;
 use rusqlite::params;
 
-use super::Db;
+use crate::db::Db;
 use crate::provider::Provider;
 
 #[derive(Debug, Clone)]

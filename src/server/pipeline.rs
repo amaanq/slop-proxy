@@ -15,17 +15,17 @@ use futures_util::StreamExt as _;
 use futures_util::stream;
 use tokio::time::timeout;
 
-use super::auth::AuthInfo;
-use super::error::{
-   Dialect, error_response, pool_error_kind, pool_error_response, pool_error_status,
-};
-use super::facts::RequestFacts;
-use super::{AppState, LogGuard, log_error};
 use crate::codex::sse::EventStream;
 use crate::codex::types::ResponsesEvent;
 use crate::db::usage::UsageRecord;
 use crate::pool::PoolError;
 use crate::provider::Provider;
+use crate::server::auth::AuthInfo;
+use crate::server::error::{
+   Dialect, error_response, pool_error_kind, pool_error_response, pool_error_status,
+};
+use crate::server::facts::RequestFacts;
+use crate::server::{AppState, LogGuard, log_error, log_usage};
 use crate::translate::{CapturedUsage, UsageCapture};
 
 pub fn record(
@@ -109,7 +109,7 @@ where
    let response = axum::Json(value).into_response();
    record.status = i64::from(response.status().as_u16());
    record.response_bytes = response.body().size_hint().exact().unwrap_or(0) as i64;
-   super::log_usage(state, record);
+   log_usage(state, record);
    response
 }
 

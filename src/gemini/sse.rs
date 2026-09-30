@@ -1,4 +1,4 @@
-use super::types::ApiError;
+use crate::gemini::types::ApiError;
 
 /// When Google gives up mid-answer it keeps the 200 and appends a bare JSON
 /// error after the frames, `{"error":..}` natively and `[{"error":..}]` on the

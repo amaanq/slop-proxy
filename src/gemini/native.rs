@@ -9,7 +9,8 @@ use crate::gemini::sse::Frames;
 use crate::gemini::types::{
    ApiError, Blob, Candidate, Content, FileData, FinishReason, FunctionCall, FunctionCallingConfig,
    FunctionCallingMode, FunctionDeclaration, FunctionResponse, GenerateContentRequest,
-   GenerateContentResponse, GenerationConfig, Part, Tool, ToolConfig, UsageMetadata,
+   GenerateContentResponse, GenerationConfig, Part, ThinkingConfig, Tool, ToolConfig,
+   UsageMetadata,
 };
 use crate::translate::chat::{
    self, ChatChoice, ChatChunk, ChatCompletion, ChatContent, ChatDelta, ChatMessage, ChatPart,
@@ -249,7 +250,7 @@ fn generation_config(req: &ChatRequest) -> Option<GenerationConfig> {
             .model
             .trim_start_matches("models/")
             .starts_with("gemini-3");
-         super::types::ThinkingConfig {
+         ThinkingConfig {
             thinking_level: gemini_three
                .then(|| if level == "none" { "minimal" } else { level }.to_owned()),
             thinking_budget: (!gemini_three).then_some(match level {

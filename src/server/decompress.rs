@@ -6,6 +6,8 @@ use axum::middleware::Next;
 use axum::response::Response;
 use ruzstd::decoding::StreamingDecoder;
 
+use crate::server::error::{Dialect, error_response};
+
 /// Codex zstd-encodes request bodies whenever it talks to the built-in
 /// `openai` provider, and a turn's context is mostly repeated text, so the
 /// wire form runs about a third of the JSON. Agent turns carrying a 200k
@@ -24,8 +26,8 @@ pub async fn zstd_requests(req: Request, next: Next) -> Response {
 
    let (mut parts, body) = req.into_parts();
    let Ok(bytes) = to_bytes(body, MAX_BODY).await else {
-      return super::error::error_response(
-         super::error::Dialect::OpenAi,
+      return error_response(
+         Dialect::OpenAi,
          413,
          "invalid_request_error",
          "request body too large",
@@ -38,16 +40,16 @@ pub async fn zstd_requests(req: Request, next: Next) -> Response {
             "rejecting a body that unpacks past {MAX_BODY} bytes from {} compressed",
             bytes.len()
          );
-         return super::error::error_response(
-            super::error::Dialect::OpenAi,
+         return error_response(
+            Dialect::OpenAi,
             413,
             "invalid_request_error",
             "request body too large",
          );
       },
       Err(DecodeError::Malformed) => {
-         return super::error::error_response(
-            super::error::Dialect::OpenAi,
+         return error_response(
+            Dialect::OpenAi,
             400,
             "invalid_request_error",
             "malformed zstd request body",

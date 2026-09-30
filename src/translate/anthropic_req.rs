@@ -4,13 +4,13 @@ use serde::Deserialize;
 use serde::de::IgnoredAny;
 use serde_json::value::{RawValue, to_raw_value};
 
-use super::{decode_signature, model_map, usable_cap};
 use crate::codex::types::{
    ContentPart, InputItem, ReasoningConfig, ResponsesRequest, SummaryPart, ToolChoice, ToolDef,
    ToolOutput,
 };
 use crate::config::Config;
 use crate::provider::Provider;
+use crate::translate::{decode_signature, model_map, usable_cap};
 
 #[derive(Debug, Deserialize)]
 pub struct AnthropicRequest {

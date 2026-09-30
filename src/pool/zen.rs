@@ -4,8 +4,8 @@ use std::sync::LazyLock;
 use axum::body::Bytes;
 use rand::{Rng as _, thread_rng};
 
-use super::{Backend, Pool, Relay, Route, Slot};
 use crate::clock::unix_now_ms;
+use crate::pool::{Backend, Pool, Relay, Route, Slot};
 use crate::provider::Provider;
 use crate::translate::anthropic_req::empty_schema;
 use crate::translate::chat::{ChatRequest, ChatToolDef, FunctionDef};

@@ -3,13 +3,13 @@ use std::collections::BTreeMap;
 use futures_util::stream;
 use serde_json::{Value, json};
 
-use super::anthropic_stream::AnthropicStream;
-use super::bridge::ChatToResponses;
-use super::chat_req::{custom_tools, to_chat};
-use super::openai_stream::OpenAiStream;
-use super::{Block, StopKind, UsageCapture, aggregate};
 use crate::codex::types::{OutputItem, ResponsesEvent};
 use crate::gemini::native::{NativeEvent, NativeStream, request};
+use crate::translate::anthropic_stream::AnthropicStream;
+use crate::translate::bridge::ChatToResponses;
+use crate::translate::chat_req::{custom_tools, to_chat};
+use crate::translate::openai_stream::OpenAiStream;
+use crate::translate::{Block, StopKind, UsageCapture, aggregate};
 
 fn interleaved() -> Vec<ResponsesEvent> {
    vec![

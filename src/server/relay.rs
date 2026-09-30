@@ -11,10 +11,6 @@ use serde::Deserialize;
 use serde_json::value::RawValue;
 use tokio::time::timeout;
 
-use super::auth::AuthInfo;
-use super::error::{Dialect, error_response, pool_error_response};
-use super::pipeline::{dispatch_failed, read_body, relayed_stream};
-use super::{AppState, LogGuard, log_error, log_usage};
 use crate::anthropic::RelayHeaders;
 use crate::config::ModelsConfig;
 use crate::db::usage::UsageRecord;
@@ -22,6 +18,11 @@ use crate::egress::egress_of;
 use crate::pool::anthropic::Relay as AnthropicRelay;
 use crate::pool::{PoolError, Relay, Route, Served, UsageWindow};
 use crate::provider::Provider;
+use crate::server::auth::AuthInfo;
+use crate::server::error::{Dialect, error_response, pool_error_response};
+use crate::server::facts::RequestFacts;
+use crate::server::pipeline::{self, dispatch_failed, read_body, relayed_stream};
+use crate::server::{AppState, LogGuard, log_error, log_usage};
 use crate::translate::UsageCapture;
 use crate::translate::anthropic_req::AnthropicRequest;
 use crate::translate::model_map::resolve;
@@ -212,10 +213,10 @@ fn not_claude_code(user: &str, headers: &HeaderMap) -> Response {
 }
 
 /// The body goes upstream untouched, so the parse here only feeds the log.
-fn anthropic_facts(body: &[u8], headers: &HeaderMap) -> super::facts::RequestFacts {
+fn anthropic_facts(body: &[u8], headers: &HeaderMap) -> RequestFacts {
    serde_json::from_slice::<AnthropicRequest>(body).map_or_else(
-      |_| super::facts::RequestFacts::empty(headers),
-      |req| super::facts::RequestFacts::from_anthropic(&req, headers),
+      |_| RequestFacts::empty(headers),
+      |req| RequestFacts::from_anthropic(&req, headers),
    )
 }
 
@@ -289,7 +290,7 @@ pub async fn messages(
    let started = Instant::now();
    let key = peek.session_key(&auth);
    let facts = anthropic_facts(&body, &headers);
-   let mut record = super::pipeline::record(
+   let mut record = pipeline::record(
       &auth,
       "messages",
       provider,
@@ -584,7 +585,7 @@ pub async fn count_tokens(
    }
 }
 
-pub(super) fn forwarded_response(resp: &reqwest::Response) -> Builder {
+pub fn forwarded_response(resp: &reqwest::Response) -> Builder {
    let mut builder = Response::builder().status(resp.status().as_u16());
    for (name, value) in resp.headers() {
       let key = name.as_str();
@@ -610,7 +611,7 @@ fn is_rate_limit_header(name: &str) -> bool {
 
 /// Claude Code warns on the utilization in these, so they carry the pool's
 /// figures rather than one account's.
-pub(super) fn pool_rate_limit_headers(windows: &[UsageWindow]) -> Vec<(String, String)> {
+pub fn pool_rate_limit_headers(windows: &[UsageWindow]) -> Vec<(String, String)> {
    let mut out = Vec::new();
    let mut soonest: Option<i64> = None;
    for window in windows {

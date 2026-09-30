@@ -3,7 +3,7 @@ use std::pin::Pin;
 use eventsource_stream::Eventsource as _;
 use futures_util::{Stream, StreamExt as _};
 
-use super::types::ResponsesEvent;
+use crate::codex::types::ResponsesEvent;
 
 pub type EventStream = Pin<Box<dyn Stream<Item = ResponsesEvent> + Send>>;
 

@@ -5,6 +5,7 @@ use axum::response::Response;
 use serde::Serialize;
 
 use crate::clock;
+use crate::server::error::{Dialect, error_response};
 
 /// Ten years out. Codex refreshes when it believes the grant is near expiry,
 /// and the refresh would go to `OpenAI` rather than here, so the claim is dated
@@ -66,8 +67,8 @@ struct Header {
 /// reads the bearer from `auth.json` rather than `env_key`.
 pub async fn codex_auth(headers: HeaderMap) -> Response {
    let Some(token) = bearer(&headers) else {
-      return super::error::error_response(
-         super::error::Dialect::OpenAi,
+      return error_response(
+         Dialect::OpenAi,
          401,
          "authentication_error",
          "missing api token",

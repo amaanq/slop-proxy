@@ -4,12 +4,12 @@ use axum::response::Response;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use super::error::{Dialect, error_response};
-use super::pipeline::{apply_snapshot, relayed};
-use super::{AppState, LogGuard};
 use crate::db::usage::UsageRecord;
 use crate::gemini::sse::Frames;
 use crate::provider::Provider;
+use crate::server::error::{Dialect, error_response};
+use crate::server::pipeline::{apply_snapshot, relayed};
+use crate::server::{AppState, LogGuard, log_usage};
 use crate::translate::UsageCapture;
 use crate::translate::chat::{
    ChatChunk, ChatEnvelope, ChatError, ChatErrorBody, ChatRequest, ErrorCode, FinishReason,
@@ -45,7 +45,7 @@ pub fn relay_chat_body(
    }
    record.duration_ms = Some(started.elapsed().as_millis() as i64);
    record.response_bytes = bytes.len() as i64;
-   super::log_usage(state, record);
+   log_usage(state, record);
    builder
       .body(Body::from(bytes))
       .unwrap_or_else(|err| error_response(DIALECT, 502, "api_error", &err.to_string()))
@@ -122,7 +122,7 @@ pub async fn upstream_rejected(
    record.error_kind = Some("upstream_rejected".into());
    record.response_bytes = bytes.len() as i64;
    record.duration_ms = Some(started.elapsed().as_millis() as i64);
-   super::log_usage(state, record);
+   log_usage(state, record);
    builder
       .body(Body::from(bytes))
       .unwrap_or_else(|err| error_response(DIALECT, 502, "api_error", &err.to_string()))

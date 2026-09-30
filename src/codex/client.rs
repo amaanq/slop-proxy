@@ -223,7 +223,7 @@ async fn refuse_early(resp: reqwest::Response) -> Result<reqwest::Response, Send
 }
 
 impl CodexClient {
-   pub(super) const fn config(&self) -> &CodexConfig {
+   pub const fn config(&self) -> &CodexConfig {
       &self.cfg
    }
 

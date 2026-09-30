@@ -4,9 +4,9 @@ use axum::body::Bytes;
 
 use crate::translate::chat::ChatRequest;
 
-use super::{Backend, Cooldown, Pool, Route, Slot};
 use crate::gemini::client::{GeminiClient, GeminiResponse};
 use crate::gemini::types::ListedModel;
+use crate::pool::{Backend, Cooldown, Pool, Route, Slot};
 use crate::provider::Provider;
 use crate::translate::bridge::BridgeProtocol;
 use crate::upstream::SendError;

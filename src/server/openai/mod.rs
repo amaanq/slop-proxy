@@ -211,7 +211,12 @@ pub fn responses_upgrade_required() -> Response {
 }
 
 async fn messages_catalog(state: &AppState) -> Catalog {
-   let mut data = state.pools.anthropic.catalog().await;
+   let (mut data, glm, deepseek, zen) = tokio::join!(
+      state.pools.anthropic.catalog(),
+      state.pools.glm.models(),
+      state.pools.deepseek.models(),
+      state.pools.zen.models(),
+   );
 
    let now = rfc3339(unix_now());
    let synthetic = |id: String| Model {
@@ -222,31 +227,17 @@ async fn messages_catalog(state: &AppState) -> Catalog {
    };
 
    data.extend(
-      state
-         .pools
-         .glm
-         .models()
-         .await
-         .into_iter()
+      glm.into_iter()
          .filter(|model| state.cfg.models.route(&model.id) == Provider::Glm),
    );
    data.extend(
-      state
-         .pools
-         .deepseek
-         .models()
-         .await
+      deepseek
          .into_iter()
          .filter(|id| state.cfg.models.route(id) == Provider::DeepSeek)
          .map(&synthetic),
    );
    data.extend(
-      state
-         .pools
-         .zen
-         .models()
-         .await
-         .into_iter()
+      zen.into_iter()
          .filter(|model| state.cfg.models.zen_dialect(&model.id) == ZenDialect::Messages)
          .map(|model| synthetic(model.id)),
    );

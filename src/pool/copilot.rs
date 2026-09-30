@@ -1,9 +1,8 @@
 use axum::body::Bytes;
 
-use super::{AccountUsage, AuthPolicy, Backend, Cooldown, Pool, Route, Slot, UsageWindow};
+use super::{AccountUsage, AuthPolicy, Backend, Pool, Route, Slot, UsageWindow};
 use crate::copilot::client::{CopilotClient, QuotaReport};
 use crate::provider::Provider;
-use crate::translate::chat::ChatError;
 use crate::upstream::SendError;
 
 pub type CopilotPool = Pool<CopilotClient>;
@@ -19,17 +18,9 @@ pub struct Call {
 
 impl Backend for CopilotClient {
    const PROVIDER: Provider = Provider::Copilot;
-   const RATE_LIMIT: Cooldown = Cooldown {
-      max: 3600,
-      base: 60,
-   };
    const ON_AUTH: AuthPolicy = AuthPolicy::RefreshOnce;
    type Request = Call;
    type Response = reqwest::Response;
-
-   fn reason(body: String) -> String {
-      ChatError::reason(body)
-   }
 
    fn soft_limit(&self) -> f64 {
       self.soft_utilization_limit()
@@ -47,19 +38,11 @@ impl Backend for CopilotClient {
 }
 
 impl Pool<CopilotClient> {
-   /// Every seat sees the same catalog, so the first account that answers
-   /// speaks for all of them.
    pub async fn models(&self) -> Vec<String> {
-      for slot in self.slots.list().await {
-         let Ok(key) = self.slots.fresh_token(&slot, false).await else {
-            continue;
-         };
-         match self.backend.models(&key).await {
-            Ok(listed) => return listed,
-            Err(err) => tracing::debug!("models for {}: {err}", slot.display),
-         }
-      }
-      Vec::new()
+      self
+         .first_answer(async |backend, key, _| backend.models(key).await)
+         .await
+         .unwrap_or_default()
    }
 
    pub async fn poll_usage(&self) {

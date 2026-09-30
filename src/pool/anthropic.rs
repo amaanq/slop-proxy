@@ -6,7 +6,6 @@ use super::{
 };
 use crate::anthropic::client::{AnthropicClient, RelayHeaders};
 use crate::provider::Provider;
-use crate::translate::chat::ChatError;
 use crate::upstream::SendError;
 
 /// Session-sticky pool over Anthropic Max accounts, owning the relay client.
@@ -28,10 +27,6 @@ impl Backend for AnthropicClient {
    const ON_AUTH: AuthPolicy = AuthPolicy::RefreshOnce;
    type Request = Relay;
    type Response = reqwest::Response;
-
-   fn reason(body: String) -> String {
-      ChatError::reason(body)
-   }
 
    fn soft_limit(&self) -> f64 {
       self.soft_utilization_limit()
@@ -60,17 +55,20 @@ impl Backend for AnthropicClient {
 impl Pool<AnthropicClient> {
    /// The catalog body untouched, for relaying to an Anthropic client.
    pub async fn models_raw(&self) -> Result<String, PoolError> {
-      for slot in self.slots.list().await {
-         let Ok(token) = self.slots.fresh_token(&slot, false).await else {
-            continue;
-         };
-         match self.backend.models_raw(&token).await {
-            Ok((status, body)) if status.is_success() => return Ok(body),
-            Ok((status, _)) => tracing::debug!("models for {}: {status}", slot.display),
-            Err(err) => tracing::debug!("models for {}: {err}", slot.display),
-         }
-      }
-      Err(PoolError::NoAccounts(Provider::Anthropic))
+      self
+         .first_answer(async |backend, token, _| {
+            let (status, body) = backend
+               .models_raw(token)
+               .await
+               .map_err(|err| err.to_string())?;
+            if status.is_success() {
+               Ok(body)
+            } else {
+               Err(status.to_string())
+            }
+         })
+         .await
+         .ok_or(PoolError::NoAccounts(Provider::Anthropic))
    }
 
    /// Reads each account's rolling-window consumption from the provider.

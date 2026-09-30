@@ -731,6 +731,7 @@ fn reslot(account: &Account, prev: &Slot) -> Slot {
 }
 
 fn slot_from_account(account: Account) -> Slot {
+   let display = display_for(&account);
    let now = clock::unix_now();
    let status = match account.status {
       AccountStatus::Disabled => Status::Disabled,
@@ -749,10 +750,7 @@ fn slot_from_account(account: Account) -> Slot {
       auth_mode: account.auth_mode,
       plan: account.plan_type,
       http_referer: account.http_referer,
-      display: account
-         .label
-         .or(account.email)
-         .unwrap_or_else(|| format!("account#{}", account.id)),
+      display,
       credentials: Arc::new(Mutex::new(Credentials {
          access_token: account.access_token,
          refresh_token: account.refresh_token,

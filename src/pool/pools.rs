@@ -10,8 +10,8 @@ use super::deepseek::DeepSeekPool;
 use super::experiential::ExperientialPool;
 use super::gemini::{Call, GeminiPool};
 use super::glm::GlmPool;
-use super::zen::{Relay as ZenRelay, ZenPool, satisfy_chat_tool_gate, satisfy_tool_gate};
-use super::{AccountSnapshot, Backend, PoolError, Route, Served};
+use super::zen::{ZenPool, satisfy_chat_tool_gate, satisfy_tool_gate};
+use super::{AccountSnapshot, Backend, PoolError, Relay, Route, Served};
 use crate::anthropic::client::AnthropicClient;
 use crate::codex::client::CodexClient;
 use crate::codex::sse;
@@ -221,7 +221,7 @@ impl Pools {
                .zen
                .execute(
                   route,
-                  ZenRelay {
+                  Relay {
                      path: "/chat/completions",
                      body: bridged,
                   },
@@ -241,7 +241,7 @@ impl Pools {
             .zen
             .execute(
                route,
-               ZenRelay {
+               Relay {
                   path: "/responses",
                   body: satisfy_tool_gate(&body).unwrap_or(body),
                },

@@ -3,8 +3,10 @@ use std::sync::LazyLock;
 
 use axum::body::Bytes;
 use rand::{Rng as _, thread_rng};
+use serde_json::value::RawValue;
 
 use crate::clock::unix_now_ms;
+use crate::codex::types::ToolDef;
 use crate::pool::{Backend, Pool, Relay, Route, Slot};
 use crate::provider::Provider;
 use crate::translate::chat::{ChatRequest, ChatToolDef, FunctionDef};
@@ -21,6 +23,7 @@ const GATE_SHELL: &str = "bash";
 const GATE_READER: &str = "read";
 const GATE_EDITORS: [&str; 2] = ["edit", "write"];
 const DECOY_HINT: &str = "Deprecated placeholder. Never call this tool.";
+const DECOY_SCHEMA: &str = r#"{"additionalProperties":false,"properties":{},"type":"object"}"#;
 
 fn missing_gate_tools(declared: &[&str]) -> Vec<&'static str> {
    let mut missing = Vec::new();
@@ -54,15 +57,15 @@ pub fn satisfy_tool_gate(body: &Bytes) -> Option<Bytes> {
       return None;
    }
 
-   tools.extend(missing.iter().map(|name| {
-      serde_json::json!({
-         "type": "function",
-         "name": name,
-         "description": DECOY_HINT,
-         "strict": false,
-         "parameters": {"type": "object", "properties": {}, "additionalProperties": false},
-      })
-   }));
+   for name in &missing {
+      let parameters = RawValue::from_string(DECOY_SCHEMA.to_owned()).ok()?;
+      let tool = ToolDef::function(
+         (*name).to_owned(),
+         Some(DECOY_HINT.to_owned()),
+         Some(parameters),
+      );
+      tools.push(serde_json::to_value(tool).ok()?);
+   }
    req.insert("tools".into(), serde_json::Value::Array(tools));
    tracing::debug!(
       added = missing.len(),

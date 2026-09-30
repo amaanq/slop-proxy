@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::{CopilotConfig, ModelAlias};
 use axum::body::Bytes;
 use axum::http::HeaderMap;
 use axum::routing::get;
@@ -37,31 +38,24 @@ async fn copilot_upstream(content_type: &'static str, reply: String) -> (String,
 }
 
 async fn proxy(base_url: String) -> (String, Db) {
-   let db_path = env::temp_dir().join(format!("slop-copilot-{}.db", uuid::Uuid::new_v4()));
-   let db = Db::open(&db_path).unwrap();
-   db.create_token("alice", "sp-test", "sp-test")
-      .await
-      .unwrap();
+   let tokens = TokenSet {
+      access_token: "minted-token".into(),
+      refresh_token: "github-grant".into(),
+      id_token: None,
+      expires_at: Some(2_000_000_000),
+   };
    // The slot caches the minted access half, so the test seeds one with a
    // live expiry and keeps the grant in the refresh half.
-   db.upsert_account(NewAccount {
+   let accounts = [NewAccount {
       provider: Provider::Copilot,
       id: "copilot-user",
       email: Some("copilot-user"),
       label: None,
       plan: None,
-      tokens: &TokenSet {
-         access_token: "minted-token".into(),
-         refresh_token: "github-grant".into(),
-         id_token: None,
-         expires_at: Some(2_000_000_000),
-      },
+      tokens: &tokens,
       auth_mode: AuthMode::OAuth,
-   })
-   .await
-   .unwrap();
+   }];
    let cfg = Config {
-      db_path: db_path.clone(),
       copilot: CopilotConfig {
          base_url,
          ..CopilotConfig::default()
@@ -80,19 +74,7 @@ async fn proxy(base_url: String) -> (String, Db) {
       },
       ..Config::for_tests()
    };
-   let pools = Pools::load(&db, &cfg).await.unwrap();
-   let state = AppState(Arc::new(Inner {
-      db: db.clone(),
-      cfg,
-      prices: Prices::new(&db_path, PricingConfig::default().url),
-      pools,
-   }));
-   let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-   let base = format!("http://{}", proxy_listener.local_addr().unwrap());
-   tokio::spawn(async move {
-      axum::serve(proxy_listener, router(state)).await.unwrap();
-   });
-   (base, db)
+   serve_proxy(cfg, &accounts).await
 }
 
 #[tokio::test]
@@ -143,8 +125,6 @@ async fn chat_preserves_payloads_usage_and_provider_scope() {
       {
          let seen = requests.lock().unwrap();
          assert_eq!(seen.len(), 1);
-         // The handler rewrote the alias to the upstream model and forced
-         // usage on the wire.
          let sent: serde_json::Value = serde_json::from_slice(&seen[0].1).unwrap();
          assert_eq!(sent["model"], "gpt-5-copilot");
          if streaming {

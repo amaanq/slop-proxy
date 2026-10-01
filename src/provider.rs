@@ -17,7 +17,7 @@ pub enum Provider {
 /// spelling no config pattern, database row or `--providers` list accepts.
 impl pound::FromArg for Provider {
    const POSSIBLE: Option<&'static [&'static str]> =
-      Some(&["openai", "anthropic", "gemini", "zen", "glm", "deepseek"]);
+      Some(&["openai", "anthropic", "gemini", "zen", "glm", "deepseek", "experiential"]);
 
    fn from_arg(text: &str) -> Result<Self, pound::ValueError> {
       Self::from_str(text).ok_or_else(|| pound::ValueError::new(text, "unrecognised provider"))

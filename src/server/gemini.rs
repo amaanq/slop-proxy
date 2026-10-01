@@ -93,12 +93,12 @@ pub async fn chat_completions(
    let builder = forwarded_response(&resp);
    let ok = resp.status().is_success();
    if !ok {
-      return upstream_rejected(&state, record, builder, resp, started).await;
+      return upstream_rejected(&state, record, builder, resp, started, Provider::Gemini).await;
    }
    if streaming && protocol == BridgeProtocol::GeminiNative {
       let capture = UsageCapture::default();
       let mut native = NativeStream::new(&model);
-      let mut scan = ChatUsageScan::new(capture.clone());
+      let mut scan = ChatUsageScan::new(capture.clone(), Provider::Gemini);
       return relayed(
          builder,
          resp,
@@ -116,43 +116,7 @@ pub async fn chat_completions(
       );
    }
    if streaming && protocol == BridgeProtocol::Chat {
-      let capture = UsageCapture::default();
-      let scan = Arc::new(Mutex::new(ChatUsageScan::new(capture.clone())));
-      let each = {
-         let scan = Arc::clone(&scan);
-         move |bytes: Bytes| {
-            scan.lock().unwrap().feed(&bytes);
-            bytes
-         }
-      };
-      return relayed(
-         builder,
-         resp,
-         LogGuard::new(state, capture.clone(), record, started),
-         capture,
-         DIALECT,
-         each,
-         move || {
-            let cutoff = scan.lock().unwrap().frames.cutoff();
-            let frame = match cutoff {
-               Some(error) => {
-                  let err = ChatError {
-                     error: ChatErrorBody {
-                        message: error.message.unwrap_or_default(),
-                        kind: Some("server_error".into()),
-                        code: error.status.map(ErrorCode::Text),
-                     },
-                  };
-                  format!(
-                     "data: {}\n\ndata: [DONE]\n\n",
-                     serde_json::to_string(&err).unwrap_or_default()
-                  )
-               },
-               None => String::new(),
-            };
-            Bytes::from(frame)
-         },
-      );
+      return relay_chat_stream(state, record, builder, resp, started, Provider::Gemini);
    }
 
    let bytes = match read_body(&state, &record, DIALECT, resp).await {
@@ -188,14 +152,64 @@ pub async fn chat_completions(
       .unwrap_or_else(|err| error_response(DIALECT, 502, "api_error", &err.to_string()))
 }
 
-/// A non-2xx carries no SSE frames, so the usage scanner logged a phantom
-/// `client_disconnect` and dropped the body.
-async fn upstream_rejected(
+/// Relays a chat-completions stream byte for byte and meters usage out of its
+/// frames. Shared with the Copilot handler, which speaks the same dialect.
+pub(super) fn relay_chat_stream(
+   state: AppState,
+   record: UsageRecord,
+   builder: Builder,
+   resp: reqwest::Response,
+   started: Instant,
+   provider: Provider,
+) -> Response {
+   let capture = UsageCapture::default();
+   let scan = Arc::new(Mutex::new(ChatUsageScan::new(capture.clone(), provider)));
+   let each = {
+      let scan = Arc::clone(&scan);
+      move |bytes: Bytes| {
+         scan.lock().unwrap().feed(&bytes);
+         bytes
+      }
+   };
+   relayed(
+      builder,
+      resp,
+      LogGuard::new(state, capture.clone(), record, started),
+      capture,
+      DIALECT,
+      each,
+      move || {
+         let cutoff = scan.lock().unwrap().frames.cutoff();
+         let frame = match cutoff {
+            Some(error) => {
+               let err = ChatError {
+                  error: ChatErrorBody {
+                     message: error.message.unwrap_or_default(),
+                     kind: Some("server_error".into()),
+                     code: error.status.map(ErrorCode::Text),
+                  },
+               };
+               format!(
+                  "data: {}\n\ndata: [DONE]\n\n",
+                  serde_json::to_string(&err).unwrap_or_default()
+               )
+            },
+            None => String::new(),
+         };
+         Bytes::from(frame)
+      },
+   )
+}
+
+/// A non-2xx carries no SSE frames, so the usage scanner would log a phantom
+/// `client_disconnect` and drop the body.
+pub(super) async fn upstream_rejected(
    state: &AppState,
    mut record: UsageRecord,
    builder: Builder,
    resp: reqwest::Response,
    started: Instant,
+   provider: Provider,
 ) -> Response {
    let bytes = resp.bytes().await.unwrap_or_default();
    tracing::warn!(
@@ -204,7 +218,7 @@ async fn upstream_rejected(
        dialect = record.dialect,
        status = record.status,
        body = %String::from_utf8_lossy(&bytes).chars().take(2000).collect::<String>(),
-       "gemini rejected the request"
+       "{provider} rejected the request"
    );
    record.error_kind = Some("upstream_rejected".into());
    record.response_bytes = bytes.len() as i64;
@@ -216,7 +230,7 @@ async fn upstream_rejected(
 }
 
 /// Pins a conversation to one account.
-fn session_key(user: &str, body: &ChatRequest) -> String {
+pub(super) fn session_key(user: &str, body: &ChatRequest) -> String {
    let mut hasher = hmac_sha256::Hash::new();
    hasher.update(user.as_bytes());
    if let Some(first) = body.messages.first() {
@@ -231,14 +245,16 @@ struct ChatUsageScan {
    capture: UsageCapture,
    frames: Frames,
    cut: bool,
+   provider: Provider,
 }
 
 impl ChatUsageScan {
-   fn new(capture: UsageCapture) -> Self {
+   fn new(capture: UsageCapture, provider: Provider) -> Self {
       Self {
          capture,
          frames: Frames::default(),
          cut: false,
+         provider,
       }
    }
 
@@ -269,7 +285,8 @@ impl ChatUsageScan {
             };
             tracing::warn!(
                 status = %code,
-                "gemini gave up mid-stream after its 200: {}",
+                "{} gave up mid-stream after its 200: {}",
+                self.provider,
                 error.error.message
             );
             self.capture.note_cutoff(&code);
@@ -283,7 +300,8 @@ impl ChatUsageScan {
          tracing::warn!(
              code = error.code.unwrap_or(0),
              status = %status,
-             "gemini gave up mid-stream after its 200: {}",
+             "{} gave up mid-stream after its 200: {}",
+             self.provider,
              error.message.as_deref().unwrap_or("")
          );
          self.capture.note_cutoff(&status);
@@ -404,7 +422,7 @@ pub async fn native(
    let ok = resp.status().is_success();
    let builder = forwarded_response(&resp);
    if !ok {
-      return upstream_rejected(&state, record, builder, resp, started).await;
+      return upstream_rejected(&state, record, builder, resp, started, Provider::Gemini).await;
    }
 
    if streaming {
@@ -521,7 +539,7 @@ mod tests {
    #[test]
    fn the_terminal_frame_supplies_usage() {
       let capture = UsageCapture::default();
-      let mut scan = ChatUsageScan::new(capture.clone());
+      let mut scan = ChatUsageScan::new(capture.clone(), Provider::Gemini);
       scan.feed(b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n");
       scan.feed(
          b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":7,\
@@ -538,7 +556,7 @@ mod tests {
    #[test]
    fn thinking_left_out_of_completion_tokens_is_recovered() {
       let capture = UsageCapture::default();
-      let mut scan = ChatUsageScan::new(capture.clone());
+      let mut scan = ChatUsageScan::new(capture.clone(), Provider::Gemini);
       scan.feed(
          b"data: {\"usage\":{\"prompt_tokens\":13,\"completion_tokens\":10,\
               \"total_tokens\":309}}\n",
@@ -552,7 +570,7 @@ mod tests {
    #[test]
    fn a_frame_split_across_chunks_still_parses() {
       let capture = UsageCapture::default();
-      let mut scan = ChatUsageScan::new(capture.clone());
+      let mut scan = ChatUsageScan::new(capture.clone(), Provider::Gemini);
       scan.feed(b"data: {\"usage\":{\"prompt_tokens\":10,");
       scan.feed(b"\"completion_tokens\":2,\"total_tokens\":12}}\n");
       let snap = capture.snapshot();

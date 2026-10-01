@@ -5,6 +5,7 @@ use reqwest::header::HeaderMap;
 
 use super::anthropic::AnthropicPool;
 use super::codex::CodexPool;
+use super::copilot::CopilotPool;
 use super::deepseek::DeepSeekPool;
 use super::experiential::ExperientialPool;
 use super::gemini::{Call, GeminiPool};
@@ -17,6 +18,7 @@ use crate::codex::sse;
 use crate::codex::sse::EventStream;
 use crate::codex::types::ResponsesRequest;
 use crate::config::{Config, ModelsConfig, ZenDialect};
+use crate::copilot::client::CopilotClient;
 use crate::db::Db;
 use crate::deepseek::client::DeepSeekClient;
 use crate::experiential::client::ExperientialClient;
@@ -80,6 +82,7 @@ pub struct Pools {
    pub glm: GlmPool,
    pub deepseek: DeepSeekPool,
    pub experiential: ExperientialPool,
+   pub copilot: CopilotPool,
 }
 
 impl Pools {
@@ -97,6 +100,7 @@ impl Pools {
          ExperientialClient::new(cfg.experiential.clone())?,
       )
       .await?;
+      let copilot = CopilotPool::load(db.clone(), CopilotClient::new(cfg.copilot.clone())).await?;
       announce("codex", codex.len().await, Some("slop-proxy login"));
       announce(
          "anthropic",
@@ -108,6 +112,11 @@ impl Pools {
       announce("glm", glm.len().await, None);
       announce("deepseek", deepseek.len().await, None);
       announce("experiential", experiential.len().await, None);
+      announce(
+         "copilot",
+         copilot.len().await,
+         Some("slop-proxy login --provider copilot"),
+      );
       Ok(Self {
          codex,
          anthropic,
@@ -116,18 +125,20 @@ impl Pools {
          glm,
          deepseek,
          experiential,
+         copilot,
       })
    }
 
    pub async fn reload(&self) {
-      let (codex, anthropic, gemini, zen, glm, deepseek, experiential) = tokio::join!(
+      let (codex, anthropic, gemini, zen, glm, deepseek, experiential, copilot) = tokio::join!(
          self.codex.reload(),
          self.anthropic.reload(),
          self.gemini.reload(),
          self.zen.reload(),
          self.glm.reload(),
          self.deepseek.reload(),
-         self.experiential.reload()
+         self.experiential.reload(),
+         self.copilot.reload()
       );
       for (provider, result) in [
          (Provider::OpenAi, codex),
@@ -137,6 +148,7 @@ impl Pools {
          (Provider::Glm, glm),
          (Provider::DeepSeek, deepseek),
          (Provider::Experiential, experiential),
+         (Provider::Copilot, copilot),
       ] {
          if let Err(err) = result {
             tracing::warn!("reloading {provider} accounts: {err}");
@@ -147,6 +159,7 @@ impl Pools {
    pub async fn poll_usage(&self) {
       self.codex.poll_usage().await;
       self.anthropic.poll_usage().await;
+      self.copilot.poll_usage().await;
    }
 
    /// One Responses request to whichever backend serves the model. Codex and
@@ -265,13 +278,15 @@ impl Pools {
                },
             })
          },
-         Provider::Anthropic | Provider::Glm | Provider::DeepSeek | Provider::Experiential => {
-            Err(PoolError::BadRequest {
-               provider,
-               model: route.model.to_owned(),
-               body: "not served over the responses api".into(),
-            })
-         },
+         Provider::Anthropic
+         | Provider::Glm
+         | Provider::DeepSeek
+         | Provider::Experiential
+         | Provider::Copilot => Err(PoolError::BadRequest {
+            provider,
+            model: route.model.to_owned(),
+            body: "not served over the responses api".into(),
+         }),
       }
    }
 
@@ -283,6 +298,7 @@ impl Pools {
       out.extend(self.glm.snapshot().await);
       out.extend(self.deepseek.snapshot().await);
       out.extend(self.experiential.snapshot().await);
+      out.extend(self.copilot.snapshot().await);
       out
    }
 }

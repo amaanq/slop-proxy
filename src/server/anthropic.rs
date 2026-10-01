@@ -52,7 +52,7 @@ pub async fn messages(
       {
          return super::relay::messages(state, auth, headers, body, peek, provider).await;
       },
-      Provider::Gemini | Provider::Zen | Provider::OpenAi => {},
+      Provider::Gemini | Provider::Zen | Provider::OpenAi | Provider::Copilot => {},
    }
    let req = match serde_json::from_slice::<AnthropicRequest>(&body) {
       Ok(req) => req,
@@ -173,6 +173,7 @@ pub async fn count_tokens(
       | Provider::Glm
       | Provider::DeepSeek
       | Provider::OpenAi
+      | Provider::Copilot
       | Provider::Experiential => {},
    }
    let req = match serde_json::from_slice::<AnthropicRequest>(&body) {

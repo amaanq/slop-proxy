@@ -427,7 +427,7 @@ async fn dispatch(
             },
          }
       },
-      Provider::OpenAi | Provider::Gemini => Err(PoolError::BadRequest {
+      Provider::OpenAi | Provider::Gemini | Provider::Copilot => Err(PoolError::BadRequest {
          provider,
          model: peek.upstream_model.clone(),
          body: "not served over the messages api".into(),

@@ -92,6 +92,28 @@ pub async fn gemini_entries(state: &AppState) -> Vec<ModelEntry> {
       .collect()
 }
 
+/// The Copilot catalog narrowed to whatever `copilot_patterns` claims, so
+/// `/v1/models` only advertises what this proxy will actually serve.
+pub async fn copilot_entries(state: &AppState) -> Vec<ModelEntry> {
+   let created = unix_now();
+   state
+      .pools
+      .copilot
+      .models()
+      .await
+      .into_iter()
+      .filter(|id| state.cfg.models.route(id) == Provider::Copilot)
+      .map(|id| ModelEntry {
+         id,
+         object: "model",
+         created,
+         owned_by: "github",
+         context_length: None,
+         input: Vec::new(),
+      })
+      .collect()
+}
+
 pub async fn chat_completions(
    State(state): State<AppState>,
    Extension(auth): Extension<AuthInfo>,
@@ -130,6 +152,12 @@ pub async fn chat_completions(
          req.model = resolved.model;
          req.reasoning_effort = req.reasoning_effort.or(resolved.effort);
          return super::gemini::chat_completions(state, auth, req, model, facts).await;
+      },
+      Provider::Copilot => {
+         let model = req.model.clone();
+         req.model = resolved.model;
+         req.reasoning_effort = req.reasoning_effort.or(resolved.effort);
+         return super::copilot::chat_completions(state, auth, req, model, facts).await;
       },
       Provider::Glm | Provider::DeepSeek | Provider::Experiential => {
          log_rejected(&state, &auth, "chat", &req.model);
@@ -419,6 +447,7 @@ pub async fn models(
    );
 
    data.extend(gemini_entries(&state).await);
+   data.extend(copilot_entries(&state).await);
 
    Json(ModelList {
       object: "list",
@@ -894,7 +923,11 @@ fn prepare_request(
    let responses_native = match provider {
       Provider::OpenAi | Provider::Gemini => true,
       Provider::Zen => state.cfg.models.zen_dialect(&resolved.model) != ZenDialect::Messages,
-      Provider::Anthropic | Provider::Glm | Provider::DeepSeek | Provider::Experiential => false,
+      Provider::Anthropic
+      | Provider::Glm
+      | Provider::DeepSeek
+      | Provider::Experiential
+      | Provider::Copilot => false,
    };
    if !responses_native {
       return Err(Box::new(translation_error(

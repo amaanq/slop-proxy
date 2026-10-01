@@ -1,5 +1,6 @@
 pub mod anthropic;
 pub mod codex;
+pub mod copilot;
 pub mod deepseek;
 pub mod experiential;
 pub mod gemini;

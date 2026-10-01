@@ -12,6 +12,7 @@ mod cli;
 mod clock;
 mod codex;
 mod config;
+mod copilot;
 mod db;
 mod deepseek;
 mod egress;

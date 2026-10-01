@@ -23,6 +23,7 @@ pub struct Config {
    pub glm: GlmConfig,
    pub deepseek: DeepSeekConfig,
    pub experiential: ExperientialConfig,
+   pub copilot: CopilotConfig,
    pub pricing: PricingConfig,
    pub models: ModelsConfig,
 }
@@ -79,6 +80,26 @@ impl Default for ExperientialConfig {
       Self {
          base_url: "https://api.experientiallabs.ai".into(),
          egress: EgressConfig::default(),
+      }
+   }
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(default)]
+pub struct CopilotConfig {
+   pub base_url: String,
+   pub account_type: String,
+   /// Fraction of a rolling window past which an account is ranked behind
+   /// its peers, so sessions migrate before the window rejects them.
+   pub soft_utilization_limit: f64,
+}
+
+impl Default for CopilotConfig {
+   fn default() -> Self {
+      Self {
+         base_url: "https://api.githubcopilot.com".into(),
+         account_type: "individual".into(),
+         soft_utilization_limit: 0.9,
       }
    }
 }
@@ -275,6 +296,9 @@ pub struct ModelsConfig {
    /// Model patterns relayed verbatim to the Experiential gateway over
    /// /v1/messages only. Empty by default, set to opt in.
    pub experiential_patterns: Vec<String>,
+   /// Model patterns served by GitHub Copilot's chat-completions endpoint.
+   /// Empty by default, set to opt in.
+   pub copilot_patterns: Vec<String>,
    /// Model patterns refused on every surface, whichever backend serves them.
    pub blocked_patterns: Vec<String>,
 }
@@ -294,6 +318,7 @@ impl Default for ModelsConfig {
          glm_patterns: vec!["glm-*".into()],
          deepseek_patterns: vec!["deepseek-*".into()],
          experiential_patterns: Vec::new(),
+         copilot_patterns: Vec::new(),
          blocked_patterns: Vec::new(),
       }
    }
@@ -338,7 +363,7 @@ impl ModelsConfig {
       best.map(|(_, provider)| provider)
    }
 
-   const fn sets(&self) -> [(Provider, &Vec<String>); 8] {
+   const fn sets(&self) -> [(Provider, &Vec<String>); 9] {
       [
          (Provider::Anthropic, &self.anthropic_patterns),
          (Provider::Gemini, &self.gemini_patterns),
@@ -348,6 +373,7 @@ impl ModelsConfig {
          (Provider::Glm, &self.glm_patterns),
          (Provider::DeepSeek, &self.deepseek_patterns),
          (Provider::Experiential, &self.experiential_patterns),
+         (Provider::Copilot, &self.copilot_patterns),
       ]
    }
 
@@ -427,6 +453,7 @@ struct FileConfig {
    glm: Option<GlmConfig>,
    deepseek: Option<DeepSeekConfig>,
    experiential: Option<ExperientialConfig>,
+   copilot: Option<CopilotConfig>,
    pricing: Option<PricingConfig>,
    models: Option<ModelsConfig>,
 }
@@ -471,6 +498,7 @@ impl Config {
          glm: file.glm.unwrap_or_default(),
          deepseek: file.deepseek.unwrap_or_default(),
          experiential: file.experiential.unwrap_or_default(),
+         copilot: file.copilot.unwrap_or_default(),
          pricing: file.pricing.unwrap_or_default(),
          models: file.models.unwrap_or_default(),
       })
@@ -491,6 +519,7 @@ impl Config {
          glm: GlmConfig::default(),
          deepseek: DeepSeekConfig::default(),
          experiential: ExperientialConfig::default(),
+         copilot: CopilotConfig::default(),
          pricing: PricingConfig::default(),
          models: ModelsConfig::default(),
       }
@@ -602,6 +631,21 @@ mod route_tests {
       assert_eq!(cfg.route("claude-fable-5.1"), Provider::Experiential);
       assert_eq!(cfg.route("claude-opus-5"), Provider::Anthropic);
       assert_eq!(cfg.route("gemini-2-flash"), Provider::Gemini);
+   }
+
+   #[test]
+   fn copilot_stays_opt_in_and_beats_the_default() {
+      assert!(ModelsConfig::default().copilot_patterns.is_empty());
+      assert_eq!(
+         ModelsConfig::default().route("gpt-5-copilot"),
+         Provider::OpenAi
+      );
+      let cfg = ModelsConfig {
+         copilot_patterns: vec!["gpt-5-*".into()],
+         ..ModelsConfig::default()
+      };
+      assert_eq!(cfg.route("gpt-5-copilot"), Provider::Copilot);
+      assert_eq!(cfg.route("gpt-5.6-sol"), Provider::OpenAi);
    }
 }
 

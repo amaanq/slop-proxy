@@ -8,6 +8,7 @@ use crate::codex;
 use crate::codex::client::CodexClient;
 use crate::codex::models::ModelInfo;
 use crate::config::Config;
+use crate::copilot::client::CopilotClient;
 use crate::db::Db;
 use crate::db::accounts::AccountStatus;
 use crate::db::accounts::NewAccount;
@@ -15,6 +16,7 @@ use crate::db::tokens;
 use crate::db::tokens::TokenLimits;
 use crate::oauth;
 use crate::oauth::anthropic;
+use crate::oauth::copilot;
 use crate::oauth::refresh;
 use crate::pool::codex::CodexPool;
 use crate::provider::{AuthMode, Provider};
@@ -224,6 +226,7 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
       Command::Login { label, provider } => match provider {
          Provider::OpenAi => oauth::login(&db, label).await,
          Provider::Anthropic => anthropic::login(&db, label).await,
+         Provider::Copilot => copilot::login(&db, label).await,
          Provider::Gemini => Err(eyre::eyre!(
             "google has no device-code flow here, use `accounts add-key --provider gemini`"
          )),
@@ -352,6 +355,9 @@ async fn accounts_add_key(
    if referer.is_some() && provider != Provider::Gemini {
       bail!("--referer is only supported for gemini keys");
    }
+   if provider == Provider::Copilot {
+      return accounts_add_copilot_key(db, key, label).await;
+   }
    let mut hasher = hmac_sha256::Hash::new();
    hasher.update(key.as_bytes());
    let account_id = data_encoding::HEXLOWER.encode(&hasher.finalize()[..8]);
@@ -380,6 +386,36 @@ async fn accounts_add_key(
       db.set_account_egress(id, true).await?;
    }
    println!("stored {provider} account {id} ({account_id})");
+   Ok(())
+}
+
+/// A pasted GitHub token is validated against the user endpoint and stored
+/// as the account's grant, so headless logins keep the OAuth shape instead
+/// of inventing a second credential kind.
+async fn accounts_add_copilot_key(db: &Db, key: &str, label: Option<&str>) -> Result<()> {
+   let key = key.trim();
+   if key.is_empty() {
+      bail!("empty github token");
+   }
+   let login = CopilotClient::login(key).await?;
+   let tokens = oauth::TokenSet {
+      access_token: key.to_owned(),
+      refresh_token: key.to_owned(),
+      id_token: None,
+      expires_at: None,
+   };
+   let id = db
+      .upsert_account(NewAccount {
+         provider: Provider::Copilot,
+         id: &login,
+         email: Some(&login),
+         label,
+         plan: None,
+         tokens: &tokens,
+         auth_mode: AuthMode::OAuth,
+      })
+      .await?;
+   println!("stored copilot account {id} ({login})");
    Ok(())
 }
 
@@ -675,6 +711,7 @@ async fn debug_refresh(db: &Db, account: &str) -> Result<()> {
    let tokens = match acc.provider {
       Provider::OpenAi => refresh::refresh(&acc.refresh_token).await?,
       Provider::Anthropic => anthropic::refresh(&acc.refresh_token).await?,
+      Provider::Copilot => copilot::mint(&acc.refresh_token).await?,
       Provider::Gemini
       | Provider::Zen
       | Provider::Glm

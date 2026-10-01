@@ -4,6 +4,7 @@ use crate::codex::turn_state::TurnState;
 use crate::db::Db;
 use crate::db::accounts::{Account, AccountStatus};
 use crate::oauth::anthropic;
+use crate::oauth::copilot;
 use crate::oauth::refresh;
 use crate::oauth::refresh::RefreshError;
 use crate::provider::{AuthMode, Provider};
@@ -521,6 +522,7 @@ impl Slots {
       let refreshed = match self.provider {
          Provider::OpenAi => refresh::refresh(&credentials.refresh_token).await,
          Provider::Anthropic => anthropic::refresh(&credentials.refresh_token).await,
+         Provider::Copilot => copilot::mint(&credentials.refresh_token).await,
          Provider::Gemini => Err(RefreshError::Terminal(
             "google oauth grants are not implemented, add the account with an api key".into(),
          )),
@@ -787,7 +789,7 @@ pub fn test_slots(db: Db, provider: Provider, ids: &[(i64, bool)]) -> Slots {
                   egress: false,
                   allowed_users: Vec::new(),
                   auth_mode: match provider {
-                     Provider::OpenAi | Provider::Anthropic => AuthMode::OAuth,
+                     Provider::OpenAi | Provider::Anthropic | Provider::Copilot => AuthMode::OAuth,
                      Provider::Gemini
                      | Provider::Glm
                      | Provider::DeepSeek

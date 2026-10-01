@@ -7,19 +7,20 @@ per-user API tokens, and track token usage.
 
 Requests for `claude-*` models (configurable via `models.anthropic_patterns`)
 are relayed verbatim to the Anthropic API over the pooled Max accounts, sticky
-per session so prompt caches keep hitting. Everything else is translated to
-the Codex backend. Log in to Max accounts with
+per session so prompt caches keep hitting. Everything else is translated to the
+Codex backend. Log in to Max accounts with
 `slop-proxy login --provider anthropic`.
 
 Endpoints: `POST /v1/messages`, `POST /v1/chat/completions`, `GET /v1/models`,
-`POST /v1/responses` — streaming, tools, images, and reasoning. Requested model
-names pass through to the backend as-is; use `slop-proxy models` for the real slugs.
+`POST /v1/responses`: streaming, tools, images, and reasoning. Requested model
+names pass through to the backend as-is; use `slop-proxy models` for the real
+slugs.
 
 ## NixOS module
 
 ```nix
 {
-  inputs.slop-proxy.url = "github:koss/slop-proxy";
+  inputs.slop-proxy.url = "github:amaanq/slop-proxy";
 
   outputs = { nixpkgs, slop-proxy, ... }: {
     nixosConfigurations.host = nixpkgs.lib.nixosSystem {
@@ -96,6 +97,29 @@ slop-proxy accounts reserve <account>
 slop-proxy token create --user alice --reserved-only
 ```
 
+## GitHub Copilot accounts
+
+Log in with the same device flow VS Code uses, then opt models into the
+Copilot chat-completions endpoint.
+
+```sh
+slop-proxy login --provider copilot
+```
+
+Then you can configure the models:
+
+```toml
+[models]
+copilot_patterns = ["gpt-5-*"]
+```
+
+The GitHub token is stored as the account's grant and short-lived Copilot tokens
+are minted from it on demand. Usage is read from the terminal usage chunk, so
+streaming and non-streaming calls bill input plus output tokens. This
+integration supports `/v1/chat/completions` only. Copilot models are not served
+over `/v1/responses` or `/v1/messages`. Business and enterprise seats use their
+own host via `copilot.account_type`.
+
 ## Zen egress proxies
 
 Set `zen.proxy_urls` to send only OpenCode Zen traffic through HTTP proxies.
@@ -112,8 +136,8 @@ proxy_urls = [
 ```
 
 `zen.proxy_urls_file` reads one URL per line and may be combined with the inline
-list. Use the file setting when URLs contain credentials that should stay out
-of the config and the Nix store. Configuring either list disables direct Zen
+list. Use the file setting when URLs contain credentials that should stay out of
+the config and the Nix store. Configuring either list disables direct Zen
 egress.
 
 ## Per-token limits and metering
@@ -131,8 +155,7 @@ slop-proxy token limits 1 --requests 120 --window-seconds 3600
 slop-proxy token usage 1
 ```
 
-Admissions persist before upstream dispatch, so concurrent requests cannot
-race past the request limit. A request that takes the token total over its
-limit completes, and later requests get `429` until usage rolls out of the
-window. Responses carry `x-ratelimit-*` headers, and limit errors include
-`retry-after`.
+Admissions persist before upstream dispatch, so concurrent requests cannot race
+past the request limit. A request that takes the token total over its limit
+completes, and later requests get `429` until usage rolls out of the window.
+Responses carry `x-ratelimit-*` headers, and limit errors include `retry-after`.

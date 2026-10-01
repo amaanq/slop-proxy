@@ -15,8 +15,8 @@ use super::{AppState, Inner, metrics, router};
 use crate::clock;
 use crate::codex::client::CodexClient;
 use crate::config::{
-   AnthropicConfig, CodexConfig, Config, DeepSeekConfig, ExperientialConfig, GeminiConfig,
-   GlmConfig, ModelAlias, ModelsConfig, PricingConfig, ZenConfig,
+   AnthropicConfig, CodexConfig, Config, CopilotConfig, DeepSeekConfig, ExperientialConfig,
+   GeminiConfig, GlmConfig, ModelAlias, ModelsConfig, PricingConfig, ZenConfig,
 };
 use crate::db::Db;
 use crate::db::accounts::NewAccount;
@@ -150,6 +150,7 @@ async fn spawn_proxy_at(
       glm: GlmConfig::default(),
       deepseek: DeepSeekConfig::default(),
       experiential: ExperientialConfig::default(),
+      copilot: CopilotConfig::default(),
       pricing: PricingConfig::default(),
       models,
    };
@@ -431,6 +432,7 @@ async fn metrics_render_accounts_and_usage() {
       glm: GlmConfig::default(),
       deepseek: DeepSeekConfig::default(),
       experiential: ExperientialConfig::default(),
+      copilot: CopilotConfig::default(),
       pricing: PricingConfig::default(),
       models: ModelsConfig::default(),
    };
@@ -588,6 +590,7 @@ async fn spawn_proxy_with_gemini_reply(
       glm: GlmConfig::default(),
       deepseek: DeepSeekConfig::default(),
       experiential: ExperientialConfig::default(),
+      copilot: CopilotConfig::default(),
       pricing: PricingConfig::default(),
       models: ModelsConfig::default(),
    };
@@ -791,6 +794,7 @@ async fn bridged_responses_preserve_status_usage_and_output_order() {
    }
 }
 
+mod copilot;
 mod experiential;
 mod rate_limits;
 mod websocket;

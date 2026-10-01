@@ -45,6 +45,7 @@ async fn spawn_proxy_with_codex_status(status: StatusCode) -> (String, Db) {
       glm: GlmConfig::default(),
       deepseek: DeepSeekConfig::default(),
       experiential: ExperientialConfig::default(),
+      copilot: CopilotConfig::default(),
       pricing: PricingConfig::default(),
       models: ModelsConfig {
          anthropic_patterns: Vec::new(),

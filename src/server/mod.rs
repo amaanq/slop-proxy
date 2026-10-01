@@ -1,6 +1,7 @@
 pub mod anthropic;
 pub mod auth;
 pub mod clientcfg;
+pub mod copilot;
 pub mod decompress;
 pub mod error;
 pub mod facts;

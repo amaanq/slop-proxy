@@ -15,8 +15,12 @@ pub struct ExperientialClient {
 
 impl ExperientialClient {
    pub fn new(cfg: RelayConfig) -> eyre::Result<Self> {
-      let egresses = Egresses::new(&cfg.egress.urls()?, "experiential", None)?;
+      let egresses = Egresses::new(&cfg.egress, "experiential", None)?;
       Ok(Self { egresses, cfg })
+   }
+
+   pub const fn egresses(&self) -> &Egresses {
+      &self.egresses
    }
 
    pub async fn post(

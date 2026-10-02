@@ -33,7 +33,7 @@ pub struct ZenModel {
 
 impl ZenClient {
    pub fn new(cfg: ZenConfig) -> eyre::Result<Self> {
-      let egresses = Egresses::new(&cfg.egress.urls()?, "zen", Some(&cfg.user_agent))?;
+      let egresses = Egresses::new(&cfg.egress, "zen", Some(&cfg.user_agent))?;
       Ok(Self {
          base_url: cfg.base_url,
          models_dev_url: cfg.models_dev_url,
@@ -41,6 +41,10 @@ impl ZenClient {
          context_windows: RwLock::default(),
          context_fetched_at: AtomicI64::new(0),
       })
+   }
+
+   pub const fn egresses(&self) -> &Egresses {
+      &self.egresses
    }
 
    fn base_url(&self) -> &str {

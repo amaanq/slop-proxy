@@ -105,6 +105,7 @@ pub async fn serve(db: Db, cfg: Config, bind: &str) -> Result<()> {
       loop {
          tick.tick().await;
          reload_state.pools.reload().await;
+         reload_state.pools.refresh_egresses(&reload_state.cfg);
          reload_state.pools.poll_usage().await;
       }
    });

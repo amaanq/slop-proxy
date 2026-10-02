@@ -41,8 +41,12 @@ pub struct GlmClient {
 
 impl GlmClient {
    pub fn new(cfg: RelayConfig) -> eyre::Result<Self> {
-      let egresses = Egresses::new(&cfg.egress.urls()?, "glm", None)?;
+      let egresses = Egresses::new(&cfg.egress, "glm", None)?;
       Ok(Self { egresses, cfg })
+   }
+
+   pub const fn egresses(&self) -> &Egresses {
+      &self.egresses
    }
 
    fn base_url(&self) -> &str {

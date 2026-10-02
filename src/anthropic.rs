@@ -3,7 +3,7 @@ use reqwest::StatusCode;
 use reqwest::header::{CONTENT_TYPE, HeaderMap};
 
 use crate::clock;
-use crate::config::AnthropicConfig;
+use crate::config::{AnthropicConfig, EgressConfig};
 use crate::egress::Egresses;
 use crate::provider::AuthMode;
 use crate::upstream::{Classify, SendError, classify, json};
@@ -194,14 +194,18 @@ pub struct AnthropicClient {
 
 impl AnthropicClient {
    pub fn new(cfg: AnthropicConfig) -> eyre::Result<Self> {
-      let urls = cfg.egress.urls()?;
+      let proxied = !cfg.egress.proxy_urls.is_empty() || cfg.egress.proxy_urls_file.is_some();
       Ok(Self {
-         direct: Egresses::new(&[], "anthropic", None)?,
-         proxied: (!urls.is_empty())
-            .then(|| Egresses::new(&urls, "anthropic", None))
+         direct: Egresses::new(&EgressConfig::default(), "anthropic", None)?,
+         proxied: proxied
+            .then(|| Egresses::new(&cfg.egress, "anthropic", None))
             .transpose()?,
          cfg,
       })
+   }
+
+   pub const fn proxied(&self) -> Option<&Egresses> {
+      self.proxied.as_ref()
    }
 
    /// An account marked with `accounts egress` leaves through the proxies, and

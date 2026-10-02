@@ -33,8 +33,12 @@ pub struct GeminiResponse {
 
 impl GeminiClient {
    pub fn new(cfg: GeminiConfig) -> eyre::Result<Self> {
-      let egresses = Egresses::new(&cfg.egress.urls()?, "gemini", None)?;
+      let egresses = Egresses::new(&cfg.egress, "gemini", None)?;
       Ok(Self { egresses, cfg })
+   }
+
+   pub const fn egresses(&self) -> &Egresses {
+      &self.egresses
    }
 
    fn native_base(&self) -> &str {

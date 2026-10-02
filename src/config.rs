@@ -93,6 +93,8 @@ impl Default for CopilotConfig {
 #[serde(default)]
 pub struct EgressConfig {
    pub proxy_urls: Vec<String>,
+   /// Re-read while running, so a list rewritten in place takes effect
+   /// without a restart.
    pub proxy_urls_file: Option<PathBuf>,
 }
 

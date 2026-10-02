@@ -159,6 +159,37 @@ impl Pools {
       }
    }
 
+   /// An unreadable or emptied list keeps the proxies already in service.
+   pub fn refresh_egresses(&self, cfg: &Config) {
+      let egresses = [
+         (&cfg.anthropic.egress, self.anthropic.backend.proxied()),
+         (&cfg.gemini.egress, Some(self.gemini.backend.egresses())),
+         (&cfg.zen.egress, Some(self.zen.backend.egresses())),
+         (&cfg.glm.egress, Some(self.glm.backend.egresses())),
+         (&cfg.deepseek.egress, Some(self.deepseek.backend.egresses())),
+         (
+            &cfg.experiential.egress,
+            Some(self.experiential.backend.egresses()),
+         ),
+      ];
+      for (egress_cfg, target) in egresses {
+         let Some(target) = target.filter(|_| egress_cfg.proxy_urls_file.is_some()) else {
+            continue;
+         };
+         match egress_cfg.urls() {
+            Ok(urls) if urls.is_empty() => {
+               tracing::warn!("proxy list is empty, keeping the last one");
+            },
+            Ok(urls) => {
+               if let Err(error) = target.replace(&urls) {
+                  tracing::warn!("{error:#}");
+               }
+            },
+            Err(error) => tracing::warn!("{error:#}"),
+         }
+      }
+   }
+
    pub fn catalogs(&self) -> Arc<Catalogs> {
       Arc::clone(&self.catalogs.read().expect("catalogs lock poisoned"))
    }

@@ -1,11 +1,15 @@
 //! One HTTP client per configured proxy, rotated per request and cooled off
 //! when it stops answering. A provider with no proxies configured gets a
-//! single direct client and the same code path.
+//! single direct client and the same code path. A provider with a proxy file
+//! never gets the direct client, so an empty file leaves it with no egress
+//! rather than leaking traffic from the host's own address.
 
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use crate::clock;
+use crate::config::EgressConfig;
 use crate::upstream::SendError;
 
 /// How many egresses one request may burn before it gives up. A long proxy
@@ -15,12 +19,14 @@ pub const ATTEMPTS: usize = 8;
 const UNREACHABLE_COOLDOWN: i64 = 30;
 
 pub struct Egresses {
-   entries: Vec<Egress>,
+   entries: RwLock<Arc<[Arc<Egress>]>>,
    next: AtomicUsize,
    label: &'static str,
+   user_agent: Option<String>,
 }
 
 struct Egress {
+   proxy_url: Option<String>,
    http: reqwest::Client,
    unavailable_until: AtomicI64,
    /// Zen's free tier rate-limits per source address, so an anonymous 429
@@ -42,62 +48,104 @@ pub fn egress_of(response: &reqwest::Response) -> Option<usize> {
 
 impl Egresses {
    pub fn new(
-      proxy_urls: &[String],
+      cfg: &EgressConfig,
       label: &'static str,
       user_agent: Option<&str>,
    ) -> eyre::Result<Self> {
-      let build = |proxy_url: Option<&str>, index: usize| -> eyre::Result<Egress> {
-         let mut builder = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(30))
-            .tcp_keepalive(Duration::from_secs(30));
-         if let Some(agent) = user_agent {
-            builder = builder.user_agent(agent);
-         }
-         if let Some(proxy_url) = proxy_url {
-            let proxy = reqwest::Proxy::all(proxy_url)
-               .map_err(|_| eyre::eyre!("invalid {label} proxy URL at position {}", index + 1))?;
-            builder = builder.proxy(proxy);
-         }
-         Ok(Egress {
-            http: builder
-               .build()
-               .map_err(|_| eyre::eyre!("building {label} HTTP client"))?,
-            unavailable_until: AtomicI64::new(0),
-            anonymous_until: AtomicI64::new(0),
-         })
-      };
-
-      let entries = if proxy_urls.is_empty() {
-         vec![build(None, 0)?]
-      } else {
-         proxy_urls
-            .iter()
-            .enumerate()
-            .map(|(index, url)| build(Some(url), index))
-            .collect::<eyre::Result<Vec<_>>>()?
-      };
-
-      Ok(Self {
-         entries,
+      let egresses = Self {
+         entries: RwLock::new(Arc::new([])),
          next: AtomicUsize::new(0),
          label,
+         user_agent: user_agent.map(str::to_owned),
+      };
+      let proxy_urls = cfg.urls()?;
+      if proxy_urls.is_empty() && cfg.proxy_urls_file.is_none() {
+         let direct = egresses.build(None, 0)?;
+         egresses.store(Arc::new([Arc::new(direct)]));
+      } else {
+         egresses.replace(&proxy_urls)?;
+      }
+      Ok(egresses)
+   }
+
+   fn build(&self, proxy_url: Option<&str>, index: usize) -> eyre::Result<Egress> {
+      let label = self.label;
+      let mut builder = reqwest::Client::builder()
+         .connect_timeout(Duration::from_secs(30))
+         .tcp_keepalive(Duration::from_secs(30));
+      if let Some(agent) = self.user_agent.as_deref() {
+         builder = builder.user_agent(agent);
+      }
+      if let Some(proxy_url) = proxy_url {
+         let proxy = reqwest::Proxy::all(proxy_url)
+            .map_err(|_| eyre::eyre!("invalid {label} proxy URL at position {}", index + 1))?;
+         builder = builder.proxy(proxy);
+      }
+      Ok(Egress {
+         proxy_url: proxy_url.map(str::to_owned),
+         http: builder
+            .build()
+            .map_err(|_| eyre::eyre!("building {label} HTTP client"))?,
+         unavailable_until: AtomicI64::new(0),
+         anonymous_until: AtomicI64::new(0),
       })
    }
 
-   pub fn http(&self, index: usize) -> &reqwest::Client {
-      &self.entries[index].http
+   /// Swaps in a fresh proxy list. A proxy already in service keeps its
+   /// client and cooldowns, so a refresh that changes nothing changes nothing.
+   pub fn replace(&self, proxy_urls: &[String]) -> eyre::Result<()> {
+      let current = self.snapshot();
+      let mut added = 0_usize;
+      let entries = proxy_urls
+         .iter()
+         .enumerate()
+         .map(|(index, url)| {
+            if let Some(kept) = current
+               .iter()
+               .find(|egress| egress.proxy_url.as_deref() == Some(url.as_str()))
+            {
+               return Ok(Arc::clone(kept));
+            }
+            added += 1;
+            self.build(Some(url), index).map(Arc::new)
+         })
+         .collect::<eyre::Result<Arc<[_]>>>()?;
+      let dropped = current.len() + added - entries.len();
+      if added > 0 || dropped > 0 {
+         tracing::info!(
+            added,
+            dropped,
+            total = entries.len(),
+            "{} proxy list changed",
+            self.label
+         );
+      }
+      self.store(entries);
+      Ok(())
+   }
+
+   fn store(&self, entries: Arc<[Arc<Egress>]>) {
+      *self.entries.write().expect("egress lock poisoned") = entries;
+   }
+
+   fn snapshot(&self) -> Arc<[Arc<Egress>]> {
+      Arc::clone(&self.entries.read().expect("egress lock poisoned"))
+   }
+
+   pub fn http(&self, index: usize) -> reqwest::Client {
+      self.snapshot()[index].http.clone()
    }
 
    /// Every egress still in service, starting one past the last request so
    /// concurrent callers spread across the list rather than stacking on the
    /// first healthy one.
-   fn order(&self, anonymous: bool) -> Vec<usize> {
+   fn order(&self, entries: &[Arc<Egress>], anonymous: bool) -> Vec<usize> {
       let now = clock::unix_now();
       let start = self.next.fetch_add(1, Ordering::Relaxed);
-      (0..self.entries.len())
-         .map(|offset| start.wrapping_add(offset) % self.entries.len())
+      (0..entries.len())
+         .map(|offset| start.wrapping_add(offset) % entries.len())
          .filter(|&index| {
-            let egress = &self.entries[index];
+            let egress = &entries[index];
             egress.unavailable_until.load(Ordering::Relaxed) <= now
                && (!anonymous || egress.anonymous_until.load(Ordering::Relaxed) <= now)
          })
@@ -111,9 +159,8 @@ impl Egresses {
       );
    }
 
-   fn retry_after(&self, now: i64) -> i64 {
-      self
-         .entries
+   fn retry_after(entries: &[Arc<Egress>], now: i64) -> i64 {
+      entries
          .iter()
          .map(|egress| {
             let unavailable = egress.unavailable_until.load(Ordering::Relaxed);
@@ -163,27 +210,23 @@ impl Egresses {
       Fut: Future<Output = Result<reqwest::Response, Error>>,
       Error: Into<SendError>,
    {
-      let order = self.order(anonymous);
+      let entries = self.snapshot();
+      let order = self.order(&entries, anonymous);
       if order.is_empty() {
          let now = clock::unix_now();
          let throttled = anonymous
-            && self
-               .entries
+            && entries
                .iter()
                .any(|egress| egress.anonymous_until.load(Ordering::Relaxed) > now);
-         tracing::warn!(
-            total = self.entries.len(),
-            "no {} egress available",
-            self.label
-         );
+         tracing::warn!(total = entries.len(), "no {} egress available", self.label);
          let body = format!(
             "all {} {} egresses are cooling down",
-            self.entries.len(),
+            entries.len(),
             self.label
          );
          return Err(if throttled {
             SendError::RateLimited {
-               retry_after: Some(self.retry_after(now)),
+               retry_after: Some(Self::retry_after(&entries, now)),
                body,
             }
          } else {
@@ -196,7 +239,7 @@ impl Egresses {
       let mut tried = 0_usize;
       for index in order.iter().copied().take(ATTEMPTS) {
          tried += 1;
-         match attempt(self.entries[index].http.clone())
+         match attempt(entries[index].http.clone())
             .await
             .map_err(Into::into)
          {
@@ -219,16 +262,13 @@ impl Egresses {
                   self.label,
                   body.chars().take(200).collect::<String>()
                );
-               Self::cool(
-                  &self.entries[index].anonymous_until,
-                  retry_after.unwrap_or(60),
-               );
+               Self::cool(&entries[index].anonymous_until, retry_after.unwrap_or(60));
                throttled = Some(body);
             },
             Err(SendError::Network(error)) => {
                tracing::warn!(egress = index, "{} egress unreachable: {error}", self.label);
-               if self.entries.len() > 1 {
-                  Self::cool(&self.entries[index].unavailable_until, UNREACHABLE_COOLDOWN);
+               if entries.len() > 1 {
+                  Self::cool(&entries[index].unavailable_until, UNREACHABLE_COOLDOWN);
                }
                unreachable = Some(error);
             },
@@ -240,7 +280,7 @@ impl Egresses {
       tracing::warn!(
          tried,
          untried,
-         total = self.entries.len(),
+         total = entries.len(),
          "{} egresses exhausted for this request",
          self.label
       );
@@ -249,7 +289,7 @@ impl Egresses {
          let retry_after = if untried > 0 {
             1
          } else {
-            self.retry_after(clock::unix_now())
+            Self::retry_after(&entries, clock::unix_now())
          };
          return Err(SendError::RateLimited {
             retry_after: Some(retry_after),

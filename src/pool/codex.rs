@@ -66,6 +66,7 @@ const CATALOG_TTL: i64 = 300;
 #[derive(Clone)]
 pub enum Call {
    Http { body: Bytes, headers: HeaderMap },
+   Search { body: Bytes, headers: HeaderMap },
    WebSocket(HeaderMap),
 }
 
@@ -108,6 +109,20 @@ impl Backend for CodexClient {
             ref headers,
          } => self
             .post(
+               token,
+               &slot.provider_account_id,
+               body,
+               &session,
+               route.model,
+               headers,
+            )
+            .await
+            .map(Reply::Http),
+         Call::Search {
+            ref body,
+            ref headers,
+         } => self
+            .search(
                token,
                &slot.provider_account_id,
                body,
@@ -307,6 +322,20 @@ impl Pool<CodexClient> {
    ) -> Result<Served<reqwest::Response>, PoolError> {
       self
          .dispatch(route, Call::Http { body, headers }, |reply| match reply {
+            Reply::Http(response) => Ok(response),
+            Reply::WebSocket(_) => Err(PoolError::Upstream("unexpected WebSocket reply".into())),
+         })
+         .await
+   }
+
+   pub async fn search(
+      &self,
+      route: Route<'_>,
+      body: Bytes,
+      headers: HeaderMap,
+   ) -> Result<Served<reqwest::Response>, PoolError> {
+      self
+         .dispatch(route, Call::Search { body, headers }, |reply| match reply {
             Reply::Http(response) => Ok(response),
             Reply::WebSocket(_) => Err(PoolError::Upstream("unexpected WebSocket reply".into())),
          })

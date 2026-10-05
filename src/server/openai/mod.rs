@@ -4,12 +4,14 @@ use std::time::Instant;
 
 use axum::body::Bytes;
 use axum::extract::{Query, State};
+use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse as _, Response};
 use axum::{Extension, Json};
 use eventsource_stream::Eventsource as _;
 use futures_util::{StreamExt as _, stream};
+use serde::Deserialize;
 use serde_json::value::RawValue;
 use serde_json::{Map, Value};
 
@@ -26,7 +28,7 @@ use crate::pool::pools::{Catalogs, Dispatched, Upstream};
 use crate::pool::{Route, UsageWindow, window_seconds};
 use crate::provider::Provider;
 use crate::server::auth::AuthInfo;
-use crate::server::error::{Dialect, error_response, translation_error};
+use crate::server::error::{Dialect, error_response, pool_error_response, translation_error};
 use crate::server::facts::RequestFacts;
 use crate::server::pipeline::{self, Reply, apply_snapshot, dispatch_failed, translated};
 use crate::server::{
@@ -759,6 +761,42 @@ fn prepare_request(
    }
    req.store = Some(false);
    Ok((req, requested_model, provider))
+}
+
+#[derive(Deserialize)]
+struct SearchPeek {
+   id: Option<String>,
+   model: String,
+}
+
+/// Codex's web search tool posts here instead of `/responses`, and
+/// only the codex backend serves it, whatever model the turn runs on.
+pub async fn search(
+   State(state): State<AppState>,
+   Extension(auth): Extension<AuthInfo>,
+   headers: HeaderMap,
+   body: Bytes,
+) -> Response {
+   let peek = match serde_json::from_slice::<SearchPeek>(&body) {
+      Ok(peek) => peek,
+      Err(err) => return translation_error(DIALECT, &format!("invalid request: {err}")),
+   };
+   let session_key = peek.id.unwrap_or_else(|| auth.user.clone());
+   let route = auth.route(&session_key, &peek.model);
+   let served = match state.pools.codex.search(route, body, headers).await {
+      Ok(served) => served,
+      Err(err) => return pool_error_response(DIALECT, &state.cfg.models, err),
+   };
+   let status = served.response.status();
+   match served.response.bytes().await {
+      Ok(bytes) => (status, [(CONTENT_TYPE, "application/json")], bytes).into_response(),
+      Err(err) => error_response(
+         DIALECT,
+         StatusCode::BAD_GATEWAY,
+         "upstream_error",
+         &format!("reading search response: {err}"),
+      ),
+   }
 }
 
 fn passthrough_record(

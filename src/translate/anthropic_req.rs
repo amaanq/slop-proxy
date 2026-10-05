@@ -140,6 +140,31 @@ pub enum SystemPrompt {
 pub struct SystemBlock {
    #[serde(default)]
    text: Option<String>,
+   #[serde(default)]
+   cache_control: Option<CacheControl>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CacheControl {
+   #[serde(default)]
+   ttl: Option<String>,
+}
+
+impl AnthropicRequest {
+   /// Anthropic accepts only `5m` and `1h`, and an absent `ttl` means `5m`.
+   pub fn cache_ttl_secs(&self) -> Option<i64> {
+      let Some(SystemPrompt::Blocks(ref blocks)) = self.system else {
+         return None;
+      };
+      blocks
+         .iter()
+         .filter_map(|block| block.cache_control.as_ref())
+         .map(|control| match control.ttl.as_deref() {
+            Some("1h") => 3600,
+            _ => 300,
+         })
+         .max()
+   }
 }
 
 #[derive(Debug, Deserialize)]

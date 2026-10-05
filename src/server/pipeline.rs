@@ -52,6 +52,7 @@ pub fn record(
       thinking_budget: facts.thinking_budget,
       image_count: facts.image_count,
       request_bytes: facts.request_bytes,
+      cache_ttl_secs: facts.cache_ttl_secs,
       ..Default::default()
    }
 }

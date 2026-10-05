@@ -58,7 +58,8 @@ pub async fn require_token(
       );
    };
 
-   if req.method() == Method::GET && req.uri().path() == "/v1/responses" {
+   let path = req.uri().path();
+   if req.method() == Method::GET && (path == "/v1/responses" || path.starts_with("/v1/cache/")) {
       return match authenticate(&state, dialect, &raw).await {
          Ok(auth) => {
             req.extensions_mut().insert(auth);

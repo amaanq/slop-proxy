@@ -16,6 +16,7 @@ pub struct RequestFacts {
    pub thinking_budget: i64,
    pub image_count: i64,
    pub request_bytes: i64,
+   pub cache_ttl_secs: Option<i64>,
 }
 
 impl RequestFacts {
@@ -32,6 +33,7 @@ impl RequestFacts {
          turn_index: req.messages.len() as i64,
          tools_declared: req.tools.as_ref().map_or(0, |tool| tool.len() as i64),
          thinking_budget: 0,
+         cache_ttl_secs: None,
          image_count: req
             .messages
             .iter()
@@ -72,6 +74,7 @@ impl RequestFacts {
          turn_index: req.input.len() as i64,
          tools_declared: tools,
          thinking_budget: 0,
+         cache_ttl_secs: None,
          image_count: images,
       }
    }
@@ -96,12 +99,14 @@ impl RequestFacts {
             .flatten()
             .filter(|block| matches!(block, ContentBlock::Image { .. }))
             .count() as i64,
+         cache_ttl_secs: req.cache_ttl_secs(),
       }
    }
 
    pub fn from_native(req: &GenerateContentRequest, headers: &HeaderMap) -> Self {
       Self {
          request_bytes: request_bytes(headers),
+         cache_ttl_secs: None,
          turn_index: req.contents.len() as i64,
          tools_declared: req
             .tools

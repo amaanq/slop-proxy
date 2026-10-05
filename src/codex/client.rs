@@ -351,6 +351,35 @@ impl CodexClient {
       json(resp, Classify::STRICT).await
    }
 
+   /// The standalone web search codex 0.160 calls as a tool, answered as
+   /// one JSON body rather than a stream.
+   pub async fn search(
+      &self,
+      access_token: &str,
+      chatgpt_account_id: &str,
+      req: &Bytes,
+      session_id: &str,
+      model: &str,
+      headers: &header::HeaderMap,
+   ) -> Result<reqwest::Response, SendError> {
+      let url = format!("{}/alpha/search", self.config().base_url.trim_end_matches('/'));
+      let resp = self
+         .http
+         .post(url)
+         .headers(self.responses_headers(
+            access_token,
+            chatgpt_account_id,
+            session_id,
+            model,
+            headers,
+         )?)
+         .header(header::CONTENT_TYPE, "application/json")
+         .body(req.clone())
+         .send()
+         .await?;
+      classify(resp, RULES).await
+   }
+
    async fn send_once(
       &self,
       access_token: &str,

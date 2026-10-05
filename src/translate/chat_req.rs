@@ -178,7 +178,7 @@ pub fn to_chat(req: &ResponsesRequest) -> ChatRequest {
          .reasoning
          .as_ref()
          .filter(|reasoning| !reasoning.effort.is_empty())
-         .map(|reasoning| clamped_effort(&reasoning.effort).to_owned()),
+         .map(|reasoning| clamped_effort(&req.model, &reasoning.effort).to_owned()),
       tools: (!tools.is_empty()).then_some(tools),
       tool_choice: req.tool_choice.as_ref().map(|choice| match *choice {
          ToolChoice::Mode(ref mode) => ChatToolChoice::Mode(mode.clone()),
@@ -190,7 +190,15 @@ pub fn to_chat(req: &ResponsesRequest) -> ChatRequest {
 
 /// Gemini and zen both take none, low, medium or high and reject anything
 /// else outright, so codex asking for xhigh would kill the whole turn.
-pub fn clamped_effort(effort: &str) -> &str {
+/// fledge is the exception and 400s anything outside low, high or max.
+pub fn clamped_effort<'effort>(model: &str, effort: &'effort str) -> &'effort str {
+   if model.starts_with("fledge") {
+      return match effort {
+         "none" | "minimal" | "low" => "low",
+         "medium" | "high" => "high",
+         _ => "max",
+      };
+   }
    match effort {
       "none" | "minimal" => "none",
       "low" => "low",
@@ -205,7 +213,9 @@ fn parts(content: &[ContentPart]) -> ChatContent {
          .iter()
          .map(|part| match part {
             &ContentPart::InputImage { ref image_url } => ChatPart::ImageUrl {
-               image_url: ImageRef::Url(image_url.clone()),
+               image_url: ImageRef::Object {
+                  url: image_url.clone(),
+               },
             },
             &ContentPart::InputText { ref text } | &ContentPart::OutputText { ref text } => {
                ChatPart::Text { text: text.clone() }

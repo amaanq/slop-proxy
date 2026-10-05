@@ -40,7 +40,7 @@ pub async fn chat_completions(
    let started = Instant::now();
    let streaming = body.stream.unwrap_or(false);
    if let Some(effort) = body.reasoning_effort.as_ref() {
-      body.reasoning_effort = Some(chat_req::clamped_effort(effort).to_owned());
+      body.reasoning_effort = Some(chat_req::clamped_effort(&model, effort).to_owned());
    }
    force_usage(&mut body, streaming);
 

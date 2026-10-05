@@ -1,7 +1,7 @@
 use std::result::Result as StdResult;
 
 use eyre::Result;
-use rusqlite::{Row, TransactionBehavior, params};
+use rusqlite::{OptionalExtension as _, Row, TransactionBehavior, params};
 use serde::Serialize;
 
 use crate::clock;
@@ -48,6 +48,7 @@ pub struct UsageRecord {
    pub stop_reason: String,
    pub attempts: i64,
    pub turn_state_blocks: Option<i64>,
+   pub cache_ttl_secs: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Default)]
@@ -127,6 +128,25 @@ pub struct ErrorRow {
    pub provider: String,
    pub kind: String,
    pub count: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CacheTurn {
+   pub finished_at: i64,
+   pub input_tokens: i64,
+   pub cache_read_tokens: i64,
+   pub cache_write_tokens: i64,
+   pub hit_ratio: f64,
+   pub ttl_secs: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionCache {
+   pub session_key: String,
+   pub requests: i64,
+   pub hit_ratio: f64,
+   pub last: CacheTurn,
+   pub account_switched: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -332,6 +352,11 @@ pub fn cache_hit_ratio(input_tokens: i64, cache_read_tokens: i64, cache_write_to
 
    cached / prompt
 }
+
+/// Rows that carried a prompt, which leaves out `count_tokens` and refusals.
+const SESSION_TURNS: &str = "FROM usage_log
+   WHERE session_key = ?1 AND user = ?2 AND status < 400
+     AND input_tokens + cache_read_tokens + cache_write_tokens > 0";
 
 const ACCOUNT_LABEL: &str = "COALESCE((SELECT COALESCE(a.label, a.email, 'account#' || a.id)
                  FROM accounts a WHERE a.id = u.account_id),
@@ -576,6 +601,86 @@ impl Db {
          .await
    }
 
+   /// Claude Code keys a session by its JSON `metadata.user_id`, so the id
+   /// its statusline knows is matched as the `session_id` field inside it.
+   pub async fn session_cache(
+      &self,
+      user: String,
+      session_id: String,
+      since: i64,
+   ) -> Result<Option<SessionCache>> {
+      self
+         .reports
+         .call(move |conn| {
+            let field = format!("\"session_id\":\"{session_id}\"");
+            let Some(key) = conn
+               .query_row(
+                  "SELECT session_key FROM usage_log
+                   WHERE user = ?1 AND ts >= ?2 AND status < 400
+                     AND (session_key = ?3 OR instr(session_key, ?4) > 0)
+                   ORDER BY ts DESC, id DESC LIMIT 1",
+                  params![user, since, session_id, field],
+                  |row| row.get::<_, String>(0),
+               )
+               .optional()?
+            else {
+               return Ok(None);
+            };
+
+            let mut recent = conn
+               .prepare(&format!(
+                  "SELECT ts, account_id, input_tokens, cache_read_tokens, cache_write_tokens,
+                          cache_ttl_secs
+                   {SESSION_TURNS} ORDER BY ts DESC, id DESC LIMIT 2"
+               ))?
+               .query_map(params![key, user], |row| {
+                  let input_tokens = row.get(2)?;
+                  let cache_read_tokens = row.get(3)?;
+                  let cache_write_tokens = row.get(4)?;
+                  let turn = CacheTurn {
+                     finished_at: row.get(0)?,
+                     input_tokens,
+                     cache_read_tokens,
+                     cache_write_tokens,
+                     hit_ratio: cache_hit_ratio(
+                        input_tokens,
+                        cache_read_tokens,
+                        cache_write_tokens,
+                     ),
+                     ttl_secs: row.get(5)?,
+                  };
+                  Ok((row.get::<_, Option<i64>>(1)?, turn))
+               })?
+               .collect::<rusqlite::Result<Vec<_>>>()?
+               .into_iter();
+            let Some((account, last)) = recent.next() else {
+               return Ok(None);
+            };
+            let previous = recent.next().and_then(|(previous, _)| previous);
+
+            let (requests, input, read, write) = conn.query_row(
+               &format!(
+                  "SELECT COUNT(*), COALESCE(SUM(input_tokens),0),
+                          COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(cache_write_tokens),0)
+                   {SESSION_TURNS}"
+               ),
+               params![key, user],
+               |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?;
+            Ok(Some(SessionCache {
+               session_key: key,
+               requests,
+               hit_ratio: cache_hit_ratio(input, read, write),
+               last,
+               account_switched: matches!(
+                  (account, previous),
+                  (Some(now), Some(before)) if now != before
+               ),
+            }))
+         })
+         .await
+   }
+
    pub async fn error_metrics(&self) -> Result<Vec<ErrorRow>> {
       self
          .reports
@@ -608,9 +713,9 @@ fn insert_usage(conn: &mut rusqlite::Connection, record: &UsageRecord) -> Result
    txn.execute(
             "INSERT INTO usage_log (token_id, user, account_id, provider, dialect, requested_model, upstream_model, effort, service_tier,
                input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, cost_usd, list_cost_usd, status, error_kind, duration_ms,
-               session_key, turn_index, tools_declared, tools_called, thinking_budget, image_count, request_bytes, response_bytes, ttft_ms, stop_reason, attempts, turn_state_blocks)
+               session_key, turn_index, tools_declared, tools_called, thinking_budget, image_count, request_bytes, response_bytes, ttft_ms, stop_reason, attempts, turn_state_blocks, cache_ttl_secs)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                     ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31)",
+                     ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32)",
             params![
                 record.token_id,
                 record.user,
@@ -643,6 +748,7 @@ fn insert_usage(conn: &mut rusqlite::Connection, record: &UsageRecord) -> Result
                 record.stop_reason,
                 record.attempts,
                 record.turn_state_blocks,
+                record.cache_ttl_secs,
             ],
         )?;
    if let Some(meter_id) = record.meter_id {

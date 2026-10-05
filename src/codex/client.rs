@@ -380,6 +380,23 @@ impl CodexClient {
       classify(resp, RULES).await
    }
 
+   /// `path` sits under `/backend-api`, one level above the codex base.
+   pub async fn get(
+      &self,
+      access_token: &str,
+      chatgpt_account_id: &str,
+      path: &str,
+   ) -> Result<reqwest::Response, SendError> {
+      let base = self.cfg.base_url.trim_end_matches('/');
+      let root = base.strip_suffix("/codex").unwrap_or(base);
+      let req = self.http.get(format!("{root}{path}"));
+      let resp = self
+         .authed(req, access_token, chatgpt_account_id)
+         .send()
+         .await?;
+      classify(resp, RULES).await
+   }
+
    async fn send_once(
       &self,
       access_token: &str,

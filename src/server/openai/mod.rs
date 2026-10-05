@@ -5,7 +5,7 @@ use std::time::Instant;
 use axum::body::Bytes;
 use axum::extract::{Query, State};
 use axum::http::header::CONTENT_TYPE;
-use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, Uri};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse as _, Response};
 use axum::{Extension, Json};
@@ -787,14 +787,36 @@ pub async fn search(
       Ok(served) => served,
       Err(err) => return pool_error_response(DIALECT, &state.cfg.models, err),
    };
-   let status = served.response.status();
-   match served.response.bytes().await {
+   relay_json(served.response).await
+}
+
+/// Reads from the codex backend whose answer is the same for every account.
+pub async fn backend_get(
+   State(state): State<AppState>,
+   Extension(auth): Extension<AuthInfo>,
+   uri: Uri,
+) -> Response {
+   let Some(path) = uri.path_and_query().and_then(|path| path.as_str().strip_prefix("/backend-api"))
+   else {
+      return translation_error(DIALECT, "not a backend-api path");
+   };
+   let route = auth.route(&auth.user, "");
+   let served = match state.pools.codex.get(route, path.to_owned()).await {
+      Ok(served) => served,
+      Err(err) => return pool_error_response(DIALECT, &state.cfg.models, err),
+   };
+   relay_json(served.response).await
+}
+
+async fn relay_json(response: reqwest::Response) -> Response {
+   let status = response.status();
+   match response.bytes().await {
       Ok(bytes) => (status, [(CONTENT_TYPE, "application/json")], bytes).into_response(),
       Err(err) => error_response(
          DIALECT,
          StatusCode::BAD_GATEWAY,
          "upstream_error",
-         &format!("reading search response: {err}"),
+         &format!("reading upstream response: {err}"),
       ),
    }
 }

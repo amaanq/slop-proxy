@@ -1,5 +1,9 @@
 use std::collections::BTreeSet;
+use std::io::Cursor;
 
+use data_encoding::BASE64;
+use image_webp::WebPDecoder;
+use png::{BitDepth, ColorType, Encoder};
 use serde::Serialize;
 use serde_json::value::RawValue;
 
@@ -207,6 +211,52 @@ pub fn clamped_effort<'effort>(model: &str, effort: &'effort str) -> &'effort st
    }
 }
 
+#[derive(Debug, thiserror::Error)]
+enum TranscodeError {
+   #[error("base64")]
+   Base64(#[source] data_encoding::DecodeError),
+   #[error("webp decode")]
+   Decode(#[source] image_webp::DecodingError),
+   #[error("png encode")]
+   Encode(#[source] png::EncodingError),
+}
+
+/// Zen's image sandbox 415s anything but PNG or JPEG.
+fn accepted_image(url: &str) -> String {
+   let Some(data) = url.strip_prefix("data:image/webp;base64,") else {
+      return url.to_owned();
+   };
+   match webp_to_png(data) {
+      Ok(png) => format!("data:image/png;base64,{png}"),
+      Err(error) => {
+         tracing::warn!(%error, "transcoding a webp image failed, sending it as is");
+         url.to_owned()
+      },
+   }
+}
+
+fn webp_to_png(data: &str) -> Result<String, TranscodeError> {
+   let bytes = BASE64.decode(data.as_bytes()).map_err(TranscodeError::Base64)?;
+   let mut decoder = WebPDecoder::new(Cursor::new(bytes)).map_err(TranscodeError::Decode)?;
+   let (width, height) = decoder.dimensions();
+   let color = if decoder.has_alpha() {
+      ColorType::Rgba
+   } else {
+      ColorType::Rgb
+   };
+   let mut pixels = vec![0; decoder.output_buffer_size().unwrap_or_default()];
+   decoder.read_image(&mut pixels).map_err(TranscodeError::Decode)?;
+
+   let mut out = Vec::new();
+   let mut encoder = Encoder::new(&mut out, width, height);
+   encoder.set_color(color);
+   encoder.set_depth(BitDepth::Eight);
+   let mut writer = encoder.write_header().map_err(TranscodeError::Encode)?;
+   writer.write_image_data(&pixels).map_err(TranscodeError::Encode)?;
+   writer.finish().map_err(TranscodeError::Encode)?;
+   Ok(BASE64.encode(&out))
+}
+
 fn parts(content: &[ContentPart]) -> ChatContent {
    ChatContent::Parts(
       content
@@ -214,7 +264,7 @@ fn parts(content: &[ContentPart]) -> ChatContent {
          .map(|part| match part {
             &ContentPart::InputImage { ref image_url } => ChatPart::ImageUrl {
                image_url: ImageRef::Object {
-                  url: image_url.clone(),
+                  url: accepted_image(image_url),
                },
             },
             &ContentPart::InputText { ref text } | &ContentPart::OutputText { ref text } => {

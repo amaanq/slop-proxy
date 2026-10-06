@@ -120,6 +120,8 @@ pub struct UnpricedRow {
    pub id: i64,
    pub model: String,
    pub tokens: Tokens,
+   pub cost: f64,
+   pub list_cost: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -458,7 +460,7 @@ impl Db {
          .reports
          .rows(
             "SELECT id, upstream_model, input_tokens, output_tokens,
-                    cache_read_tokens, cache_write_tokens
+                    cache_read_tokens, cache_write_tokens, cost_usd, list_cost_usd
              FROM usage_log
              WHERE (cost_usd = 0 OR list_cost_usd = 0)
                AND input_tokens + output_tokens + cache_read_tokens + cache_write_tokens > 0",
@@ -473,6 +475,8 @@ impl Db {
                      cache_read: row.get(4)?,
                      cache_write: row.get(5)?,
                   },
+                  cost: row.get(6)?,
+                  list_cost: row.get(7)?,
                })
             },
          )

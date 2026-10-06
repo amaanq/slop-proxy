@@ -131,6 +131,7 @@
                 ExecStart = "${lib.getExe cfg.package} --db /var/lib/slop-proxy/slop.db --config ${configFile} serve --bind ${cfg.bind}";
                 Restart = "on-failure";
                 RestartSec = 5;
+                LimitNOFILE = 65536;
                 NoNewPrivileges = true;
                 ProtectSystem = "strict";
                 ProtectHome = true;

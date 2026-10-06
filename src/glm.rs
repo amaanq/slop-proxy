@@ -33,6 +33,50 @@ struct Listing {
 }
 
 const BASE_URL: &str = "https://api.z.ai/api/anthropic";
+const QUOTA_URL: &str = "https://api.z.ai/api/monitor/usage/quota/limit";
+
+#[derive(serde::Deserialize)]
+struct QuotaEnvelope {
+   data: QuotaReport,
+}
+
+#[derive(serde::Deserialize)]
+pub struct QuotaReport {
+   pub limits: Vec<QuotaLimit>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct QuotaLimit {
+   pub unit: QuotaUnit,
+   pub number: u32,
+   #[serde(rename = "usage")]
+   pub allowance: f64,
+   #[serde(rename = "currentValue")]
+   pub used: f64,
+   pub remaining: f64,
+   #[serde(rename = "nextResetTime")]
+   pub next_reset_ms: Option<i64>,
+}
+
+/// Z.ai's `unit` codes, as observed on a pro coding plan.
+#[derive(Clone, Copy, serde::Deserialize)]
+#[serde(try_from = "u8")]
+pub enum QuotaUnit {
+   Hour,
+   Week,
+}
+
+impl TryFrom<u8> for QuotaUnit {
+   type Error = String;
+
+   fn try_from(code: u8) -> Result<Self, Self::Error> {
+      match code {
+         3 => Ok(Self::Hour),
+         6 => Ok(Self::Week),
+         other => Err(format!("unknown quota unit {other}")),
+      }
+   }
+}
 
 pub struct GlmClient {
    egresses: Egresses,
@@ -59,6 +103,14 @@ impl GlmClient {
          .send(|http| zcode(http.get(format!("{}/v1/models", self.base_url())), key).send())
          .await?;
       Ok(json::<Listing>(resp, Classify::STRICT).await?.data)
+   }
+
+   pub async fn quota(&self, key: &str) -> Result<QuotaReport, SendError> {
+      let resp = self
+         .egresses
+         .send(|http| http.get(QUOTA_URL).header("authorization", key).send())
+         .await?;
+      Ok(json::<QuotaEnvelope>(resp, Classify::STRICT).await?.data)
    }
 
    pub async fn post(

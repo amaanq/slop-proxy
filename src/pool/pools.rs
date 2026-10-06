@@ -224,6 +224,7 @@ impl Pools {
       self.codex.poll_usage().await;
       self.anthropic.poll_usage().await;
       self.copilot.poll_usage().await;
+      self.glm.poll_usage().await;
    }
 
    /// One Responses request to whichever backend serves the model. Codex and

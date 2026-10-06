@@ -78,9 +78,9 @@ pub async fn serve(db: Db, cfg: Config, bind: &str) -> Result<()> {
       prices,
       pools,
    }));
-   price_history(&state).await;
    let price_state = state.clone();
    tokio::spawn(async move {
+      price_history(&price_state).await;
       let mut tick = time::interval(Duration::from_hours(12));
       tick.tick().await;
       loop {
@@ -153,14 +153,14 @@ async fn price_history(state: &AppState) {
    let table = state.prices.table();
    let priced: Vec<_> = rows
       .iter()
-      .map(|row| {
-         (
-            row.id,
-            state.prices.cost(&row.model, row.tokens),
-            table.list_cost(&row.model, row.tokens),
-         )
+      .filter_map(|row| {
+         let cost = state.prices.cost(&row.model, row.tokens);
+         let list_cost = table.list_cost(&row.model, row.tokens);
+         let billable = cost > 0.0_f64 || list_cost > 0.0_f64;
+         let changed =
+            cost.to_bits() != row.cost.to_bits() || list_cost.to_bits() != row.list_cost.to_bits();
+         (billable && changed).then_some((row.id, cost, list_cost))
       })
-      .filter(|&(_, ref cost, ref list_cost)| *cost > 0.0_f64 || *list_cost > 0.0_f64)
       .collect();
    if priced.is_empty() {
       return;

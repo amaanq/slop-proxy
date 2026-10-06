@@ -152,6 +152,15 @@ impl Usage {
       {
          return false;
       }
+      // Every window has headroom, so a bench outlasting all of their resets
+      // came from a 429 whose reset header no limit backs up.
+      let latest_reset = self
+         .windows()
+         .filter_map(|(_, window)| window.resets_at_unix())
+         .max();
+      if latest_reset.is_some_and(|reset| until > reset.saturating_add(1)) {
+         return true;
+      }
       self.limits.iter().any(|limit| {
          limit.scope.is_none()
             && limit.is_active == Some(false)
@@ -297,6 +306,18 @@ impl AnthropicClient {
             req.send()
          })
          .await?;
+      if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+         let limits = resp
+            .headers()
+            .iter()
+            .filter(|&(name, _)| {
+               name.as_str() == "retry-after" || name.as_str().starts_with("anthropic-ratelimit-")
+            })
+            .map(|(name, value)| format!("{name}={}", value.to_str().unwrap_or("?")))
+            .collect::<Vec<_>>()
+            .join(" ");
+         tracing::warn!("anthropic 429 headers: {limits}");
+      }
       let model_limited =
          resp.status() == StatusCode::TOO_MANY_REQUESTS && sub_limit_rejected(resp.headers());
       match classify(resp, RULES).await {

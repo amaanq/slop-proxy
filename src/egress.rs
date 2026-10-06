@@ -1,12 +1,16 @@
 //! One HTTP client per configured proxy, rotated per request and cooled off
 //! when it stops answering. A provider with no proxies configured gets a
-//! single direct client and the same code path. A provider with a proxy file
-//! never gets the direct client, so an empty file leaves it with no egress
-//! rather than leaking traffic from the host's own address.
+//! single direct client and the same code path. A proxy file that empties
+//! leaves no egress, never the host's own address.
 
+use std::net::{IpAddr, Ipv6Addr};
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
+
+use ipnet::Ipv6Net;
+use rand::RngCore as _;
+use rand::seq::index::sample;
 
 use crate::clock;
 use crate::config::EgressConfig;
@@ -17,6 +21,8 @@ use crate::upstream::SendError;
 pub const ATTEMPTS: usize = 8;
 
 const UNREACHABLE_COOLDOWN: i64 = 30;
+
+const SOURCE_EGRESSES: usize = 4096;
 
 pub struct Egresses {
    entries: RwLock<Arc<[Arc<Egress>]>>,
@@ -32,6 +38,13 @@ struct Egress {
    /// Zen's free tier rate-limits per source address, so an anonymous 429
    /// benches the egress for anonymous traffic only.
    anonymous_until: AtomicI64,
+}
+
+#[derive(Clone, Copy)]
+enum Via<'url> {
+   Direct,
+   Proxy(&'url str),
+   Source(Ipv6Addr),
 }
 
 /// Rides the response so a stream that dies halfway can name the proxy it
@@ -59,8 +72,18 @@ impl Egresses {
          user_agent: user_agent.map(str::to_owned),
       };
       let proxy_urls = cfg.urls()?;
-      if proxy_urls.is_empty() && cfg.proxy_urls_file.is_none() {
-         let direct = egresses.build(None, 0)?;
+      if let Some(prefix) = cfg.source_prefix {
+         eyre::ensure!(
+            proxy_urls.is_empty() && cfg.proxy_urls_file.is_none(),
+            "{label} sets both proxies and a source prefix"
+         );
+         let sources = source_addresses(prefix)?
+            .into_iter()
+            .map(|address| egresses.build(Via::Source(address), 0).map(Arc::new))
+            .collect::<eyre::Result<Arc<[_]>>>()?;
+         egresses.store(sources);
+      } else if proxy_urls.is_empty() && cfg.proxy_urls_file.is_none() {
+         let direct = egresses.build(Via::Direct, 0)?;
          egresses.store(Arc::new([Arc::new(direct)]));
       } else {
          egresses.replace(&proxy_urls)?;
@@ -68,7 +91,7 @@ impl Egresses {
       Ok(egresses)
    }
 
-   fn build(&self, proxy_url: Option<&str>, index: usize) -> eyre::Result<Egress> {
+   fn build(&self, via: Via<'_>, index: usize) -> eyre::Result<Egress> {
       let label = self.label;
       let mut builder = reqwest::Client::builder()
          .connect_timeout(Duration::from_secs(30))
@@ -76,13 +99,21 @@ impl Egresses {
       if let Some(agent) = self.user_agent.as_deref() {
          builder = builder.user_agent(agent);
       }
-      if let Some(proxy_url) = proxy_url {
-         let proxy = reqwest::Proxy::all(proxy_url)
-            .map_err(|_| eyre::eyre!("invalid {label} proxy URL at position {}", index + 1))?;
-         builder = builder.proxy(proxy);
-      }
+      let proxy_url = match via {
+         Via::Direct => None,
+         Via::Proxy(proxy_url) => {
+            let proxy = reqwest::Proxy::all(proxy_url)
+               .map_err(|_| eyre::eyre!("invalid {label} proxy URL at position {}", index + 1))?;
+            builder = builder.proxy(proxy);
+            Some(proxy_url.to_owned())
+         },
+         Via::Source(address) => {
+            builder = builder.local_address(IpAddr::V6(address));
+            None
+         },
+      };
       Ok(Egress {
-         proxy_url: proxy_url.map(str::to_owned),
+         proxy_url,
          http: builder
             .build()
             .map_err(|_| eyre::eyre!("building {label} HTTP client"))?,
@@ -91,8 +122,6 @@ impl Egresses {
       })
    }
 
-   /// Swaps in a fresh proxy list. A proxy already in service keeps its
-   /// client and cooldowns, so a refresh that changes nothing changes nothing.
    pub fn replace(&self, proxy_urls: &[String]) -> eyre::Result<()> {
       let current = self.snapshot();
       let mut added = 0_usize;
@@ -107,7 +136,7 @@ impl Egresses {
                return Ok(Arc::clone(kept));
             }
             added += 1;
-            self.build(Some(url), index).map(Arc::new)
+            self.build(Via::Proxy(url), index).map(Arc::new)
          })
          .collect::<eyre::Result<Arc<[_]>>>()?;
       let dropped = current.len() + added - entries.len();
@@ -303,4 +332,21 @@ impl Egresses {
          error
       }))
    }
+}
+
+fn source_addresses(prefix: Ipv6Net) -> eyre::Result<Vec<Ipv6Addr>> {
+   eyre::ensure!(
+      (32..=64).contains(&prefix.prefix_len()),
+      "source prefix {prefix} must be between /32 and /64"
+   );
+   let subnets = 1_usize << (64 - prefix.prefix_len());
+   let network = u128::from(prefix.network());
+   let mut rng = rand::thread_rng();
+   Ok(sample(&mut rng, subnets, subnets.min(SOURCE_EGRESSES))
+      .into_iter()
+      .map(|subnet| {
+         let host = u128::from(rng.next_u64().max(1));
+         Ipv6Addr::from(network | ((subnet as u128) << 64_u32) | host)
+      })
+      .collect())
 }

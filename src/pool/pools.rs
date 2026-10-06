@@ -159,7 +159,6 @@ impl Pools {
       }
    }
 
-   /// An unreadable or emptied list keeps the proxies already in service.
    pub fn refresh_egresses(&self, cfg: &Config) {
       let egresses = [
          (&cfg.anthropic.egress, self.anthropic.backend.proxied()),

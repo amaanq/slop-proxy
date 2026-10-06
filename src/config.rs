@@ -4,6 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use eyre::{Result, WrapErr as _};
+use ipnet::Ipv6Net;
 
 use crate::cli::Cli;
 use crate::provider::Provider;
@@ -93,9 +94,9 @@ impl Default for CopilotConfig {
 #[serde(default)]
 pub struct EgressConfig {
    pub proxy_urls: Vec<String>,
-   /// Re-read while running, so a list rewritten in place takes effect
-   /// without a restart.
    pub proxy_urls_file: Option<PathBuf>,
+   /// Zen's free tier counts IPv6 clients by /64.
+   pub source_prefix: Option<Ipv6Net>,
 }
 
 impl EgressConfig {
@@ -566,6 +567,7 @@ mod zen_tests {
       let config = EgressConfig {
          proxy_urls: vec!["http://inline.example:80".into()],
          proxy_urls_file: Some(path.clone()),
+         source_prefix: None,
       };
 
       assert_eq!(

@@ -17,6 +17,7 @@ eyre = "0.6.14"
 futures-util = "0.3"
 hmac-sha256 = "1"
 image-webp = "0.2"
+ipnet = { features = [ "serde" ], version = "2" }
 jiff = { default-features = false, features = [ "std" ], version = "0.2" }
 png = "0.18"
 pound = "0.1.6"

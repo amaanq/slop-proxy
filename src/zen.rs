@@ -234,6 +234,7 @@ mod tests {
          egress: EgressConfig {
             proxy_urls: vec![authenticated(&first_url), authenticated(&second_url)],
             proxy_urls_file: None,
+            source_prefix: None,
          },
       })
       .unwrap();
@@ -275,6 +276,7 @@ mod tests {
          egress: EgressConfig {
             proxy_urls: vec![authenticated(&limited_url), authenticated(&working_url)],
             proxy_urls_file: None,
+            source_prefix: None,
          },
       })
       .unwrap();
@@ -308,6 +310,7 @@ mod tests {
          egress: EgressConfig {
             proxy_urls: vec!["http://user:secret@[".into()],
             proxy_urls_file: None,
+            source_prefix: None,
          },
          ..ZenConfig::default()
       })
@@ -341,6 +344,7 @@ mod tests {
                .map(|&(ref url, _)| authenticated(url))
                .collect(),
             proxy_urls_file: None,
+            source_prefix: None,
          },
       })
       .unwrap();

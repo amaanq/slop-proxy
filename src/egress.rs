@@ -108,7 +108,9 @@ impl Egresses {
             Some(proxy_url.to_owned())
          },
          Via::Source(address) => {
-            builder = builder.local_address(IpAddr::V6(address));
+            builder = builder
+               .local_address(IpAddr::V6(address))
+               .pool_max_idle_per_host(0);
             None
          },
       };

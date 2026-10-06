@@ -5,7 +5,7 @@
 
 use std::net::{IpAddr, Ipv6Addr};
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
 use ipnet::Ipv6Net;
@@ -22,7 +22,7 @@ pub const ATTEMPTS: usize = 8;
 
 const UNREACHABLE_COOLDOWN: i64 = 30;
 
-const SOURCE_EGRESSES: usize = 4096;
+const SOURCE_EGRESSES: usize = 1 << 16;
 
 pub struct Egresses {
    entries: RwLock<Arc<[Arc<Egress>]>>,
@@ -32,18 +32,19 @@ pub struct Egresses {
 }
 
 struct Egress {
-   proxy_url: Option<String>,
-   http: reqwest::Client,
+   route: Route,
+   /// Built on first send, so a /48 of sources does not build 65536 TLS
+   /// configs before the server binds.
+   http: OnceLock<reqwest::Client>,
    unavailable_until: AtomicI64,
    /// Zen's free tier rate-limits per source address, so an anonymous 429
    /// benches the egress for anonymous traffic only.
    anonymous_until: AtomicI64,
 }
 
-#[derive(Clone, Copy)]
-enum Via<'url> {
+enum Route {
    Direct,
-   Proxy(&'url str),
+   Proxy(String),
    Source(Ipv6Addr),
 }
 
@@ -79,11 +80,12 @@ impl Egresses {
          );
          let sources = source_addresses(prefix)?
             .into_iter()
-            .map(|address| egresses.build(Via::Source(address), 0).map(Arc::new))
-            .collect::<eyre::Result<Arc<[_]>>>()?;
+            .map(|address| Arc::new(Egress::lazy(Route::Source(address))))
+            .collect::<Arc<[_]>>();
+         egresses.build(&sources[0].route, 0)?;
          egresses.store(sources);
       } else if proxy_urls.is_empty() && cfg.proxy_urls_file.is_none() {
-         let direct = egresses.build(Via::Direct, 0)?;
+         let direct = egresses.built(Route::Direct, 0)?;
          egresses.store(Arc::new([Arc::new(direct)]));
       } else {
          egresses.replace(&proxy_urls)?;
@@ -91,7 +93,26 @@ impl Egresses {
       Ok(egresses)
    }
 
-   fn build(&self, via: Via<'_>, index: usize) -> eyre::Result<Egress> {
+   fn built(&self, route: Route, index: usize) -> eyre::Result<Egress> {
+      let http = self.build(&route, index)?;
+      Ok(Egress {
+         http: OnceLock::from(http),
+         ..Egress::lazy(route)
+      })
+   }
+
+   fn client(&self, egress: &Egress) -> reqwest::Client {
+      egress
+         .http
+         .get_or_init(|| {
+            self
+               .build(&egress.route, 0)
+               .expect("egress client config is proven at startup")
+         })
+         .clone()
+   }
+
+   fn build(&self, route: &Route, index: usize) -> eyre::Result<reqwest::Client> {
       let label = self.label;
       let mut builder = reqwest::Client::builder()
          .connect_timeout(Duration::from_secs(30))
@@ -99,29 +120,22 @@ impl Egresses {
       if let Some(agent) = self.user_agent.as_deref() {
          builder = builder.user_agent(agent);
       }
-      let proxy_url = match via {
-         Via::Direct => None,
-         Via::Proxy(proxy_url) => {
+      match *route {
+         Route::Direct => {},
+         Route::Proxy(ref proxy_url) => {
             let proxy = reqwest::Proxy::all(proxy_url)
                .map_err(|_| eyre::eyre!("invalid {label} proxy URL at position {}", index + 1))?;
             builder = builder.proxy(proxy);
-            Some(proxy_url.to_owned())
          },
-         Via::Source(address) => {
+         Route::Source(address) => {
             builder = builder
                .local_address(IpAddr::V6(address))
                .pool_max_idle_per_host(0);
-            None
          },
-      };
-      Ok(Egress {
-         proxy_url,
-         http: builder
-            .build()
-            .map_err(|_| eyre::eyre!("building {label} HTTP client"))?,
-         unavailable_until: AtomicI64::new(0),
-         anonymous_until: AtomicI64::new(0),
-      })
+      }
+      builder
+         .build()
+         .map_err(|_| eyre::eyre!("building {label} HTTP client"))
    }
 
    pub fn replace(&self, proxy_urls: &[String]) -> eyre::Result<()> {
@@ -133,12 +147,12 @@ impl Egresses {
          .map(|(index, url)| {
             if let Some(kept) = current
                .iter()
-               .find(|egress| egress.proxy_url.as_deref() == Some(url.as_str()))
+               .find(|egress| matches!(&egress.route, Route::Proxy(kept) if kept == url))
             {
                return Ok(Arc::clone(kept));
             }
             added += 1;
-            self.build(Via::Proxy(url), index).map(Arc::new)
+            self.built(Route::Proxy(url.clone()), index).map(Arc::new)
          })
          .collect::<eyre::Result<Arc<[_]>>>()?;
       let dropped = current.len() + added - entries.len();
@@ -164,7 +178,7 @@ impl Egresses {
    }
 
    pub fn http(&self, index: usize) -> reqwest::Client {
-      self.snapshot()[index].http.clone()
+      self.client(&self.snapshot()[index])
    }
 
    /// Every egress still in service, starting one past the last request so
@@ -270,7 +284,7 @@ impl Egresses {
       let mut tried = 0_usize;
       for index in order.iter().copied().take(ATTEMPTS) {
          tried += 1;
-         match attempt(entries[index].http.clone())
+         match attempt(self.client(&entries[index]))
             .await
             .map_err(Into::into)
          {
@@ -351,4 +365,15 @@ fn source_addresses(prefix: Ipv6Net) -> eyre::Result<Vec<Ipv6Addr>> {
          Ipv6Addr::from(network | ((subnet as u128) << 64_u32) | host)
       })
       .collect())
+}
+
+impl Egress {
+   const fn lazy(route: Route) -> Self {
+      Self {
+         route,
+         http: OnceLock::new(),
+         unavailable_until: AtomicI64::new(0),
+         anonymous_until: AtomicI64::new(0),
+      }
+   }
 }

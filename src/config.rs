@@ -95,8 +95,9 @@ impl Default for CopilotConfig {
 pub struct EgressConfig {
    pub proxy_urls: Vec<String>,
    pub proxy_urls_file: Option<PathBuf>,
-   /// Zen's free tier counts IPv6 clients by /64.
-   pub source_prefix: Option<Ipv6Net>,
+   /// Zen's free tier counts a whole /48 as one client, so each prefix here
+   /// is one allowance and requests alternate between them.
+   pub source_prefixes: Vec<Ipv6Net>,
 }
 
 impl EgressConfig {
@@ -567,7 +568,7 @@ mod zen_tests {
       let config = EgressConfig {
          proxy_urls: vec!["http://inline.example:80".into()],
          proxy_urls_file: Some(path.clone()),
-         source_prefix: None,
+         source_prefixes: Vec::new(),
       };
 
       assert_eq!(

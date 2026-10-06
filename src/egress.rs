@@ -9,8 +9,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
 use ipnet::Ipv6Net;
-use rand::RngCore as _;
-use rand::seq::index::sample;
+use rand::Rng as _;
 
 use crate::clock;
 use crate::config::EgressConfig;
@@ -73,12 +72,12 @@ impl Egresses {
          user_agent: user_agent.map(str::to_owned),
       };
       let proxy_urls = cfg.urls()?;
-      if let Some(prefix) = cfg.source_prefix {
+      if !cfg.source_prefixes.is_empty() {
          eyre::ensure!(
             proxy_urls.is_empty() && cfg.proxy_urls_file.is_none(),
             "{label} sets both proxies and a source prefix"
          );
-         let sources = source_addresses(prefix)?
+         let sources = source_addresses(&cfg.source_prefixes)?
             .into_iter()
             .map(|address| Arc::new(Egress::lazy(Route::Source(address))))
             .collect::<Arc<[_]>>();
@@ -350,19 +349,22 @@ impl Egresses {
    }
 }
 
-fn source_addresses(prefix: Ipv6Net) -> eyre::Result<Vec<Ipv6Addr>> {
-   eyre::ensure!(
-      (32..=64).contains(&prefix.prefix_len()),
-      "source prefix {prefix} must be between /32 and /64"
-   );
-   let subnets = 1_usize << (64 - prefix.prefix_len());
-   let network = u128::from(prefix.network());
+/// Interleaved by prefix, so the attempts of one request land in different
+/// allowances rather than walking a run of addresses from the same one.
+fn source_addresses(prefixes: &[Ipv6Net]) -> eyre::Result<Vec<Ipv6Addr>> {
+   for prefix in prefixes {
+      eyre::ensure!(
+         (32..=120).contains(&prefix.prefix_len()),
+         "source prefix {prefix} must be between /32 and /120"
+      );
+   }
    let mut rng = rand::thread_rng();
-   Ok(sample(&mut rng, subnets, subnets.min(SOURCE_EGRESSES))
-      .into_iter()
-      .map(|subnet| {
-         let host = u128::from(rng.next_u64().max(1));
-         Ipv6Addr::from(network | ((subnet as u128) << 64_u32) | host)
+   let rounds = SOURCE_EGRESSES / prefixes.len();
+   Ok((0..rounds)
+      .flat_map(|_| prefixes)
+      .map(|prefix| {
+         let host = rng.r#gen::<u128>() & (u128::MAX >> prefix.prefix_len());
+         Ipv6Addr::from(u128::from(prefix.network()) | host.max(1))
       })
       .collect())
 }

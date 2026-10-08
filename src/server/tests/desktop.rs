@@ -74,3 +74,75 @@ async fn codex_auth_carries_the_tokens_identity_and_refreshes_through_its_key() 
       .unwrap();
    assert_eq!(revoked.status(), StatusCode::UNAUTHORIZED);
 }
+
+/// One request per window, spent before the desktop starts reading.
+async fn spend_quota(db: &Db) {
+   let limits = TokenLimits {
+      requests: Some(1),
+      window_seconds: 3600,
+      ..TokenLimits::default()
+   };
+   db.set_token_limits("sp-test", &limits).await.unwrap();
+   let token = db.auth_token("sp-test").await.unwrap().unwrap();
+   db.admit_token(token.id, &limits).await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn account_reads_name_the_owner_and_answer_once_quota_is_spent() {
+   let (base, db) = spawn_proxy().await;
+   spend_quota(&db).await;
+   let client = reqwest::Client::new();
+   let get = |path: &str, key: Option<&str>| {
+      let request = client.get(format!("{base}{path}"));
+      match key {
+         Some(key) => request.bearer_auth(key),
+         None => request,
+      }
+      .send()
+   };
+
+   for path in [
+      "/backend-api/me",
+      "/backend-api/wham/accounts/check",
+      "/backend-api/accounts/check/v4-2023-04-27",
+      "/backend-api/accounts/optimized/check",
+   ] {
+      assert_eq!(
+         get(path, None).await.unwrap().status(),
+         StatusCode::UNAUTHORIZED
+      );
+      assert_eq!(
+         get(path, Some("sp-test")).await.unwrap().status(),
+         StatusCode::OK,
+         "{path}"
+      );
+   }
+
+   let check: Value = get("/backend-api/wham/accounts/check", Some("sp-test"))
+      .await
+      .unwrap()
+      .json()
+      .await
+      .unwrap();
+   assert_eq!(check["accounts"][0]["id"], "slop-proxy");
+   assert_eq!(check["accounts"][0]["name"], "alice");
+   assert_eq!(
+      check["accounts"][0]["workspace_backend_origin"],
+      "NO_CONSTRAINT"
+   );
+   let accounts: Value = get("/backend-api/accounts/check/v4-2023-04-27", Some("sp-test"))
+      .await
+      .unwrap()
+      .json()
+      .await
+      .unwrap();
+   assert_eq!(accounts["account_ordering"][0], "slop-proxy");
+   let member = &accounts["accounts"]["slop-proxy"];
+   assert_eq!(member["account"]["name"], "alice");
+   assert!(member["entitlement"]["subscription_plan"].is_null());
+
+   assert_eq!(
+      db.token_meter("sp-test").await.unwrap().unwrap().requests,
+      1
+   );
+}

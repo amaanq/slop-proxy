@@ -136,18 +136,6 @@ struct RefreshResponse {
    refresh_token: String,
 }
 
-#[derive(Serialize)]
-struct AccountsCheck {
-   accounts: [AccountEntry; 1],
-}
-
-#[derive(Serialize)]
-struct AccountEntry {
-   id: &'static str,
-   workspace_backend_origin: &'static str,
-   account_routing_override: &'static str,
-}
-
 /// Codex only asks a provider for its catalog in ChatGPT-auth mode, which
 /// reads the bearer from `auth.json` rather than `env_key`.
 pub async fn codex_auth(
@@ -215,20 +203,6 @@ pub fn api_key(bearer: String) -> String {
       .ok()
       .and_then(|claims| serde_json::from_slice::<AccessKey>(&claims).ok())
       .map_or(bearer, |claims| claims.api_key)
-}
-
-/// Codex 0.156 refuses to start a ChatGPT-auth session until this workspace
-/// discovery succeeds for the `auth.json` account id. `NO_CONSTRAINT` keeps
-/// requests on the `chatgpt_base_url` origin, which is the proxy.
-pub async fn codex_accounts() -> Response {
-   Json(AccountsCheck {
-      accounts: [AccountEntry {
-         id: ACCOUNT_ID,
-         workspace_backend_origin: "NO_CONSTRAINT",
-         account_routing_override: "NO_CONSTRAINT",
-      }],
-   })
-   .into_response()
 }
 
 /// Overriding the base url keeps `model_provider_id` as `openai`, which the

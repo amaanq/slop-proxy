@@ -53,6 +53,25 @@ ANTHROPIC_BASE_URL=http://[::1]:8484 ANTHROPIC_API_KEY=sp-... claude
 OPENAI_BASE_URL=http://[::1]:8484/v1 OPENAI_API_KEY=sp-...
 ```
 
+## Codex
+
+Codex signs in to the proxy as a ChatGPT login. Fetch its auth file and
+config with a token, over HTTPS since codex refuses a plain HTTP
+`chatgpt_base_url`:
+
+```sh
+curl -H "Authorization: Bearer sp-..." https://proxy.example/config/codex/auth.json > ~/.codex/auth.json
+curl -H "Authorization: Bearer sp-..." https://proxy.example/config/codex/config.toml >> ~/.codex/config.toml
+```
+
+The desktop app reads its account, profile and usage from the proxy too.
+Start it with `CODEX_REFRESH_TOKEN_URL_OVERRIDE=https://proxy.example/oauth/token`
+so its token refreshes go there rather than to OpenAI.
+
+An existing codex login can join the pool with
+`slop-proxy accounts import-codex ~/.codex/auth.json`. Both then hold one
+refresh token, so log codex in again afterwards.
+
 ## Gemini keys
 
 Add an unrestricted key with `accounts add-key --provider gemini`. A key

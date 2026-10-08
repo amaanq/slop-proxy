@@ -10,6 +10,7 @@ use crate::db::tokens::TokenLimits;
 use crate::db::usage::{Admission, AdmissionError};
 use crate::pool::Route;
 use crate::server::AppState;
+use crate::server::clientcfg;
 use crate::server::error::{Dialect, error_response};
 
 #[derive(Clone, Debug)]
@@ -194,4 +195,5 @@ pub fn bearer_token(headers: &HeaderMap, query: Option<&str>) -> Option<String> 
             .find_map(|part| part.strip_prefix("key="))
             .map(str::to_owned)
       })
+      .map(clientcfg::api_key)
 }

@@ -718,6 +718,7 @@ async fn bridged_responses_preserve_status_usage_and_output_order() {
 }
 
 mod copilot;
+mod desktop;
 mod experiential;
 mod rate_limits;
 mod websocket;

@@ -386,3 +386,52 @@ async fn usage_and_profile_count_the_owners_tokens_once_quota_is_spent() {
    assert_eq!(limits["plan_type"], "pro");
    assert_eq!(limits["rate_limit"]["allowed"], true);
 }
+
+#[tokio::test]
+async fn configured_gates_override_the_upstream_and_the_proxy() {
+   let reads = Arc::new(Mutex::new(Vec::new()));
+   let base_url = spawn_backend(Arc::clone(&reads)).await;
+   let tokens = fresh_tokens();
+   let account = NewAccount {
+      provider: Provider::OpenAi,
+      id: "acct-1",
+      email: None,
+      label: None,
+      plan: Some("pro"),
+      tokens: &tokens,
+      auth_mode: AuthMode::OAuth,
+   };
+   let desktop_gates = [
+      ("410262010", false),
+      ("1315865107", true),
+      ("codex-app-sidebar-custom-sections", true),
+   ]
+   .into_iter()
+   .map(|(gate, value)| (gate.to_owned(), value))
+   .collect();
+   let cfg = Config {
+      codex: CodexConfig {
+         base_url,
+         desktop_gates,
+         ..CodexConfig::default()
+      },
+      ..Config::default()
+   };
+   let (base, _db) = serve_proxy(cfg, &[account]).await;
+   let bootstrap: Value = reqwest::Client::new()
+      .post(format!("{base}/backend-api/wham/statsig/bootstrap"))
+      .bearer_auth("sp-test")
+      .json(&json!({"stable_id": "device"}))
+      .send()
+      .await
+      .unwrap()
+      .json()
+      .await
+      .unwrap();
+   let gates = &statsig_payload(&bootstrap)["feature_gates"];
+   assert_eq!(gates["410262010"]["value"], false);
+   assert_eq!(gates["410262010"]["rule_id"], "slop-proxy-config");
+   assert_eq!(gates["1315865107"]["value"], true);
+   assert_eq!(gates["codex-app-sidebar-custom-sections"]["value"], true);
+   assert_eq!(gates["1506311413"]["rule_id"], "computer");
+}

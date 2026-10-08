@@ -66,7 +66,14 @@ curl -H "Authorization: Bearer sp-..." https://proxy.example/config/codex/config
 
 The desktop app reads its account, profile and usage from the proxy too.
 Start it with `CODEX_REFRESH_TOKEN_URL_OVERRIDE=https://proxy.example/oauth/token`
-so its token refreshes go there rather than to OpenAI.
+so its token refreshes go there rather than to OpenAI. Features still
+rolling out can be turned on or off for it by Statsig gate, under the name
+or hash the desktop checks:
+
+```toml
+[codex.desktop_gates]
+"codex-app-sidebar-custom-sections" = true
+```
 
 An existing codex login can join the pool with
 `slop-proxy accounts import-codex ~/.codex/auth.json`. Both then hold one

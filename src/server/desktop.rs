@@ -384,6 +384,18 @@ async fn statsig_bootstrap(
          );
       }
    }
+   // The operator has the last word, for features still rolling out.
+   for (gate, &value) in &state.cfg.codex.desktop_gates {
+      feature_gates.insert(
+         gate,
+         Gate {
+            name: gate,
+            value,
+            rule_id: "slop-proxy-config",
+            secondary_exposures: [],
+         },
+      );
+   }
 
    let stable_id = context.stable_id.as_deref();
    let payload = Payload {

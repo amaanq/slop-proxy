@@ -12,6 +12,7 @@ mod gemini;
 pub mod metrics;
 pub mod openai;
 pub mod pipeline;
+mod profile;
 pub mod relay;
 #[cfg(test)]
 mod tests;
@@ -186,6 +187,7 @@ pub fn router(state: AppState) -> Router {
       .route("/config/codex/config.toml", get(clientcfg::codex_config))
       .route("/backend-api/aura/site_status", get(openai::backend_get))
       .merge(desktop::routes())
+      .merge(profile::routes())
       .route(
          "/v1/responses",
          post(openai::responses_passthrough).get(openai::websocket::responses),

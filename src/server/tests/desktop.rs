@@ -294,3 +294,95 @@ async fn reads_of_chatgpt_only_features_answer_empty_once_quota_is_spent() {
       response.json::<Value>().await.unwrap();
    }
 }
+
+#[tokio::test]
+async fn usage_and_profile_count_the_owners_tokens_once_quota_is_spent() {
+   let (base, db) = spawn_proxy().await;
+   let client = reqwest::Client::new();
+   let complete = || {
+      client
+         .post(format!("{base}/v1/chat/completions"))
+         .bearer_auth("sp-test")
+         .json(&json!({"model": "gpt-5-codex", "messages": [{"role": "user", "content": "hi"}]}))
+         .send()
+   };
+   assert_eq!(complete().await.unwrap().status(), StatusCode::OK);
+   db.flush().await.unwrap();
+   db.set_token_limits(
+      "sp-test",
+      &TokenLimits {
+         requests: Some(1),
+         window_seconds: 3600,
+         ..TokenLimits::default()
+      },
+   )
+   .await
+   .unwrap();
+   assert_eq!(
+      complete().await.unwrap().status(),
+      StatusCode::TOO_MANY_REQUESTS
+   );
+   let read = |path: &str| {
+      let url = format!("{base}{path}");
+      let client = client.clone();
+      async move {
+         let response = client.get(url).bearer_auth("sp-test").send().await.unwrap();
+         (response.status(), response.json::<Value>().await.unwrap())
+      }
+   };
+   let today = clock::date(clock::unix_now().div_euclid(86400));
+
+   // 80 fresh input, 20 cached and 25 output, reasoning already inside it.
+   let (status, profile) = read("/backend-api/wham/profiles/me").await;
+   assert_eq!(status, StatusCode::OK);
+   assert_eq!(profile["stats"]["lifetime_tokens"], 125_i32);
+   assert_eq!(profile["stats"]["current_streak_days"], 1_i32);
+   assert_eq!(
+      profile["stats"]["daily_usage_buckets"][0]["start_date"],
+      today
+   );
+   assert_eq!(profile["profile"]["username"], "alice");
+
+   let (_, page) = read("/backend-api/profiles/me/page").await;
+   assert_eq!(page["page"]["stats"]["agentic"]["lifetime_tokens"], 125_i32);
+   assert_eq!(
+      page["page"]["activity_graph"]["weekly_usage_buckets"][0]["tokens"],
+      125_i32
+   );
+   assert_eq!(
+      read("/backend-api/profiles/alice/page").await.0,
+      StatusCode::OK
+   );
+   assert_eq!(
+      read("/backend-api/profiles/bob/page").await.0,
+      StatusCode::NOT_FOUND
+   );
+
+   let (_, history) = read("/backend-api/wham/usage/daily-token-usage-breakdown").await;
+   assert_eq!(history["units"], "tokens");
+   let day = &history["data"][0];
+   assert_eq!(day["date"], today);
+   assert_eq!(day["models"][0]["uncached_text_input_tokens"], 80_i32);
+   assert_eq!(day["models"][0]["cached_text_input_tokens"], 20_i32);
+   assert_eq!(day["models"][0]["text_output_tokens"], 25_i32);
+   assert_eq!(day["product_surface_usage_values"]["codex"], 125_i32);
+   let (_, past) =
+      read("/backend-api/wham/usage/daily-token-usage-breakdown?start_date=2020-01-01&end_date=2020-01-31").await;
+   assert_eq!(past["data"], json!([]));
+   for range in [
+      "start_date=2026-1-1",
+      "start_date=2020-02-01&end_date=2020-01-01",
+      "start_date=2020-01-01&end_date=2021-12-31",
+   ] {
+      let (rejected, _) = read(&format!(
+         "/backend-api/wham/usage/daily-token-usage-breakdown?{range}"
+      ))
+      .await;
+      assert_eq!(rejected, StatusCode::BAD_REQUEST, "{range}");
+   }
+
+   let (limited, limits) = read("/backend-api/wham/usage").await;
+   assert_eq!(limited, StatusCode::OK);
+   assert_eq!(limits["plan_type"], "pro");
+   assert_eq!(limits["rate_limit"]["allowed"], true);
+}

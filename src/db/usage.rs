@@ -151,6 +151,24 @@ pub struct SessionCache {
    pub account_switched: bool,
 }
 
+/// Tokens one model spent for a user on one UTC day, `day` counting days
+/// since the epoch. Cache writes count as the uncached input they are, and
+/// reasoning is already inside output.
+#[derive(Debug, Clone)]
+pub struct DayUsage {
+   pub day: i64,
+   pub model: String,
+   pub input_tokens: i64,
+   pub cached_tokens: i64,
+   pub output_tokens: i64,
+}
+
+impl DayUsage {
+   pub const fn total(&self) -> i64 {
+      self.input_tokens + self.cached_tokens + self.output_tokens
+   }
+}
+
 #[derive(Debug, Clone)]
 pub struct ToolRow {
    pub user: String,
@@ -682,6 +700,31 @@ impl Db {
                ),
             }))
          })
+         .await
+   }
+
+   /// Days without a token are left out, oldest day first.
+   pub async fn daily_usage(&self, user: String, since: i64, until: i64) -> Result<Vec<DayUsage>> {
+      self
+         .reports
+         .rows(
+            "SELECT ts / 86400 AS day, upstream_model, SUM(input_tokens + cache_write_tokens),
+                    SUM(cache_read_tokens), SUM(output_tokens)
+             FROM usage_log WHERE user = ?1 AND ts >= ?2 AND ts < ?3
+             GROUP BY day, upstream_model
+             HAVING SUM(input_tokens + cache_write_tokens + cache_read_tokens + output_tokens) > 0
+             ORDER BY day, upstream_model",
+            (user, since, until),
+            |row| {
+               Ok(DayUsage {
+                  day: row.get(0)?,
+                  model: row.get(1)?,
+                  input_tokens: row.get(2)?,
+                  cached_tokens: row.get(3)?,
+                  output_tokens: row.get(4)?,
+               })
+            },
+         )
          .await
    }
 

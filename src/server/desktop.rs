@@ -35,6 +35,7 @@ const USER_SETTINGS: &str = r#"{"custom_instructions":null,"settings":{},"flags"
 const WORKSPACE_SETTINGS: &str = r#"{"beta_settings":{},"permissions":[],"admin_work_mode_enabled":false,"admin_work_local_enabled":true,"usage_limit_increase_request":{"kind":"disabled"}}"#;
 const NO_PROGRAMS: &str = r#"{"programs":[{"program":"cyber","state":"unavailable","grants":[]}]}"#;
 const NO_PLUGINS: &str = r#"{"plugins":[],"pagination":{"next_page_token":null}}"#;
+const NO_PINS: &str = r#"{"items":[],"pinned_ids":[],"next_cursor":null}"#;
 const SUBSCRIPTION: &str = r#"{"is_processor_stripe":false,"will_renew":false,"subscription_id":null,"scheduled_billing_period":null}"#;
 const AUTO_TOP_UP: &str = r#"{"is_enabled":false,"payment_method":null,"recharge_threshold":null,"recharge_target":null,"recharge_monthly_limit":null,"auto_reload_credit_discount_policy":null}"#;
 const ONBOARDED: &str = r#"{"desktop_onboarding_completed_at":"1970-01-01T00:00:00Z","role":"engineering","entrypoints":{}}"#;
@@ -64,6 +65,11 @@ pub(super) const EMPTY_READS: &[(&str, &str)] = &[
    (
       "/backend-api/ps/plugin-categories/{category}/plugins",
       NO_PLUGINS,
+   ),
+   ("/backend-api/profiles/me/page/pin_options", NO_PINS),
+   (
+      "/backend-api/wham/rate-limit-reset-credits",
+      r#"{"credits":[],"available_count":0}"#,
    ),
    (
       "/backend-api/referrals/invite/eligibility",

@@ -1,5 +1,9 @@
-use super::*;
+use axum::Json;
+use axum::http::HeaderMap;
+use axum::routing::get;
 use serde_json::{Value, json};
+
+use super::*;
 
 fn claims(jwt: &str) -> Value {
    let payload = jwt.split('.').nth(1).unwrap();
@@ -145,4 +149,110 @@ async fn account_reads_name_the_owner_and_answer_once_quota_is_spent() {
       db.token_meter("sp-test").await.unwrap().unwrap().requests,
       1
    );
+}
+
+/// A codex backend answering the desktop's feature gates for `acct-1`, and
+/// counting how often it was asked.
+async fn spawn_backend(reads: Arc<Mutex<Vec<Value>>>) -> String {
+   let app = Router::new()
+      .route(
+         "/backend-api/wham/statsig/bootstrap",
+         post(move |headers: HeaderMap, Json(context): Json<Value>| {
+            let reads = Arc::clone(&reads);
+            async move {
+               assert_eq!(headers["authorization"], "Bearer at");
+               assert_eq!(headers["chatgpt-account-id"], "acct-1");
+               reads.lock().unwrap().push(context);
+               let payload = json!({
+                  "hash_used": "djb2",
+                  "user": {"email": "upstream@example.com"},
+                  "feature_gates": {
+                     "410262010": {"name": "410262010", "value": true, "rule_id": "browser"},
+                     "1506311413": {"name": "1506311413", "value": false, "rule_id": "computer"},
+                     "1315865107": {"name": "1315865107", "value": true, "rule_id": "cloud"},
+                     "99": {"name": "99", "value": true, "rule_id": "unrelated"},
+                  },
+               });
+               Json(json!({"statsigPayload": payload.to_string()}))
+            }
+         }),
+      )
+      .route(
+         "/backend-api/aura/site_status",
+         get(|| async { Json(json!({"feature_status": {}})) }),
+      );
+   let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+   let addr = listener.local_addr().unwrap();
+   tokio::spawn(async move {
+      axum::serve(listener, app).await.unwrap();
+   });
+   format!("http://{addr}/backend-api/codex")
+}
+
+fn statsig_payload(bootstrap: &Value) -> Value {
+   serde_json::from_str(bootstrap["statsigPayload"].as_str().unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn statsig_bootstrap_relays_only_the_local_feature_gates() {
+   let reads = Arc::new(Mutex::new(Vec::new()));
+   let base_url = spawn_backend(Arc::clone(&reads)).await;
+   let (base, db) = spawn_proxy_at(ModelsConfig::default(), None, base_url).await;
+   spend_quota(&db).await;
+   let client = reqwest::Client::new();
+   let bootstrap = || {
+      client
+         .post(format!("{base}/backend-api/wham/statsig/bootstrap"))
+         .bearer_auth("sp-test")
+         .json(&json!({
+            "window_type": "electron",
+            "stable_id": "device",
+            "app_version": "26.1",
+            "desktop_app_beta_enabled": true,
+         }))
+         .send()
+   };
+
+   let payload = statsig_payload(&bootstrap().await.unwrap().json().await.unwrap());
+   let gates = &payload["feature_gates"];
+   assert_eq!(gates["410262010"]["value"], true);
+   assert_eq!(gates["1506311413"]["value"], false);
+   assert_eq!(gates["1506311413"]["rule_id"], "computer");
+   assert_eq!(gates["1315865107"]["value"], false);
+   assert!(gates.get("99").is_none());
+   assert_eq!(payload["user"]["email"], "alice");
+   assert_eq!(payload["user"]["customIDs"]["stableID"], "device");
+   assert_eq!(payload["user"]["appVersion"], "26.1");
+   assert_eq!(payload["user"]["custom"]["desktop_app_beta_enabled"], true);
+   assert!(!payload.to_string().contains("upstream@"));
+   assert_eq!(reads.lock().unwrap()[0]["stable_id"], "device");
+
+   let site = client
+      .get(format!(
+         "{base}/backend-api/aura/site_status?site_url=https://example.com"
+      ))
+      .bearer_auth("sp-test")
+      .send()
+      .await
+      .unwrap();
+   assert_eq!(site.status(), StatusCode::OK);
+   assert_eq!(
+      db.token_meter("sp-test").await.unwrap().unwrap().requests,
+      1
+   );
+
+   // A token kept off the codex backend gets no upstream evaluation at all.
+   db.set_token_limits(
+      "sp-test",
+      &TokenLimits {
+         providers: vec![Provider::Anthropic],
+         ..TokenLimits::default()
+      },
+   )
+   .await
+   .unwrap();
+   let scoped = statsig_payload(&bootstrap().await.unwrap().json().await.unwrap());
+   assert!(scoped["feature_gates"].get("410262010").is_none());
+   assert_eq!(scoped["feature_gates"]["1315865107"]["value"], false);
+   assert_eq!(reads.lock().unwrap().len(), 1);
 }

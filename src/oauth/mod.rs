@@ -171,6 +171,48 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
    .await
 }
 
+#[derive(Deserialize)]
+struct CodexAuth {
+   tokens: Option<CodexTokens>,
+}
+
+#[derive(Deserialize)]
+struct CodexTokens {
+   id_token: String,
+   access_token: String,
+   refresh_token: String,
+}
+
+/// Takes over the login codex keeps in `auth.json`. Both then hold one
+/// rotating refresh token, so whichever refreshes first signs the other out.
+pub async fn import_codex(db: &Db, auth_json: &[u8], label: Option<String>) -> Result<()> {
+   let auth: CodexAuth = serde_json::from_slice(auth_json).wrap_err("parsing codex auth.json")?;
+   let tokens = auth
+      .tokens
+      .ok_or_else(|| eyre!("auth.json holds no ChatGPT login"))?;
+   let info = jwt::parse_id_token(&tokens.id_token)?;
+   let account_id = info
+      .chatgpt_account_id
+      .ok_or_else(|| eyre!("id_token has no chatgpt account id"))?;
+   let tokens = TokenSet {
+      expires_at: jwt::exp(&tokens.access_token),
+      access_token: tokens.access_token,
+      refresh_token: tokens.refresh_token,
+      id_token: Some(tokens.id_token),
+   };
+
+   finish_login(
+      db,
+      Provider::OpenAi,
+      &account_id,
+      info.email.as_deref(),
+      label.as_deref(),
+      info.plan_type.as_deref(),
+      &tokens,
+   )
+   .await
+}
+
 pub async fn ok_json<T>(resp: reqwest::Response, what: &str) -> Result<T>
 where
    T: DeserializeOwned,
@@ -227,6 +269,8 @@ fn parse_interval(value: Option<&Interval>) -> u64 {
 
 #[cfg(test)]
 mod tests {
+   use std::env;
+
    use super::*;
 
    #[test]
@@ -236,5 +280,36 @@ mod tests {
       assert_eq!(parse_interval(None), 5);
       assert_eq!(parse_interval(Some(&Interval::Seconds(0))), 1);
       assert_eq!(parse_interval(Some(&Interval::Seconds(999))), 60);
+   }
+
+   #[tokio::test]
+   async fn import_codex_stores_the_chatgpt_login() {
+      let path = env::temp_dir().join(format!("slop-test-{}.db", uuid::Uuid::new_v4()));
+      let db = Db::open(&path).unwrap();
+      let claims = serde_json::json!({
+         "email": "alice@example.com",
+         "https://api.openai.com/auth": {"chatgpt_account_id": "acct-1", "chatgpt_plan_type": "plus"},
+      });
+      let id_token = format!(
+         "e30.{}.sig",
+         data_encoding::BASE64URL_NOPAD.encode(claims.to_string().as_bytes())
+      );
+      let auth = serde_json::json!({
+         "auth_mode": "chatgpt",
+         "tokens": {"id_token": id_token, "access_token": "at", "refresh_token": "rt", "account_id": "acct-1"},
+      });
+      import_codex(&db, auth.to_string().as_bytes(), Some("laptop".into()))
+         .await
+         .unwrap();
+
+      let accounts = db.list_accounts().await.unwrap();
+      assert_eq!(accounts.len(), 1);
+      assert_eq!(accounts[0].provider_account_id, "acct-1");
+      assert_eq!(accounts[0].email.as_deref(), Some("alice@example.com"));
+      assert_eq!(accounts[0].plan_type.as_deref(), Some("plus"));
+      assert_eq!(accounts[0].refresh_token, "rt");
+
+      let api_key = br#"{"auth_mode":"apikey","OPENAI_API_KEY":"sk-x","tokens":null}"#;
+      assert!(import_codex(&db, api_key, None).await.is_err());
    }
 }

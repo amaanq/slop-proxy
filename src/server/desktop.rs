@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use axum::body::Bytes;
 use axum::extract::State;
+use axum::http::header::CONTENT_TYPE;
 use axum::response::{IntoResponse as _, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
@@ -30,8 +31,84 @@ const RELAYED_GATES: [&str; 5] = [
 /// Cloud tasks run on `ChatGPT`'s executor, which no proxy token reaches.
 const CLOUD_GATE: &str = "1315865107";
 
+const USER_SETTINGS: &str = r#"{"custom_instructions":null,"settings":{},"flags":{},"announcements":{},"eligible_announcements":[]}"#;
+const WORKSPACE_SETTINGS: &str = r#"{"beta_settings":{},"permissions":[],"admin_work_mode_enabled":false,"admin_work_local_enabled":true,"usage_limit_increase_request":{"kind":"disabled"}}"#;
+const NO_PROGRAMS: &str = r#"{"programs":[{"program":"cyber","state":"unavailable","grants":[]}]}"#;
+const NO_PLUGINS: &str = r#"{"plugins":[],"pagination":{"next_page_token":null}}"#;
+const SUBSCRIPTION: &str = r#"{"is_processor_stripe":false,"will_renew":false,"subscription_id":null,"scheduled_billing_period":null}"#;
+const AUTO_TOP_UP: &str = r#"{"is_enabled":false,"payment_method":null,"recharge_threshold":null,"recharge_target":null,"recharge_monthly_limit":null,"auto_reload_credit_discount_policy":null}"#;
+const ONBOARDED: &str = r#"{"desktop_onboarding_completed_at":"1970-01-01T00:00:00Z","role":"engineering","entrypoints":{}}"#;
+const ACKNOWLEDGED: &str = r#"{"success":true}"#;
+
+/// Reads the desktop makes for `ChatGPT` features the proxy has no part in:
+/// hosted plugins, cloud tasks, billing and referrals. The empty answer each
+/// expects keeps it from retrying them.
+pub(super) const EMPTY_READS: &[(&str, &str)] = &[
+   ("/backend-api/settings/user", USER_SETTINGS),
+   ("/backend-api/wham/settings/user", USER_SETTINGS),
+   (
+      "/backend-api/accounts/{account}/settings",
+      WORKSPACE_SETTINGS,
+   ),
+   ("/backend-api/accounts/verified_access", NO_PROGRAMS),
+   ("/backend-api/wham/onboarding/context", ONBOARDED),
+   (
+      "/backend-api/wham/tasks/list",
+      r#"{"items":[],"cursor":null}"#,
+   ),
+   ("/backend-api/pins", r#"{"items":[]}"#),
+   ("/backend-api/wham/sites/access", r#"{"enabled":false}"#),
+   ("/backend-api/plugins/featured", "[]"),
+   ("/backend-api/ps/plugins/installed", NO_PLUGINS),
+   ("/backend-api/ps/plugins/list", NO_PLUGINS),
+   (
+      "/backend-api/ps/plugin-categories/{category}/plugins",
+      NO_PLUGINS,
+   ),
+   (
+      "/backend-api/referrals/invite/eligibility",
+      r#"{"should_show":false}"#,
+   ),
+   (
+      "/backend-api/gift-credits/senders/eligibility",
+      r#"{"eligible":false}"#,
+   ),
+   ("/backend-api/subscriptions", SUBSCRIPTION),
+   (
+      "/backend-api/subscriptions/credits/discount-offer",
+      r#"{"offer":null}"#,
+   ),
+   (
+      "/backend-api/subscriptions/auto_top_up/settings",
+      AUTO_TOP_UP,
+   ),
+   (
+      "/backend-api/payments/payment_methods",
+      r#"{"payment_methods":[]}"#,
+   ),
+];
+
+/// Writes the desktop expects to land, onboarding and telemetry, which the
+/// proxy takes and drops.
+pub(super) const ACCEPTED_WRITES: &[(&str, &str)] = &[
+   ("/backend-api/wham/onboarding/desktop/complete", ONBOARDED),
+   ("/backend-api/codex/analytics-events/events", ACKNOWLEDGED),
+   ("/backend-api/wham/analytics-events/events", ACKNOWLEDGED),
+];
+
 pub fn routes() -> Router<AppState> {
-   Router::new()
+   let answer =
+      |body: &'static str| move || async move { ([(CONTENT_TYPE, "application/json")], body) };
+   let router = EMPTY_READS
+      .iter()
+      .fold(Router::new(), |router, &(path, body)| {
+         router.route(path, get(answer(body)))
+      });
+   ACCEPTED_WRITES
+      .iter()
+      .fold(router, |router, &(path, body)| {
+         router.route(path, post(answer(body)))
+      })
       .route("/backend-api/me", get(user))
       .route("/backend-api/wham/accounts/check", get(accounts_check))
       .route("/backend-api/accounts/check/{version}", get(accounts))

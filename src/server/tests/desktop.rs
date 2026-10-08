@@ -4,6 +4,7 @@ use axum::routing::get;
 use serde_json::{Value, json};
 
 use super::*;
+use crate::server::desktop::{ACCEPTED_WRITES, EMPTY_READS};
 
 fn claims(jwt: &str) -> Value {
    let payload = jwt.split('.').nth(1).unwrap();
@@ -255,4 +256,41 @@ async fn statsig_bootstrap_relays_only_the_local_feature_gates() {
    assert!(scoped["feature_gates"].get("410262010").is_none());
    assert_eq!(scoped["feature_gates"]["1315865107"]["value"], false);
    assert_eq!(reads.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn reads_of_chatgpt_only_features_answer_empty_once_quota_is_spent() {
+   let (base, db) = spawn_proxy().await;
+   spend_quota(&db).await;
+   let client = reqwest::Client::new();
+   let reads = EMPTY_READS.iter().map(|&(path, _)| (path, false));
+   let writes = ACCEPTED_WRITES.iter().map(|&(path, _)| (path, true));
+   for (path, write) in reads.chain(writes) {
+      let url = format!(
+         "{base}{}",
+         path
+            .replace("{account}", "slop-proxy")
+            .replace("{category}", "featured")
+      );
+      let request = |key: Option<&str>| {
+         let request = if write {
+            client.post(&url).json(&json!({"events": []}))
+         } else {
+            client.get(&url)
+         };
+         match key {
+            Some(key) => request.bearer_auth(key),
+            None => request,
+         }
+         .send()
+      };
+      assert_eq!(
+         request(None).await.unwrap().status(),
+         StatusCode::UNAUTHORIZED,
+         "{path}"
+      );
+      let response = request(Some("sp-test")).await.unwrap();
+      assert_eq!(response.status(), StatusCode::OK, "{path}");
+      response.json::<Value>().await.unwrap();
+   }
 }

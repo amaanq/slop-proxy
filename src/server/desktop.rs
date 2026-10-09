@@ -171,6 +171,7 @@ impl<'a> Workspace<'a> {
 #[derive(Serialize)]
 struct Membership<'a> {
    account: Workspace<'a>,
+   account_user: Seat,
    can_access_with_session: bool,
    features: [(); 0],
    entitlement: Entitlement,
@@ -181,10 +182,34 @@ impl<'a> Membership<'a> {
    fn new(auth: &'a AuthInfo) -> Self {
       Self {
          account: Workspace::new(auth),
+         account_user: Seat::default(),
          can_access_with_session: true,
          features: [],
          entitlement: Entitlement::default(),
          last_active_subscription: LastSubscription::default(),
+      }
+   }
+}
+
+/// The token's seat, a full one with no trial. The desktop reads these
+/// fields without checking the object is there, and crashes without it.
+#[derive(Serialize)]
+struct Seat {
+   is_trial: bool,
+   seat_type: &'static str,
+   trial_state: Option<()>,
+   trial_expires_at: Option<()>,
+   pending_seat_upgrade_request: bool,
+}
+
+impl Default for Seat {
+   fn default() -> Self {
+      Self {
+         is_trial: false,
+         seat_type: "default",
+         trial_state: None,
+         trial_expires_at: None,
+         pending_seat_upgrade_request: false,
       }
    }
 }

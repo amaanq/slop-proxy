@@ -144,6 +144,8 @@ async fn account_reads_name_the_owner_and_answer_once_quota_is_spent() {
    assert_eq!(accounts["account_ordering"][0], "slop-proxy");
    let member = &accounts["accounts"]["slop-proxy"];
    assert_eq!(member["account"]["name"], "alice");
+   assert_eq!(member["account_user"]["is_trial"], false);
+   assert_eq!(member["account_user"]["seat_type"], "default");
    assert!(member["entitlement"]["subscription_plan"].is_null());
 
    assert_eq!(

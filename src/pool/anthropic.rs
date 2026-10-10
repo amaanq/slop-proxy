@@ -151,6 +151,7 @@ mod tests {
             pinned_account: None,
             prefer_trusted: false,
             reserved_only: false,
+            api_key_only: false,
          })
          .await
    }

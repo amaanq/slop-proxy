@@ -11,7 +11,7 @@ pub mod zen;
 
 use crate::clock;
 use crate::db::Db;
-use crate::provider::Provider;
+use crate::provider::{AuthMode, Provider};
 use crate::translate::chat::ChatError;
 use crate::upstream::SendError;
 use axum::body::Bytes;
@@ -88,6 +88,8 @@ pub struct Route<'route> {
    pub pinned_account: Option<i64>,
    pub prefer_trusted: bool,
    pub reserved_only: bool,
+   /// Fast mode bills usage credits on a subscription, so it goes to API keys only.
+   pub api_key_only: bool,
 }
 
 impl<'route> Route<'route> {
@@ -338,7 +340,9 @@ impl<B: Backend> Pool<B> {
          if pinned.is_some_and(|id| slot.id != id) || !slot.serves(route.user) {
             continue;
          }
-         if slot.reserved != route.reserved_only {
+         if slot.reserved != route.reserved_only
+            || route.api_key_only && slot.auth_mode != AuthMode::ApiKey
+         {
             continue;
          }
          if B::TIERED
@@ -446,6 +450,13 @@ impl<B: Backend> Pool<B> {
    ) -> Result<Served<B::Response>, PoolError> {
       let ranked = self.ranked(route).await;
       if ranked.is_empty() {
+         if route.api_key_only {
+            return Err(Self::bad_request(
+               route,
+               "fast mode is served only by API-key accounts and none is available to this token"
+                  .into(),
+            ));
+         }
          if B::TIERED
             && let Some(tier) = route.explicit_tier()
          {
@@ -637,6 +648,7 @@ mod retry_tests {
          pinned_account: None,
          prefer_trusted: false,
          reserved_only: false,
+         api_key_only: false,
       }
    }
 

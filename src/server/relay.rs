@@ -31,6 +31,7 @@ pub struct Peek {
    pub model: String,
    pub upstream_model: String,
    pub effort: String,
+   pub fast: bool,
    user_id: Option<String>,
    system: Option<Box<RawValue>>,
 }
@@ -40,6 +41,7 @@ pub struct Peek {
 struct PeekBody {
    model: Option<String>,
    effort: Option<String>,
+   speed: Option<String>,
    thinking: Option<ThinkingPeek>,
    metadata: Option<MetadataPeek>,
    system: Option<Box<RawValue>>,
@@ -74,6 +76,7 @@ impl Peek {
             .or(resolved.effort)
             .or_else(|| peek.thinking?.kind)
             .unwrap_or_default(),
+         fast: peek.speed.as_deref() == Some("fast"),
          user_id: peek.metadata.and_then(|meta| meta.user_id),
          system: peek.system,
       }
@@ -283,7 +286,10 @@ pub async fn messages(
       log_error(&state, record, 403, "not_claude_code");
       return refused;
    }
-   let route = auth.route(&record.session_key, &peek.upstream_model);
+   let route = Route {
+      api_key_only: peek.fast,
+      ..auth.route(&record.session_key, &peek.upstream_model)
+   };
    let body = normalized_body(&body, &peek, provider);
    let (served, first) = dispatch(&state, route, provider, body, &headers, &peek).await;
    let limits = if provider == Provider::Anthropic && served.is_ok() {

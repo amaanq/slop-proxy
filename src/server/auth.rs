@@ -52,6 +52,7 @@ impl AuthInfo {
          pinned_account: self.limits.pinned_account,
          prefer_trusted: self.limits.prefer_trusted,
          reserved_only: self.limits.reserved_only,
+         api_key_only: false,
       }
    }
 }

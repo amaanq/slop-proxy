@@ -90,6 +90,9 @@ pub struct AccountUsage {
    /// The provider has stopped serving this account until a window resets,
    /// which is a harder signal than a high fraction.
    pub locked: bool,
+   /// Weight against the pool's largest allowance, for a provider that
+   /// reports allowances in absolute units rather than as a plan name.
+   pub capacity: Option<f64>,
    /// When this sample was taken. Codex only reports quota on a served
    /// response, so an idle account's figures go stale and a dashboard needs
    /// to know that rather than trusting them.

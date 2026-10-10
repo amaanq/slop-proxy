@@ -166,6 +166,9 @@ fn render_accounts(out: &mut String, accounts: &[AccountSnapshot], now: i64) {
 /// Measured weekly throughput puts a 20x account at 1.7-2x a 5x one, not the
 /// 4x the plan names imply.
 fn plan_capacity(snap: &AccountSnapshot) -> f64 {
+   if let Some(capacity) = snap.usage.as_ref().and_then(|usage| usage.capacity) {
+      return capacity;
+   }
    match (snap.provider, snap.plan.as_deref()) {
       (Provider::Anthropic, Some("default_claude_max_5x")) => 0.5,
       _ => 1.0,

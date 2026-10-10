@@ -15,23 +15,40 @@ impl GlmPool {
    }
 
    pub async fn poll_usage(&self) {
+      let mut polled = Vec::new();
       for slot in self.slots.list().await {
          let Ok(token) = self.slots.fresh_token(&slot, false).await else {
             continue;
          };
          match self.backend.quota(&token).await {
-            Ok(report) => {
-               let usage = AccountUsage {
-                  windows: report.limits.iter().map(window).collect(),
-                  locked: report.limits.iter().any(|limit| limit.remaining <= 0.0_f64),
-                  ..AccountUsage::default()
-               };
-               self.slots.note_usage(&slot, usage).await;
-            },
+            Ok(report) => polled.push((slot, report.limits)),
             Err(err) => tracing::debug!("usage for {}: {err}", slot.display),
          }
       }
+
+      let largest = polled
+         .iter()
+         .filter_map(|&(_, ref limits)| weekly_allowance(limits))
+         .fold(0.0_f64, f64::max);
+      for (slot, limits) in polled {
+         let usage = AccountUsage {
+            windows: limits.iter().map(window).collect(),
+            locked: limits.iter().any(|limit| limit.remaining <= 0.0_f64),
+            capacity: weekly_allowance(&limits)
+               .filter(|_| largest > 0.0_f64)
+               .map(|allowance| allowance / largest),
+            ..AccountUsage::default()
+         };
+         self.slots.note_usage(&slot, usage).await;
+      }
    }
+}
+
+fn weekly_allowance(limits: &[QuotaLimit]) -> Option<f64> {
+   limits
+      .iter()
+      .find(|limit| matches!(limit.unit, QuotaUnit::Week))
+      .map(|limit| limit.allowance)
 }
 
 fn window(limit: &QuotaLimit) -> UsageWindow {

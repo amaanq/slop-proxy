@@ -67,7 +67,7 @@ const CATALOG_TTL: i64 = 300;
 pub enum Call {
    Http { body: Bytes, headers: HeaderMap },
    Search { body: Bytes, headers: HeaderMap },
-   Get(String),
+   Backend { path: String, body: Option<Bytes> },
    WebSocket(HeaderMap),
 }
 
@@ -133,8 +133,8 @@ impl Backend for CodexClient {
             )
             .await
             .map(Reply::Http),
-         Call::Get(ref path) => self
-            .get(token, &slot.provider_account_id, path)
+         Call::Backend { ref path, ref body } => self
+            .backend(token, &slot.provider_account_id, path, body.as_ref())
             .await
             .map(Reply::Http),
          Call::WebSocket(ref headers) => {
@@ -347,13 +347,14 @@ impl Pool<CodexClient> {
          .await
    }
 
-   pub async fn get(
+   pub async fn backend(
       &self,
       route: Route<'_>,
       path: String,
+      body: Option<Bytes>,
    ) -> Result<Served<reqwest::Response>, PoolError> {
       self
-         .dispatch(route, Call::Get(path), |reply| match reply {
+         .dispatch(route, Call::Backend { path, body }, |reply| match reply {
             Reply::Http(response) => Ok(response),
             Reply::WebSocket(_) => Err(PoolError::Upstream("unexpected WebSocket reply".into())),
          })

@@ -1,6 +1,8 @@
-use std::path::PathBuf;
+use std::fs;
+use std::io::{self, Read as _};
+use std::path::{Path, PathBuf};
 
-use eyre::{Result, bail, eyre};
+use eyre::{Result, WrapErr as _, bail, eyre};
 use pound::Parse;
 
 use crate::clock;
@@ -85,6 +87,12 @@ pub enum Command {
 pub enum AccountsCommand {
    /// List stored accounts
    List,
+   /// Import the login codex keeps in auth.json, read from stdin for -
+   ImportCodex {
+      file: PathBuf,
+      #[pound(long)]
+      label: Option<String>,
+   },
    /// Store an account that authenticates with a long-lived API key
    AddKey {
       #[pound(long)]
@@ -214,6 +222,9 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
       },
       Command::Accounts { command } => match command {
          AccountsCommand::List => accounts_list(&db).await,
+         AccountsCommand::ImportCodex { file, label } => {
+            oauth::import_codex(&db, &read_input(&file)?, label).await
+         },
          AccountsCommand::AddKey {
             provider,
             key,
@@ -383,6 +394,15 @@ async fn accounts_add_key(
    }
    println!("stored {provider} account {id} ({account_id})");
    Ok(())
+}
+
+fn read_input(path: &Path) -> Result<Vec<u8>> {
+   if path == Path::new("-") {
+      let mut bytes = Vec::new();
+      io::stdin().read_to_end(&mut bytes)?;
+      return Ok(bytes);
+   }
+   fs::read(path).wrap_err_with(|| format!("reading {}", path.display()))
 }
 
 async fn accounts_list(db: &Db) -> Result<()> {

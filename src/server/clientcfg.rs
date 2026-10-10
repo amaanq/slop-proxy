@@ -1,106 +1,208 @@
-use axum::Json;
-use axum::http::{HeaderMap, Uri};
+use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::IntoResponse as _;
 use axum::response::Response;
-use serde::Serialize;
+use axum::{Extension, Json};
+use serde::{Deserialize, Serialize};
 
 use crate::clock;
-use crate::server::auth::bearer_token;
+use crate::server::AppState;
+use crate::server::auth::{AuthInfo, bearer_token};
+use crate::server::error::{Dialect, error_response};
 use crate::server::relay::header_str;
 
 /// Ten years out. Codex refreshes when it believes the grant is near expiry,
-/// and the refresh would go to `OpenAI` rather than here, so the claim is dated
-/// far enough ahead that it never fires.
+/// and the refresh goes to `OpenAI` unless `CODEX_REFRESH_TOKEN_URL_OVERRIDE`
+/// points it at [`refresh`], so the claim is dated far enough ahead that it
+/// never fires.
 const LIFETIME_SECS: i64 = 10 * 365 * 24 * 3600;
 
 const JWT_HEADER: &str = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0";
 
-const ACCOUNT_ID: &str = "slop-proxy";
+pub const ACCOUNT_ID: &str = "slop-proxy";
+
+/// Every token reads as this plan, whichever accounts serve it.
+pub const PLAN: &str = "pro";
+
+/// The user each token is to codex, so two people sharing the proxy are
+/// two users of the one workspace rather than the same login.
+pub fn user_id(token_id: i64) -> String {
+   format!("slop-proxy-token-{token_id}")
+}
 
 #[derive(Serialize)]
-struct Claims {
+struct Claims<'a> {
    #[serde(rename = "https://api.openai.com/auth")]
-   auth: AuthClaim,
-   email: &'static str,
+   auth: AuthClaim<'a>,
+   #[serde(rename = "https://api.openai.com/profile")]
+   profile: ProfileClaim<'a>,
+   sub: &'a str,
+   email: &'a str,
+   name: &'a str,
    iat: i64,
    exp: i64,
 }
 
 #[derive(Serialize)]
-struct AuthClaim {
+struct AuthClaim<'a> {
    chatgpt_account_id: &'static str,
    chatgpt_plan_type: &'static str,
+   user_id: &'a str,
+   chatgpt_user_id: &'a str,
+   chatgpt_account_user_id: &'a str,
 }
 
 #[derive(Serialize)]
-struct AuthFile<'a> {
+struct ProfileClaim<'a> {
+   email: &'a str,
+   name: &'a str,
+}
+
+/// The desktop reads its identity from the access token rather than the id
+/// token, so the access token is the same claims with the API key inside.
+#[derive(Serialize)]
+struct AccessClaims<'a> {
+   #[serde(flatten)]
+   claims: &'a Claims<'a>,
+   api_key: &'a str,
+}
+
+#[derive(Deserialize)]
+struct AccessKey {
+   api_key: String,
+}
+
+#[derive(Serialize)]
+struct AuthFile {
    #[serde(rename = "OPENAI_API_KEY")]
    openai_api_key: Option<()>,
-   tokens: Tokens<'a>,
+   tokens: Tokens,
    last_refresh: String,
 }
 
 #[derive(Serialize)]
-struct Tokens<'a> {
+struct Tokens {
    id_token: String,
-   access_token: &'a str,
-   refresh_token: &'a str,
+   access_token: String,
+   refresh_token: String,
    account_id: &'static str,
 }
 
-#[derive(Serialize)]
-struct AccountsCheck {
-   accounts: [AccountEntry; 1],
+impl Tokens {
+   /// The refresh token is the access token, so a refresh only has to find
+   /// the API key inside it to mint the pair again.
+   fn mint(token_id: i64, user: &str, api_key: &str, now: i64) -> Self {
+      let user_id = user_id(token_id);
+      let claims = Claims {
+         auth: AuthClaim {
+            chatgpt_account_id: ACCOUNT_ID,
+            chatgpt_plan_type: PLAN,
+            user_id: &user_id,
+            chatgpt_user_id: &user_id,
+            chatgpt_account_user_id: &user_id,
+         },
+         profile: ProfileClaim {
+            email: user,
+            name: user,
+         },
+         sub: &user_id,
+         email: user,
+         name: user,
+         iat: now,
+         exp: now + LIFETIME_SECS,
+      };
+      let access_token = jwt(&AccessClaims {
+         claims: &claims,
+         api_key,
+      });
+      Self {
+         id_token: jwt(&claims),
+         refresh_token: access_token.clone(),
+         access_token,
+         account_id: ACCOUNT_ID,
+      }
+   }
+}
+
+#[derive(Deserialize)]
+pub struct RefreshRequest {
+   refresh_token: String,
 }
 
 #[derive(Serialize)]
-struct AccountEntry {
-   id: &'static str,
-   workspace_backend_origin: &'static str,
-   account_routing_override: &'static str,
+struct RefreshResponse {
+   id_token: String,
+   access_token: String,
+   refresh_token: String,
 }
 
 /// Codex only asks a provider for its catalog in ChatGPT-auth mode, which
 /// reads the bearer from `auth.json` rather than `env_key`.
-pub async fn codex_auth(uri: Uri, headers: HeaderMap) -> Response {
+pub async fn codex_auth(
+   Extension(auth): Extension<AuthInfo>,
+   uri: Uri,
+   headers: HeaderMap,
+) -> Response {
    let token = bearer_token(&headers, uri.query()).expect("require_token admitted the request");
 
    let now = clock::unix_now();
-   let claims = Claims {
-      auth: AuthClaim {
-         chatgpt_account_id: ACCOUNT_ID,
-         chatgpt_plan_type: "pro",
-      },
-      email: "slop-proxy",
-      iat: now,
-      exp: now + LIFETIME_SECS,
-   };
-
    Json(AuthFile {
       openai_api_key: None,
-      tokens: Tokens {
-         id_token: jwt(&claims),
-         access_token: &token,
-         refresh_token: &token,
-         account_id: ACCOUNT_ID,
-      },
+      tokens: Tokens::mint(auth.token_id, &auth.user, &token, now),
       last_refresh: clock::rfc3339(now),
    })
    .into_response()
 }
 
-/// Codex 0.156 refuses to start a ChatGPT-auth session until this workspace
-/// discovery succeeds for the `auth.json` account id. `NO_CONSTRAINT` keeps
-/// requests on the `chatgpt_base_url` origin, which is the proxy.
-pub async fn codex_accounts() -> Response {
-   Json(AccountsCheck {
-      accounts: [AccountEntry {
-         id: ACCOUNT_ID,
-         workspace_backend_origin: "NO_CONSTRAINT",
-         account_routing_override: "NO_CONSTRAINT",
-      }],
+/// Where `CODEX_REFRESH_TOKEN_URL_OVERRIDE` sends codex, outside
+/// `require_token` since the credential rides in the body. A refresh is only
+/// as good as the API key inside it, so a revoked key stops refreshing.
+pub async fn refresh(State(state): State<AppState>, Json(req): Json<RefreshRequest>) -> Response {
+   let api_key = api_key(req.refresh_token);
+   let token = match state.db.auth_token(&api_key).await {
+      Ok(Some(token)) => token,
+      Ok(None) => {
+         return error_response(
+            Dialect::OpenAi,
+            StatusCode::UNAUTHORIZED,
+            "invalid_grant",
+            "invalid or revoked API token",
+         );
+      },
+      Err(err) => {
+         tracing::error!("token lookup failed: {err}");
+         return error_response(
+            Dialect::OpenAi,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "api_error",
+            "internal error",
+         );
+      },
+   };
+   let tokens = Tokens::mint(token.id, &token.user, &api_key, clock::unix_now());
+   Json(RefreshResponse {
+      id_token: tokens.id_token,
+      access_token: tokens.access_token,
+      refresh_token: tokens.refresh_token,
    })
    .into_response()
+}
+
+/// The API key a bearer carries: the access token [`codex_auth`] minted
+/// wraps it, anything else is taken as the key itself.
+pub fn api_key(bearer: String) -> String {
+   let Some(payload) = bearer
+      .strip_prefix(JWT_HEADER)
+      .and_then(|rest| rest.strip_prefix('.'))
+      .and_then(|rest| rest.split('.').next())
+   else {
+      return bearer;
+   };
+   data_encoding::BASE64URL_NOPAD
+      .decode(payload.as_bytes())
+      .ok()
+      .and_then(|claims| serde_json::from_slice::<AccessKey>(&claims).ok())
+      .map_or(bearer, |claims| claims.api_key)
 }
 
 /// Overriding the base url keeps `model_provider_id` as `openai`, which the

@@ -801,7 +801,12 @@ pub async fn backend_get(
       return translation_error(DIALECT, "not a backend-api path");
    };
    let route = auth.route(&auth.user, "");
-   let served = match state.pools.codex.get(route, path.to_owned()).await {
+   let served = match state
+      .pools
+      .codex
+      .backend(route, path.to_owned(), None)
+      .await
+   {
       Ok(served) => served,
       Err(err) => return pool_error_response(DIALECT, &state.cfg.models, err),
    };

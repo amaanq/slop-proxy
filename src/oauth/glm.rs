@@ -1,8 +1,7 @@
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use eyre::{Result, WrapErr as _, bail, eyre};
-use rand::RngCore as _;
+use misstep::{Result, ResultExt as _, bail, report};
 use reqwest::{RequestBuilder, Response, StatusCode};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -124,7 +123,7 @@ struct Secret {
 /// project.
 pub async fn login() -> Result<String> {
    let mut raw = [0_u8; 32];
-   rand::thread_rng().fill_bytes(&mut raw);
+   getrandom::fill(&mut raw).context("reading the OS random source")?;
    let poll_token = data_encoding::HEXLOWER.encode(&raw);
    let flow: Flow = biz(
       http()
@@ -163,7 +162,7 @@ pub async fn login() -> Result<String> {
          .bearer_auth(&poll_token)
          .send()
          .await
-         .wrap_err("oauth poll request failed")?;
+         .context("oauth poll request failed")?;
       match resp.status() {
          StatusCode::TOO_MANY_REQUESTS => continue,
          StatusCode::BAD_REQUEST => bail!("the sign-in link expired, run login again"),
@@ -200,13 +199,13 @@ pub async fn login() -> Result<String> {
       .iter()
       .find(|org| org.organization_name.contains(DEFAULT_ORG))
       .or_else(|| customer.organizations.first())
-      .ok_or_else(|| eyre!("no organizations on this account"))?;
+      .ok_or_else(|| report!("no organizations on this account"))?;
    let project = org
       .projects
       .iter()
       .find(|project| project.project_name.contains(DEFAULT_PROJECT))
       .or_else(|| org.projects.first())
-      .ok_or_else(|| eyre!("no projects in organization {}", org.organization_id))?;
+      .ok_or_else(|| report!("no projects in organization {}", org.organization_id))?;
 
    let keys = format!(
       "{BIZ_HOST}/api/biz/v1/organization/{}/projects/{}/api_keys",
@@ -243,7 +242,7 @@ where
    let resp = req
       .send()
       .await
-      .wrap_err_with(|| format!("{what} request failed"))?;
+      .with_context(|| format!("{what} request failed"))?;
    envelope(resp, what).await
 }
 
@@ -262,5 +261,5 @@ where
    }
    envelope
       .data
-      .ok_or_else(|| eyre!("{what} response carried no data"))
+      .ok_or_else(|| report!("{what} response carried no data"))
 }

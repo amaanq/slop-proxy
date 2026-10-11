@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::mpsc;
 use std::thread;
 
-use eyre::{Result, WrapErr as _};
+use misstep::{Result, ResultExt as _};
 use rusqlite::{Connection, Params, Row};
 use tokio::sync::oneshot;
 
@@ -48,8 +48,8 @@ impl Worker {
          .send(Box::new(move |conn| {
             let _ = sender.send(query(conn));
          }))
-         .map_err(|_| eyre::eyre!("database worker stopped"))?;
-      receiver.await.wrap_err("database worker stopped")?
+         .map_err(|_| misstep::report!("database worker stopped"))?;
+      receiver.await.context("database worker stopped")?
    }
 
    async fn rows<T>(
@@ -77,21 +77,21 @@ const SCHEMA: &str = include_str!("schema.sql");
 impl Db {
    pub fn open(path: &Path) -> Result<Self> {
       if let Some(dir) = path.parent() {
-         fs::create_dir_all(dir).wrap_err_with(|| format!("creating {}", dir.display()))?;
+         fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
       }
-      let conn = Connection::open(path).wrap_err_with(|| format!("opening {}", path.display()))?;
+      let conn = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
       conn.pragma_update(None, "journal_mode", "WAL")?;
       conn.pragma_update(None, "busy_timeout", 5000_i64)?;
       conn.pragma_update(None, "foreign_keys", "ON")?;
 
-      conn.execute_batch(SCHEMA).wrap_err("creating schema")?;
+      conn.execute_batch(SCHEMA).context("creating schema")?;
       // A column added to schema.sql never reaches an existing table.
       for &(table, column, ddl) in ADDED_COLUMNS {
          add_column(&conn, table, column, ddl)?;
       }
       conn
          .execute_batch(LATE_INDEXES)
-         .wrap_err("creating indexes")?;
+         .context("creating indexes")?;
 
       let reports = Connection::open(path)?;
       reports.pragma_update(None, "busy_timeout", 5000_i64)?;
@@ -165,7 +165,7 @@ fn add_column(conn: &Connection, table: &str, column: &str, ddl: &str) -> Result
             &format!("ALTER TABLE {table} ADD COLUMN {column} {ddl}"),
             [],
          )
-         .wrap_err_with(|| format!("adding {table}.{column}"))?;
+         .with_context(|| format!("adding {table}.{column}"))?;
    }
    Ok(())
 }

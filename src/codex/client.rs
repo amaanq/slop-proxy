@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
@@ -61,6 +63,9 @@ pub struct Usage {
 pub struct CodexClient {
    http: reqwest::Client,
    cfg: CodexConfig,
+   /// Every request goes to chatgpt.com, so one name-to-value map is the
+   /// whole jar. Cloudflare's clearance cookie is what it is for.
+   cookies: Mutex<BTreeMap<String, String>>,
 }
 
 /// The one field the retry strips; everything else goes back out untouched.
@@ -237,13 +242,41 @@ impl CodexClient {
 
    pub fn new(cfg: CodexConfig) -> Self {
       let http = reqwest::Client::builder()
-         .cookie_store(true)
          .connect_timeout(Duration::from_secs(30))
          .tcp_keepalive(Duration::from_secs(30))
          .user_agent(cfg.user_agent.clone())
          .build()
          .expect("building http client");
-      Self { http, cfg }
+      Self {
+         http,
+         cfg,
+         cookies: Mutex::default(),
+      }
+   }
+
+   async fn round_trip(&self, req: reqwest::RequestBuilder) -> reqwest::Result<reqwest::Response> {
+      let cookie = {
+         let jar = self.cookies.lock().expect("cookie jar lock poisoned");
+         jar.iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>()
+            .join("; ")
+      };
+      let req = if cookie.is_empty() {
+         req
+      } else {
+         req.header(header::COOKIE, cookie)
+      };
+      let resp = req.send().await?;
+      let mut jar = self.cookies.lock().expect("cookie jar lock poisoned");
+      for set in resp.headers().get_all(header::SET_COOKIE) {
+         let pair = set.to_str().ok().and_then(|text| text.split(';').next());
+         if let Some((name, value)) = pair.and_then(|pair| pair.split_once('=')) {
+            jar.insert(name.trim().to_owned(), value.trim().to_owned());
+         }
+      }
+      drop(jar);
+      Ok(resp)
    }
 
    pub fn authed(
@@ -321,8 +354,7 @@ impl CodexClient {
          .http
          .get(format!("{}/usage", self.cfg.base_url.trim_end_matches('/')));
       let resp = self
-         .authed(req, access_token, chatgpt_account_id)
-         .send()
+         .round_trip(self.authed(req, access_token, chatgpt_account_id))
          .await?;
       json(resp, Classify::STRICT).await
    }
@@ -345,8 +377,7 @@ impl CodexClient {
          ))
          .timeout(Duration::from_secs(10));
       let resp = self
-         .authed(req, access_token, chatgpt_account_id)
-         .send()
+         .round_trip(self.authed(req, access_token, chatgpt_account_id))
          .await?;
       json(resp, Classify::STRICT).await
    }
@@ -362,8 +393,11 @@ impl CodexClient {
       model: &str,
       headers: &header::HeaderMap,
    ) -> Result<reqwest::Response, SendError> {
-      let url = format!("{}/alpha/search", self.config().base_url.trim_end_matches('/'));
-      let resp = self
+      let url = format!(
+         "{}/alpha/search",
+         self.config().base_url.trim_end_matches('/')
+      );
+      let request = self
          .http
          .post(url)
          .headers(self.responses_headers(
@@ -374,9 +408,8 @@ impl CodexClient {
             headers,
          )?)
          .header(header::CONTENT_TYPE, "application/json")
-         .body(req.clone())
-         .send()
-         .await?;
+         .body(req.clone());
+      let resp = self.round_trip(request).await?;
       classify(resp, RULES).await
    }
 
@@ -391,8 +424,7 @@ impl CodexClient {
       let root = base.strip_suffix("/codex").unwrap_or(base);
       let req = self.http.get(format!("{root}{path}"));
       let resp = self
-         .authed(req, access_token, chatgpt_account_id)
-         .send()
+         .round_trip(self.authed(req, access_token, chatgpt_account_id))
          .await?;
       classify(resp, RULES).await
    }
@@ -418,9 +450,8 @@ impl CodexClient {
          )?)
          .header("Accept", "text/event-stream")
          .header(header::CONTENT_TYPE, "application/json")
-         .body(req.clone())
-         .send();
-      let resp = timeout(RESPONSE_HEADERS_TIMEOUT, request)
+         .body(req.clone());
+      let resp = timeout(RESPONSE_HEADERS_TIMEOUT, self.round_trip(request))
          .await
          .map_err(|_| SendError::Network("timed out waiting for responses headers".into()))??;
       let resp = classify(resp, RULES).await?;

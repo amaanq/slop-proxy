@@ -29,20 +29,33 @@ mod translate;
 mod upstream;
 mod zen;
 
-use eyre::Result;
+use std::env;
+
+use misstep::Result;
 use pound::Parse as _;
+use tracing::Level;
+use tracing_subscriber::filter::Targets;
+use tracing_subscriber::fmt;
+use tracing_subscriber::layer::SubscriberExt as _;
+use tracing_subscriber::util::SubscriberInitExt as _;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-   color_eyre::install()?;
+   misstep::install_panic_hook();
    let args = cli::Cli::parse();
 
-   tracing_subscriber::fmt()
-      .with_env_filter(
-         tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            format!("slop_proxy={}", if args.verbose { "debug" } else { "info" }).into()
-         }),
-      )
+   let level = if args.verbose {
+      Level::DEBUG
+   } else {
+      Level::INFO
+   };
+   let filter = env::var("RUST_LOG")
+      .ok()
+      .and_then(|directives| directives.parse::<Targets>().ok())
+      .unwrap_or_else(|| Targets::new().with_target("slop_proxy", level));
+   tracing_subscriber::registry()
+      .with(fmt::layer())
+      .with(filter)
       .init();
 
    let cfg = config::Config::load(&args)?;

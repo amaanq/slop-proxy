@@ -68,7 +68,7 @@ impl FromStr for Provider {
 }
 
 /// How an account proves itself.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, pound::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AuthMode {
    #[default]
    OAuth,

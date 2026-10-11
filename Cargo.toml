@@ -10,25 +10,23 @@ publish     = false
 
 [dependencies]
 axum = { features = [ "ws" ], version = "0.8" }
-color-eyre = "0.6.5"
 data-encoding = "2"
-eventsource-stream = "0.2"
-eyre = "0.6.14"
-futures-util = "0.3"
+futures-util = { default-features = false, features = [ "sink", "std" ], version = "0.3" }
+getrandom = "0.4"
 hmac-sha256 = "1"
+idna_adapter = "=1.0.0"
 image-webp = "0.2"
 ipnet = { features = [ "serde" ], version = "2" }
 jiff = { default-features = false, features = [ "std" ], version = "0.2" }
+misstep = { features = [ "panic-hook", "pretty" ], version = "0.3" }
 png = "0.18"
-pound = "0.1.6"
-rand = "0.8"
+pound = "0.3"
 reqwest = {
 	default-features = false,
 	features = [
 		"rustls-tls",
 		"stream",
 		"json",
-		"cookies",
 		"gzip",
 	],
 	version = "0.12",
@@ -49,10 +47,19 @@ tokio = {
 	],
 	version = "1",
 }
-toml = "0.8"
 tokio-tungstenite = { features = [ "rustls-tls-webpki-roots" ], version = "0.29" }
+toml = { default-features = false, features = [ "parse", "serde", "std" ], version = "1" }
 tracing = "0.1"
-tracing-subscriber = { features = [ "env-filter" ], version = "0.3" }
+tracing-subscriber = {
+	default-features = false,
+	features = [
+		"ansi",
+		"fmt",
+		"registry",
+		"std",
+	],
+	version = "0.3",
+}
 uuid = { features = [ "v4" ], version = "1" }
 
 [profile.dev]

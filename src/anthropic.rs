@@ -202,7 +202,7 @@ pub struct AnthropicClient {
 }
 
 impl AnthropicClient {
-   pub fn new(cfg: AnthropicConfig) -> eyre::Result<Self> {
+   pub fn new(cfg: AnthropicConfig) -> misstep::Result<Self> {
       let proxied = !cfg.egress.proxy_urls.is_empty() || cfg.egress.proxy_urls_file.is_some();
       Ok(Self {
          direct: Egresses::new(&EgressConfig::default(), "anthropic", None)?,

@@ -57,7 +57,7 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
    ([(CONTENT_TYPE, "text/plain; version=0.0.4")], text).into_response()
 }
 
-fn emit<T, F>(out: &mut String, what: &str, rows: eyre::Result<Vec<T>>, render: F)
+fn emit<T, F>(out: &mut String, what: &str, rows: misstep::Result<Vec<T>>, render: F)
 where
    F: FnOnce(&mut String, &[T]),
 {

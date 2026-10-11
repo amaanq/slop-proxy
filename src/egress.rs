@@ -9,7 +9,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
 use ipnet::Ipv6Net;
-use rand::Rng as _;
+use misstep::ResultExt as _;
 
 use crate::clock;
 use crate::config::EgressConfig;
@@ -64,7 +64,7 @@ impl Egresses {
       cfg: &EgressConfig,
       label: &'static str,
       user_agent: Option<&str>,
-   ) -> eyre::Result<Self> {
+   ) -> misstep::Result<Self> {
       let egresses = Self {
          entries: RwLock::new(Arc::new([])),
          next: AtomicUsize::new(0),
@@ -73,7 +73,7 @@ impl Egresses {
       };
       let proxy_urls = cfg.urls()?;
       if !cfg.source_prefixes.is_empty() {
-         eyre::ensure!(
+         misstep::ensure!(
             proxy_urls.is_empty() && cfg.proxy_urls_file.is_none(),
             "{label} sets both proxies and a source prefix"
          );
@@ -92,7 +92,7 @@ impl Egresses {
       Ok(egresses)
    }
 
-   fn built(&self, route: Route, index: usize) -> eyre::Result<Egress> {
+   fn built(&self, route: Route, index: usize) -> misstep::Result<Egress> {
       let http = self.build(&route, index)?;
       Ok(Egress {
          http: OnceLock::from(http),
@@ -111,7 +111,7 @@ impl Egresses {
          .clone()
    }
 
-   fn build(&self, route: &Route, index: usize) -> eyre::Result<reqwest::Client> {
+   fn build(&self, route: &Route, index: usize) -> misstep::Result<reqwest::Client> {
       let label = self.label;
       let mut builder = reqwest::Client::builder()
          .connect_timeout(Duration::from_secs(30))
@@ -122,8 +122,9 @@ impl Egresses {
       match *route {
          Route::Direct => {},
          Route::Proxy(ref proxy_url) => {
-            let proxy = reqwest::Proxy::all(proxy_url)
-               .map_err(|_| eyre::eyre!("invalid {label} proxy URL at position {}", index + 1))?;
+            let proxy = reqwest::Proxy::all(proxy_url).map_err(|_| {
+               misstep::report!("invalid {label} proxy URL at position {}", index + 1)
+            })?;
             builder = builder.proxy(proxy);
          },
          Route::Source(address) => {
@@ -134,10 +135,10 @@ impl Egresses {
       }
       builder
          .build()
-         .map_err(|_| eyre::eyre!("building {label} HTTP client"))
+         .map_err(|_| misstep::report!("building {label} HTTP client"))
    }
 
-   pub fn replace(&self, proxy_urls: &[String]) -> eyre::Result<()> {
+   pub fn replace(&self, proxy_urls: &[String]) -> misstep::Result<()> {
       let current = self.snapshot();
       let mut added = 0_usize;
       let entries = proxy_urls
@@ -153,7 +154,7 @@ impl Egresses {
             added += 1;
             self.built(Route::Proxy(url.clone()), index).map(Arc::new)
          })
-         .collect::<eyre::Result<Arc<[_]>>>()?;
+         .collect::<misstep::Result<Arc<[_]>>>()?;
       let dropped = current.len() + added - entries.len();
       if added > 0 || dropped > 0 {
          tracing::info!(
@@ -351,22 +352,23 @@ impl Egresses {
 
 /// Interleaved by prefix, so the attempts of one request land in different
 /// allowances rather than walking a run of addresses from the same one.
-fn source_addresses(prefixes: &[Ipv6Net]) -> eyre::Result<Vec<Ipv6Addr>> {
+fn source_addresses(prefixes: &[Ipv6Net]) -> misstep::Result<Vec<Ipv6Addr>> {
    for prefix in prefixes {
-      eyre::ensure!(
+      misstep::ensure!(
          (32..=120).contains(&prefix.prefix_len()),
          "source prefix {prefix} must be between /32 and /120"
       );
    }
-   let mut rng = rand::thread_rng();
    let rounds = SOURCE_EGRESSES / prefixes.len();
-   Ok((0..rounds)
+   (0..rounds)
       .flat_map(|_| prefixes)
       .map(|prefix| {
-         let host = rng.r#gen::<u128>() & (u128::MAX >> prefix.prefix_len());
-         Ipv6Addr::from(u128::from(prefix.network()) | host.max(1))
+         let mut bytes = [0_u8; 16];
+         getrandom::fill(&mut bytes).context("reading the OS random source")?;
+         let host = u128::from_le_bytes(bytes) & (u128::MAX >> prefix.prefix_len());
+         Ok(Ipv6Addr::from(u128::from(prefix.network()) | host.max(1)))
       })
-      .collect())
+      .collect()
 }
 
 impl Egress {

@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashSet};
 use std::convert::Infallible;
+use std::pin::pin;
 use std::time::Instant;
 
 use axum::body::Bytes;
@@ -9,7 +10,6 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, Uri};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse as _, Response};
 use axum::{Extension, Json};
-use eventsource_stream::Eventsource as _;
 use futures_util::{StreamExt as _, stream};
 use serde::Deserialize;
 use serde_json::value::RawValue;
@@ -18,6 +18,7 @@ use serde_json::{Map, Value};
 use crate::anthropic::{Catalog, Model};
 use crate::clock::{rfc3339, unix_now};
 use crate::codex::models::with_zen_entries;
+use crate::codex::sse;
 use crate::codex::types::{
    ContentPart, InputItem, OutputItem, ResponseObj, ResponsesEvent, ResponsesRequest,
 };
@@ -959,7 +960,7 @@ async fn raw_response(
 ) -> Response {
    // Upstream only streams; recover the final response object from the
    // terminal event for non-streaming clients.
-   let mut raw_events = resp.bytes_stream().eventsource();
+   let mut raw_events = pin!(sse::events(resp.bytes_stream()));
    let mut final_response = Option::<Box<RawValue>>::None;
    while let Some(event) = raw_events.next().await {
       let Ok(event) = event else { break };
@@ -1096,9 +1097,7 @@ fn relay_stream(resp: reqwest::Response, guard: LogGuard, capture: UsageCapture)
    let eof = capture.clone();
    // Never reached if the caller went away first.
    let ended = stream::once(async move { eof.note_upstream_eof() }).filter_map(|()| async { None });
-   let stream = resp
-      .bytes_stream()
-      .eventsource()
+   let stream = sse::events(resp.bytes_stream())
       .filter_map(move |event| {
          let _ = &guard;
          let capture = capture.clone();

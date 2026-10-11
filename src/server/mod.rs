@@ -24,8 +24,8 @@ use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::middleware;
 use axum::routing::{get, post};
-use eyre::Result;
-use eyre::WrapErr as _;
+use misstep::Result;
+use misstep::ResultExt as _;
 use tokio::net::TcpListener;
 use tokio::{signal, time};
 
@@ -115,7 +115,7 @@ pub async fn serve(db: Db, cfg: Config, bind: &str) -> Result<()> {
       let mstate = state.clone();
       let listener = TcpListener::bind(&mbind)
          .await
-         .wrap_err_with(|| format!("binding metrics listener {mbind}"))?;
+         .with_context(|| format!("binding metrics listener {mbind}"))?;
       tracing::info!("metrics on http://{mbind}/metrics");
       tokio::spawn(async move {
          let app = Router::new()
@@ -130,7 +130,7 @@ pub async fn serve(db: Db, cfg: Config, bind: &str) -> Result<()> {
 
    let listener = TcpListener::bind(bind)
       .await
-      .wrap_err_with(|| format!("binding {bind}"))?;
+      .with_context(|| format!("binding {bind}"))?;
    tracing::info!("listening on http://{bind}");
    axum::serve(listener, app)
       .with_graceful_shutdown(async {

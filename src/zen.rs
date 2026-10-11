@@ -7,8 +7,6 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use axum::body::Bytes;
-use rand::distributions::Alphanumeric;
-use rand::{Rng as _, thread_rng};
 use reqwest::header::CONTENT_TYPE;
 
 use crate::clock::{unix_now, unix_now_ms};
@@ -45,8 +43,8 @@ pub struct ZenModel {
 }
 
 impl ZenClient {
-   pub fn new(cfg: ZenConfig) -> eyre::Result<Self> {
-      eyre::ensure!(!cfg.base_urls.is_empty(), "zen needs at least one base url");
+   pub fn new(cfg: ZenConfig) -> misstep::Result<Self> {
+      misstep::ensure!(!cfg.base_urls.is_empty(), "zen needs at least one base url");
       let hosts = cfg
          .base_urls
          .into_iter()
@@ -57,7 +55,7 @@ impl ZenClient {
                drained_until: AtomicI64::new(0),
             })
          })
-         .collect::<eyre::Result<_>>()?;
+         .collect::<misstep::Result<_>>()?;
       Ok(Self {
          hosts,
          models_dev_url: cfg.models_dev_url,
@@ -194,12 +192,15 @@ async fn fetch_context_windows(url: &str) -> reqwest::Result<HashMap<String, i64
 }
 
 fn request_id() -> String {
-   let counter = thread_rng().gen_range(1..=0xfff_i64);
+   const ALPHANUMERIC: &[u8; 62] =
+      b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+   let mut bytes = [0_u8; 16];
+   getrandom::fill(&mut bytes).expect("the OS random source is readable");
+   let counter = i64::from(u16::from_le_bytes([bytes[0], bytes[1]]) % 0xfff) + 1;
    let timestamp = (unix_now_ms().saturating_mul(0x1000) + counter) & 0xffff_ffff_ffff;
-   let random = thread_rng()
-      .sample_iter(Alphanumeric)
-      .take(14)
-      .map(char::from)
+   let random = bytes[2..]
+      .iter()
+      .map(|&byte| char::from(ALPHANUMERIC[usize::from(byte) % ALPHANUMERIC.len()]))
       .collect::<String>();
    format!("msg_{timestamp:012x}{random}")
 }

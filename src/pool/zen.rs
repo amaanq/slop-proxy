@@ -2,7 +2,6 @@ use std::mem;
 use std::sync::LazyLock;
 
 use axum::body::Bytes;
-use rand::{Rng as _, thread_rng};
 use serde_json::value::RawValue;
 
 use crate::clock::unix_now_ms;
@@ -151,7 +150,7 @@ fn session(route: Route<'_>) -> String {
 }
 
 fn session_prefix() -> String {
-   let counter = thread_rng().gen_range(1..=0xfff_i64);
+   let counter = i64::from(getrandom::u32().expect("the OS random source is readable") % 0xfff) + 1;
    let timestamp = !(unix_now_ms().saturating_mul(0x1000) + counter) & ID_TIME_MASK;
    format!("{timestamp:012x}")
 }

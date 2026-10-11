@@ -19,12 +19,25 @@ use crate::upstream::{Classify, IdList, SendError, classify, json};
 const CONTEXT_REFRESH_SECS: i64 = 12 * 60 * 60;
 
 pub struct ZenClient {
-   base_url: String,
+   hosts: Vec<Host>,
    models_dev_url: String,
-   egresses: Egresses,
    context_windows: RwLock<Arc<HashMap<String, i64>>>,
    context_fetched_at: AtomicI64,
 }
+
+/// Each host keeps its own free-tier allowance per source address, so each
+/// gets its own egresses and their own record of which are throttled.
+struct Host {
+   base_url: String,
+   egresses: Egresses,
+   /// Throttled on every address a request tried, so later anonymous
+   /// requests skip it rather than spend their attempts rediscovering that.
+   drained_until: AtomicI64,
+}
+
+/// A walk that runs out reports a one second retry while untried addresses
+/// remain, too short to be worth skipping the host for.
+const DRAINED_SECS: i64 = 60;
 
 pub struct ZenModel {
    pub id: String,
@@ -33,22 +46,28 @@ pub struct ZenModel {
 
 impl ZenClient {
    pub fn new(cfg: ZenConfig) -> eyre::Result<Self> {
-      let egresses = Egresses::new(&cfg.egress, "zen", Some(&cfg.user_agent))?;
+      eyre::ensure!(!cfg.base_urls.is_empty(), "zen needs at least one base url");
+      let hosts = cfg
+         .base_urls
+         .into_iter()
+         .map(|base_url| {
+            Ok(Host {
+               base_url: base_url.trim_end_matches('/').to_owned(),
+               egresses: Egresses::new(&cfg.egress, "zen", Some(&cfg.user_agent))?,
+               drained_until: AtomicI64::new(0),
+            })
+         })
+         .collect::<eyre::Result<_>>()?;
       Ok(Self {
-         base_url: cfg.base_url,
+         hosts,
          models_dev_url: cfg.models_dev_url,
-         egresses,
          context_windows: RwLock::default(),
          context_fetched_at: AtomicI64::new(0),
       })
    }
 
-   pub const fn egresses(&self) -> &Egresses {
-      &self.egresses
-   }
-
-   fn base_url(&self) -> &str {
-      self.base_url.trim_end_matches('/')
+   pub fn egresses(&self) -> impl Iterator<Item = &Egresses> {
+      self.hosts.iter().map(|host| &host.egresses)
    }
 
    /// The free contributor models answer without any credential at all, so
@@ -63,39 +82,59 @@ impl ZenClient {
       let key = key.filter(|key| !key.is_empty());
       let request_id = request_id();
       let request_id = request_id.as_str();
-      let attempt = move |http: reqwest::Client| async move {
-         let mut builder = http
-            .post(format!("{}{path}", self.base_url()))
-            .header("Accept", "*/*")
-            .header("x-opencode-session", session)
-            .header("x-opencode-request", request_id)
-            .header("x-opencode-client", "cli")
-            .header("x-opencode-project", "global");
-         builder = match key {
-            Some(key) => builder.bearer_auth(key),
-            None => builder.header("x-api-key", "public"),
-         };
-         if path.ends_with("/messages") {
-            builder = builder.header("anthropic-version", "2023-06-01");
+      let now = unix_now();
+      let last = self.hosts.len() - 1;
+      let mut outcome = Err(SendError::Network("no zen hosts".into()));
+      for (index, host) in self.hosts.iter().enumerate() {
+         if key.is_none() && index < last && host.drained_until.load(Ordering::Relaxed) > now {
+            continue;
          }
-         let response = builder
-            .header(CONTENT_TYPE, "application/json")
-            .body(req.clone())
-            .send()
-            .await?;
-         classify(response, Classify::STRICT).await
-      };
-      if key.is_some() {
-         self.egresses.send(attempt).await
-      } else {
-         self.egresses.send_anonymous(attempt).await
+         let url = format!("{}{path}", host.base_url);
+         let url = url.as_str();
+         let attempt = move |http: reqwest::Client| async move {
+            let mut builder = http
+               .post(url)
+               .header("Accept", "*/*")
+               .header("x-opencode-session", session)
+               .header("x-opencode-request", request_id)
+               .header("x-opencode-client", "cli")
+               .header("x-opencode-project", "global");
+            builder = match key {
+               Some(key) => builder.bearer_auth(key),
+               None => builder.header("x-api-key", "public"),
+            };
+            if path.ends_with("/messages") {
+               builder = builder.header("anthropic-version", "2023-06-01");
+            }
+            let response = builder
+               .header(CONTENT_TYPE, "application/json")
+               .body(req.clone())
+               .send()
+               .await?;
+            classify(response, Classify::STRICT).await
+         };
+         outcome = if key.is_some() {
+            host.egresses.send(attempt).await
+         } else {
+            host.egresses.send_anonymous(attempt).await
+         };
+         let Err(SendError::RateLimited { retry_after, .. }) = outcome else {
+            break;
+         };
+         if key.is_none() {
+            let until = now + retry_after.unwrap_or(0).max(DRAINED_SECS);
+            host.drained_until.store(until, Ordering::Relaxed);
+         }
       }
+      outcome
    }
 
    pub async fn models(&self) -> Result<Vec<ZenModel>, SendError> {
-      let response = self
+      let host = &self.hosts[0];
+      let url = format!("{}/models", host.base_url);
+      let response = host
          .egresses
-         .send_anonymous(|http| http.get(format!("{}/models", self.base_url())).send())
+         .send_anonymous(|http| http.get(url.as_str()).send())
          .await?;
       let listing: IdList = json(response, Classify::STRICT).await?;
       let windows = self.context_windows().await;
@@ -228,7 +267,7 @@ mod tests {
       let (first_url, first_requests) = spawn_proxy(StatusCode::OK).await;
       let (second_url, second_requests) = spawn_proxy(StatusCode::OK).await;
       let client = ZenClient::new(ZenConfig {
-         base_url: "http://zen.invalid/v1".into(),
+         base_urls: vec!["http://zen.invalid/v1".into()],
          models_dev_url: "http://models.invalid".into(),
          user_agent: "opencode/1.18.31".into(),
          egress: EgressConfig {
@@ -270,7 +309,7 @@ mod tests {
       let (limited_url, limited_requests) = spawn_proxy(StatusCode::TOO_MANY_REQUESTS).await;
       let (working_url, working_requests) = spawn_proxy(StatusCode::OK).await;
       let client = ZenClient::new(ZenConfig {
-         base_url: "http://zen.invalid/v1".into(),
+         base_urls: vec!["http://zen.invalid/v1".into()],
          models_dev_url: "http://models.invalid".into(),
          user_agent: "opencode/1.18.31".into(),
          egress: EgressConfig {
@@ -335,7 +374,7 @@ mod tests {
          proxies.push(spawn_proxy(StatusCode::TOO_MANY_REQUESTS).await);
       }
       let client = ZenClient::new(ZenConfig {
-         base_url: "http://zen.invalid/v1".into(),
+         base_urls: vec!["http://zen.invalid/v1".into()],
          models_dev_url: "http://models.invalid".into(),
          user_agent: "opencode/1.18.31".into(),
          egress: EgressConfig {

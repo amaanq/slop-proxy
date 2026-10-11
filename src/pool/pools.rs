@@ -163,14 +163,21 @@ impl Pools {
       let egresses = [
          (&cfg.anthropic.egress, self.anthropic.backend.proxied()),
          (&cfg.gemini.egress, Some(self.gemini.backend.egresses())),
-         (&cfg.zen.egress, Some(self.zen.backend.egresses())),
          (&cfg.glm.egress, Some(self.glm.backend.egresses())),
          (&cfg.deepseek.egress, Some(self.deepseek.backend.egresses())),
          (
             &cfg.experiential.egress,
             Some(self.experiential.backend.egresses()),
          ),
-      ];
+      ]
+      .into_iter()
+      .chain(
+         self
+            .zen
+            .backend
+            .egresses()
+            .map(|target| (&cfg.zen.egress, Some(target))),
+      );
       for (egress_cfg, target) in egresses {
          let Some(target) = target.filter(|_| egress_cfg.proxy_urls_file.is_some()) else {
             continue;

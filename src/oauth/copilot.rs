@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use eyre::{Result, WrapErr as _, bail};
+use misstep::{Result, ResultExt as _, bail};
 use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
 
@@ -64,10 +64,10 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
       })
       .send()
       .await
-      .wrap_err("requesting device code")?
+      .context("requesting device code")?
       .json()
       .await
-      .wrap_err("parsing device code response")?;
+      .context("parsing device code response")?;
    println!(
       "To authorize, open this URL in a browser:\n\n    {}\n\nand enter this code:\n\n    {}\n",
       code.verification_uri, code.user_code
@@ -91,10 +91,10 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
          })
          .send()
          .await
-         .wrap_err("polling device authorization")?
+         .context("polling device authorization")?
          .json()
          .await
-         .wrap_err("parsing device token response")?;
+         .context("parsing device token response")?;
       if let Some(token) = grant.access_token {
          break token;
       }
@@ -135,7 +135,7 @@ pub async fn github_login(github_token: &str) -> Result<String> {
       .header("user-agent", USER_AGENT)
       .send()
       .await
-      .wrap_err("reading github user")?;
+      .context("reading github user")?;
    Ok(ok_json::<GithubUser>(resp, "reading github user")
       .await?
       .login)

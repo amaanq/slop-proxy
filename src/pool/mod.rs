@@ -232,7 +232,7 @@ impl<B: Backend> Pool<B> {
          .collect()
    }
 
-   pub async fn load(db: Db, backend: B) -> eyre::Result<Self> {
+   pub async fn load(db: Db, backend: B) -> misstep::Result<Self> {
       Ok(Self {
          slots: Slots::load(db, B::PROVIDER).await?,
          backend,
@@ -426,7 +426,9 @@ impl<B: Backend> Pool<B> {
          }
          let wait = Duration::from_secs(self.slots.min_cooldown().await.max(1) as u64)
             .min(left)
-            .saturating_add(Duration::from_millis(rand::random::<u64>() % 1500));
+            .saturating_add(Duration::from_millis(
+               getrandom::u64().expect("the OS random source is readable") % 1500,
+            ));
          tracing::info!(
              provider = %B::PROVIDER,
              wait_ms = wait.as_millis() as u64,

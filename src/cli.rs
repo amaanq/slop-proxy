@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use eyre::{Result, bail, eyre};
+use misstep::{Result, bail, report};
 use pound::Parse;
 
 use crate::clock;
@@ -431,7 +431,7 @@ async fn accounts_list(db: &Db) -> Result<()> {
 async fn lookup(db: &Db, key: &str) -> Result<Account> {
    db.find_account(key)
       .await?
-      .ok_or_else(|| eyre!("no account matched {key:?}"))
+      .ok_or_else(|| report!("no account matched {key:?}"))
 }
 
 async fn accounts_toggle(
@@ -520,7 +520,7 @@ fn token_limits(
       .filter(|csv| !csv.trim().is_empty())
       .map(|raw| {
          raw.split(',')
-            .map(|part| part.parse::<Provider>().map_err(eyre::Report::msg))
+            .map(|part| part.parse::<Provider>().map_err(misstep::Report::msg))
             .collect::<Result<Vec<_>>>()
       })
       .transpose()?
@@ -549,7 +549,7 @@ async fn token_usage(db: &Db, token: &str) -> Result<()> {
    let usage = db
       .token_meter(token)
       .await?
-      .ok_or_else(|| eyre!("no token matched {token:?}"))?;
+      .ok_or_else(|| report!("no token matched {token:?}"))?;
    println!("{}", serde_json::to_string_pretty(&usage)?);
    Ok(())
 }

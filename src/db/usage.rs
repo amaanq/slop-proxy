@@ -1,6 +1,6 @@
 use std::result::Result as StdResult;
 
-use eyre::Result;
+use misstep::Result;
 use rusqlite::{OptionalExtension as _, Row, TransactionBehavior, params};
 use serde::Serialize;
 
@@ -195,7 +195,7 @@ impl Db {
                tracing::error!("writing usage log failed {err}");
             }
          }))
-         .map_err(|_| eyre::eyre!("database worker stopped"))
+         .map_err(|_| misstep::report!("database worker stopped"))
    }
 
    /// Admission is persisted before upstream dispatch inside an IMMEDIATE

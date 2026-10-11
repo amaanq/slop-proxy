@@ -20,7 +20,7 @@ pub struct DeepSeekClient {
 }
 
 impl DeepSeekClient {
-   pub fn new(cfg: RelayConfig) -> eyre::Result<Self> {
+   pub fn new(cfg: RelayConfig) -> misstep::Result<Self> {
       let egresses = Egresses::new(&cfg.egress, "deepseek", None)?;
       Ok(Self { egresses, cfg })
    }

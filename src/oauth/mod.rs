@@ -7,7 +7,7 @@ pub mod refresh;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
-use eyre::{Result, WrapErr as _, bail, eyre};
+use misstep::{Result, ResultExt as _, bail, report};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use tokio::time;
@@ -88,7 +88,7 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
       })
       .send()
       .await
-      .wrap_err("requesting device user code")?;
+      .context("requesting device user code")?;
    if resp.status() == reqwest::StatusCode::NOT_FOUND {
       bail!(
          "device login is not enabled for this account. A workspace admin must enable Codex device auth."
@@ -113,13 +113,13 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
          })
          .send()
          .await
-         .wrap_err("polling device token")?;
+         .context("polling device token")?;
       match poll.status().as_u16() {
          200 => {
             break poll
                .json::<DeviceTokenResp>()
                .await
-               .wrap_err("parsing device token response")?;
+               .context("parsing device token response")?;
          },
          // 403/404 mean the user has not finished authorizing yet.
          403 | 404 => {},
@@ -145,19 +145,19 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
       ])
       .send()
       .await
-      .wrap_err("token exchange request failed")?;
+      .context("token exchange request failed")?;
    let tokens = ok_json::<TokenResponse>(token_resp, "token exchange")
       .await?
       .into_token_set(None)
-      .ok_or_else(|| eyre!("no refresh_token in token response"))?;
+      .ok_or_else(|| report!("no refresh_token in token response"))?;
    let id_token = tokens
       .id_token
       .as_deref()
-      .ok_or_else(|| eyre!("no id_token in token response"))?;
+      .ok_or_else(|| report!("no id_token in token response"))?;
    let info = jwt::parse_id_token(id_token)?;
    let account_id = info
       .chatgpt_account_id
-      .ok_or_else(|| eyre!("id_token has no chatgpt account id"))?;
+      .ok_or_else(|| report!("id_token has no chatgpt account id"))?;
 
    finish_login(
       db,
@@ -183,7 +183,7 @@ where
    resp
       .json()
       .await
-      .wrap_err_with(|| format!("parsing {what} response"))
+      .with_context(|| format!("parsing {what} response"))
 }
 
 async fn finish_login(

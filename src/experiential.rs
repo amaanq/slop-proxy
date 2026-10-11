@@ -14,7 +14,7 @@ pub struct ExperientialClient {
 }
 
 impl ExperientialClient {
-   pub fn new(cfg: RelayConfig) -> eyre::Result<Self> {
+   pub fn new(cfg: RelayConfig) -> misstep::Result<Self> {
       let egresses = Egresses::new(&cfg.egress, "experiential", None)?;
       Ok(Self { egresses, cfg })
    }

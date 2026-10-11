@@ -3,8 +3,8 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
-use eyre::{Result, WrapErr as _};
 use ipnet::Ipv6Net;
+use misstep::{Result, ResultExt as _};
 
 use crate::cli::Cli;
 use crate::provider::Provider;
@@ -105,7 +105,7 @@ impl EgressConfig {
       let mut urls = self.proxy_urls.clone();
       if let Some(path) = self.proxy_urls_file.as_ref() {
          let contents = fs::read_to_string(path)
-            .wrap_err_with(|| format!("reading proxy list {}", path.display()))?;
+            .with_context(|| format!("reading proxy list {}", path.display()))?;
          urls.extend(
             contents
                .lines()
@@ -422,9 +422,9 @@ impl Config {
 
       let mut cfg = if config_path.exists() {
          let raw = fs::read_to_string(&config_path)
-            .wrap_err_with(|| format!("reading {}", config_path.display()))?;
+            .with_context(|| format!("reading {}", config_path.display()))?;
          toml::from_str::<Self>(&raw)
-            .wrap_err_with(|| format!("parsing {}", config_path.display()))?
+            .with_context(|| format!("parsing {}", config_path.display()))?
       } else {
          Self::default()
       };

@@ -1,7 +1,6 @@
 use std::io;
 
-use eyre::{Result, WrapErr as _, bail, eyre};
-use rand::RngCore as _;
+use misstep::{Result, ResultExt as _, bail, report};
 use reqwest::Url;
 use serde::Deserialize;
 
@@ -29,7 +28,7 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
    }
 
    let mut raw = [0_u8; 32];
-   rand::thread_rng().fill_bytes(&mut raw);
+   getrandom::fill(&mut raw).context("reading the OS random source")?;
    let verifier = data_encoding::BASE64URL_NOPAD.encode(&raw);
    let challenge =
       data_encoding::BASE64URL_NOPAD.encode(&hmac_sha256::Hash::hash(verifier.as_bytes()));
@@ -50,7 +49,7 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
    let mut line = String::new();
    io::stdin()
       .read_line(&mut line)
-      .wrap_err("reading authorization code")?;
+      .context("reading authorization code")?;
    let pasted = line.trim();
    if pasted.is_empty() {
       bail!("no authorization code provided");
@@ -74,18 +73,18 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
       })
       .send()
       .await
-      .wrap_err("token exchange request failed")?;
+      .context("token exchange request failed")?;
    let mut parsed: TokenResponse = ok_json(resp, "token exchange").await?;
 
    let account = parsed.account.take().unwrap_or_default();
    let account_id = account
       .uuid
-      .ok_or_else(|| eyre!("token response has no account uuid"))?;
+      .ok_or_else(|| report!("token response has no account uuid"))?;
    let email = account.email_address;
    let plan = subscription_tier(&parsed.access_token).await;
    let tokens = parsed
       .into_token_set(None)
-      .ok_or_else(|| eyre!("no refresh_token in token response"))?;
+      .ok_or_else(|| report!("no refresh_token in token response"))?;
 
    finish_login(
       db,

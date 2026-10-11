@@ -32,7 +32,7 @@ pub struct GeminiResponse {
 }
 
 impl GeminiClient {
-   pub fn new(cfg: GeminiConfig) -> eyre::Result<Self> {
+   pub fn new(cfg: GeminiConfig) -> misstep::Result<Self> {
       let egresses = Egresses::new(&cfg.egress, "gemini", None)?;
       Ok(Self { egresses, cfg })
    }

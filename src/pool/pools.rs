@@ -105,7 +105,7 @@ pub struct Catalogs {
 }
 
 impl Pools {
-   pub async fn load(db: &Db, cfg: &Config) -> eyre::Result<Self> {
+   pub async fn load(db: &Db, cfg: &Config) -> misstep::Result<Self> {
       let codex = CodexPool::load(db.clone(), CodexClient::new(cfg.codex.clone())).await?;
       let anthropic =
          AnthropicPool::load(db.clone(), AnthropicClient::new(cfg.anthropic.clone())?).await?;

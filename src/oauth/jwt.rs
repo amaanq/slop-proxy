@@ -1,4 +1,4 @@
-use eyre::{Result, WrapErr as _, eyre};
+use misstep::{Result, ResultExt as _, report};
 use serde::Deserialize;
 
 pub struct IdTokenInfo {
@@ -30,10 +30,13 @@ struct ProfileClaims {
 
 /// Decodes a JWT payload without signature verification.
 fn claims(token: &str) -> Result<Claims> {
-   let part = token.split('.').nth(1).ok_or_else(|| eyre!("not a JWT"))?;
+   let part = token
+      .split('.')
+      .nth(1)
+      .ok_or_else(|| report!("not a JWT"))?;
    let bytes = data_encoding::BASE64URL_NOPAD
       .decode(part.trim_end_matches('=').as_bytes())
-      .wrap_err("JWT payload is not base64url")?;
+      .context("JWT payload is not base64url")?;
    Ok(serde_json::from_slice(&bytes)?)
 }
 

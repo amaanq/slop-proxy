@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use eyre::{Result, WrapErr as _};
+use misstep::{Result, ResultExt as _};
 use tokio::fs;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -117,7 +117,7 @@ impl PriceTable {
 
    fn parse(body: &str) -> Result<Self> {
       let raw: HashMap<String, Entry> =
-         serde_json::from_str(body).wrap_err("parsing the price table")?;
+         serde_json::from_str(body).context("parsing the price table")?;
       Ok(Self(
          raw.into_iter()
             .filter_map(|(name, entry)| entry.into_price().map(|price| (name, price)))
@@ -240,13 +240,13 @@ impl Prices {
    pub async fn refresh(&self) -> Result<()> {
       let body = reqwest::get(&self.url)
          .await
-         .wrap_err("fetching the price table")?
+         .context("fetching the price table")?
          .error_for_status()?
          .text()
          .await?;
       let table = PriceTable::parse(&body)?;
       if table.is_empty() {
-         eyre::bail!("price table has no priced models");
+         misstep::bail!("price table has no priced models");
       }
       tracing::info!("loaded {} model prices", table.len());
       let _ = fs::write(&self.cache_path, &body).await;

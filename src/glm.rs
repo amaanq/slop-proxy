@@ -84,7 +84,7 @@ pub struct GlmClient {
 }
 
 impl GlmClient {
-   pub fn new(cfg: RelayConfig) -> eyre::Result<Self> {
+   pub fn new(cfg: RelayConfig) -> misstep::Result<Self> {
       let egresses = Egresses::new(&cfg.egress, "glm", None)?;
       Ok(Self { egresses, cfg })
    }

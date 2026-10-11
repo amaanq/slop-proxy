@@ -228,7 +228,7 @@ pub struct Slots {
 }
 
 impl Slots {
-   pub async fn load(db: Db, provider: Provider) -> eyre::Result<Self> {
+   pub async fn load(db: Db, provider: Provider) -> misstep::Result<Self> {
       let slots = Self {
          provider,
          inner: RwLock::new(Vec::new()),
@@ -243,7 +243,7 @@ impl Slots {
    /// Existing slots keep their in-memory cooldown and token state unless the
    /// db row's refresh token changed, which means someone re-logged-in and
    /// the in-memory grant is stale.
-   pub async fn reload(&self) -> eyre::Result<()> {
+   pub async fn reload(&self) -> misstep::Result<()> {
       let _reload = self.reload_gate.lock().await;
       let accounts: Vec<_> = self
          .db
@@ -400,7 +400,7 @@ impl Slots {
       }
    }
 
-   async fn try_clear_cooldown<F>(&self, slot: &Slot, is_obsolete: F) -> eyre::Result<bool>
+   async fn try_clear_cooldown<F>(&self, slot: &Slot, is_obsolete: F) -> misstep::Result<bool>
    where
       F: FnOnce(i64) -> bool,
    {

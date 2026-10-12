@@ -42,6 +42,7 @@ struct OpenAiErrorBody<'a> {
 /// A failure on the endpoints codex reaches through `chatgpt_base_url`,
 /// answered in the `OpenAI` shape it reads.
 pub enum BackendError {
+   Invalid(&'static str),
    Unauthorized,
    Internal(misstep::Report),
 }
@@ -55,6 +56,7 @@ impl From<misstep::Report> for BackendError {
 impl IntoResponse for BackendError {
    fn into_response(self) -> Response {
       let (status, kind, message) = match self {
+         Self::Invalid(message) => (StatusCode::BAD_REQUEST, "invalid_request_error", message),
          Self::Unauthorized => (
             StatusCode::UNAUTHORIZED,
             "authentication_error",

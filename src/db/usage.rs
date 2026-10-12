@@ -1,6 +1,10 @@
+use std::ops::RangeInclusive;
 use std::result::Result as StdResult;
 
+use jiff::civil::Date;
+use jiff::tz::TimeZone;
 use misstep::Result;
+use rusqlite::types::Type;
 use rusqlite::{OptionalExtension as _, Row, TransactionBehavior, params};
 use serde::Serialize;
 
@@ -149,6 +153,23 @@ pub struct SessionCache {
    pub hit_ratio: f64,
    pub last: CacheTurn,
    pub account_switched: bool,
+}
+
+/// Codex tokens one model spent for a user on one UTC day. Cache writes count
+/// as the uncached input they are, and reasoning is already inside output.
+#[derive(Debug, Clone)]
+pub struct DayUsage {
+   pub day: Date,
+   pub model: String,
+   pub input_tokens: i64,
+   pub cached_tokens: i64,
+   pub output_tokens: i64,
+}
+
+impl DayUsage {
+   pub const fn total(&self) -> i64 {
+      self.input_tokens + self.cached_tokens + self.output_tokens
+   }
 }
 
 #[derive(Debug, Clone)]
@@ -682,6 +703,45 @@ impl Db {
                ),
             }))
          })
+         .await
+   }
+
+   /// Days without a token are left out, oldest day first. No range reads the
+   /// whole history.
+   pub async fn daily_usage(
+      &self,
+      user: String,
+      days: Option<RangeInclusive<Date>>,
+   ) -> Result<Vec<DayUsage>> {
+      let midnight =
+         |date: Date| -> Result<i64> { Ok(date.to_zoned(TimeZone::UTC)?.timestamp().as_second()) };
+      let (since, until) = match days {
+         Some(days) => (midnight(*days.start())?, midnight(days.end().tomorrow()?)?),
+         None => (0, i64::MAX),
+      };
+      self
+         .reports
+         .rows(
+            "SELECT date(ts, 'unixepoch') AS day, upstream_model, SUM(input_tokens + cache_write_tokens),
+                    SUM(cache_read_tokens), SUM(output_tokens)
+             FROM usage_log WHERE user = ?1 AND provider = 'openai' AND ts >= ?2 AND ts < ?3
+             GROUP BY day, upstream_model
+             HAVING SUM(input_tokens + cache_write_tokens + cache_read_tokens + output_tokens) > 0
+             ORDER BY day, upstream_model",
+            (user, since, until),
+            |row| {
+               let day = row.get::<_, String>(0)?.parse::<Date>().map_err(|err| {
+                  rusqlite::Error::FromSqlConversionFailure(0, Type::Text, Box::new(err))
+               })?;
+               Ok(DayUsage {
+                  day,
+                  model: row.get(1)?,
+                  input_tokens: row.get(2)?,
+                  cached_tokens: row.get(3)?,
+                  output_tokens: row.get(4)?,
+               })
+            },
+         )
          .await
    }
 

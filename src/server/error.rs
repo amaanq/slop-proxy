@@ -1,7 +1,6 @@
 use axum::Json;
 use axum::http::{HeaderValue, StatusCode};
-use axum::response::IntoResponse as _;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 
 use crate::config::ModelsConfig;
@@ -38,6 +37,40 @@ struct OpenAiErrorDetail<'a> {
 #[derive(Serialize)]
 struct OpenAiErrorBody<'a> {
    error: OpenAiErrorDetail<'a>,
+}
+
+/// A failure on the endpoints codex reaches through `chatgpt_base_url`,
+/// answered in the `OpenAI` shape it reads.
+pub enum BackendError {
+   Unauthorized,
+   Internal(misstep::Report),
+}
+
+impl From<misstep::Report> for BackendError {
+   fn from(err: misstep::Report) -> Self {
+      Self::Internal(err)
+   }
+}
+
+impl IntoResponse for BackendError {
+   fn into_response(self) -> Response {
+      let (status, kind, message) = match self {
+         Self::Unauthorized => (
+            StatusCode::UNAUTHORIZED,
+            "authentication_error",
+            "invalid or revoked API token",
+         ),
+         Self::Internal(err) => {
+            tracing::error!("{err}");
+            (
+               StatusCode::INTERNAL_SERVER_ERROR,
+               "api_error",
+               "internal error",
+            )
+         },
+      };
+      error_response(Dialect::OpenAi, status, kind, message)
+   }
 }
 
 pub fn error_response(

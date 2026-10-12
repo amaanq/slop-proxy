@@ -198,6 +198,7 @@ pub fn router(state: AppState) -> Router {
          state.clone(),
          auth::require_token,
       ))
+      .route("/oauth/token", post(clientcfg::refresh))
       .with_state(state)
 }
 

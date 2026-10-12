@@ -24,6 +24,7 @@ const UNREACHABLE_COOLDOWN: i64 = 30;
 const SOURCE_EGRESSES: usize = 1 << 16;
 
 pub struct Egresses {
+   sources: Arc<[Arc<Egress>]>,
    entries: RwLock<Arc<[Arc<Egress>]>>,
    next: AtomicUsize,
    label: &'static str,
@@ -37,8 +38,10 @@ struct Egress {
    http: OnceLock<reqwest::Client>,
    unavailable_until: AtomicI64,
    /// Zen's free tier rate-limits per source address, so an anonymous 429
-   /// benches the egress for anonymous traffic only.
-   anonymous_until: AtomicI64,
+   /// benches the egress for anonymous traffic only. Sources share one per
+   /// prefix, since zen counts a whole prefix as one client and a 429 on one
+   /// address means every other address in it is spent too.
+   anonymous_until: Arc<AtomicI64>,
 }
 
 enum Route {
@@ -65,29 +68,38 @@ impl Egresses {
       label: &'static str,
       user_agent: Option<&str>,
    ) -> misstep::Result<Self> {
+      let benches = cfg
+         .source_prefixes
+         .iter()
+         .map(|_| Arc::new(AtomicI64::new(0)))
+         .collect::<Vec<_>>();
+      let sources = source_addresses(&cfg.source_prefixes)?
+         .into_iter()
+         .zip(benches.iter().cycle())
+         .map(|(address, bench)| {
+            Arc::new(Egress {
+               anonymous_until: Arc::clone(bench),
+               ..Egress::lazy(Route::Source(address))
+            })
+         })
+         .collect::<Arc<[_]>>();
       let egresses = Self {
-         entries: RwLock::new(Arc::new([])),
+         entries: RwLock::new(Arc::clone(&sources)),
+         sources,
          next: AtomicUsize::new(0),
          label,
          user_agent: user_agent.map(str::to_owned),
       };
+      if let Some(first) = egresses.sources.first() {
+         egresses.build(&first.route, 0)?;
+      }
+
       let proxy_urls = cfg.urls()?;
-      if !cfg.source_prefixes.is_empty() {
-         misstep::ensure!(
-            proxy_urls.is_empty() && cfg.proxy_urls_file.is_none(),
-            "{label} sets both proxies and a source prefix"
-         );
-         let sources = source_addresses(&cfg.source_prefixes)?
-            .into_iter()
-            .map(|address| Arc::new(Egress::lazy(Route::Source(address))))
-            .collect::<Arc<[_]>>();
-         egresses.build(&sources[0].route, 0)?;
-         egresses.store(sources);
-      } else if proxy_urls.is_empty() && cfg.proxy_urls_file.is_none() {
+      if !proxy_urls.is_empty() || cfg.proxy_urls_file.is_some() {
+         egresses.replace(&proxy_urls)?;
+      } else if egresses.sources.is_empty() {
          let direct = egresses.built(Route::Direct, 0)?;
          egresses.store(Arc::new([Arc::new(direct)]));
-      } else {
-         egresses.replace(&proxy_urls)?;
       }
       Ok(egresses)
    }
@@ -139,9 +151,10 @@ impl Egresses {
    }
 
    pub fn replace(&self, proxy_urls: &[String]) -> misstep::Result<()> {
-      let current = self.snapshot();
+      let snapshot = self.snapshot();
+      let current = snapshot.get(self.sources.len()..).unwrap_or_default();
       let mut added = 0_usize;
-      let entries = proxy_urls
+      let proxies = proxy_urls
          .iter()
          .enumerate()
          .map(|(index, url)| {
@@ -154,18 +167,18 @@ impl Egresses {
             added += 1;
             self.built(Route::Proxy(url.clone()), index).map(Arc::new)
          })
-         .collect::<misstep::Result<Arc<[_]>>>()?;
-      let dropped = current.len() + added - entries.len();
+         .collect::<misstep::Result<Vec<_>>>()?;
+      let dropped = current.len() + added - proxies.len();
       if added > 0 || dropped > 0 {
          tracing::info!(
             added,
             dropped,
-            total = entries.len(),
+            total = proxies.len(),
             "{} proxy list changed",
             self.label
          );
       }
-      self.store(entries);
+      self.store(self.sources.iter().cloned().chain(proxies).collect());
       Ok(())
    }
 
@@ -183,12 +196,17 @@ impl Egresses {
 
    /// Every egress still in service, starting one past the last request so
    /// concurrent callers spread across the list rather than stacking on the
-   /// first healthy one.
+   /// first healthy one. Sources go before proxies, which are slower and
+   /// metered, so proxies only carry what the prefixes cannot.
    fn order(&self, entries: &[Arc<Egress>], anonymous: bool) -> Vec<usize> {
       let now = clock::unix_now();
       let start = self.next.fetch_add(1, Ordering::Relaxed);
-      (0..entries.len())
-         .map(|offset| start.wrapping_add(offset) % entries.len())
+      let sources = self.sources.len();
+      let rotate = |base: usize, len: usize| {
+         (0..len).map(move |offset| base + start.wrapping_add(offset) % len)
+      };
+      rotate(0, sources)
+         .chain(rotate(sources, entries.len() - sources))
          .filter(|&index| {
             let egress = &entries[index];
             egress.unavailable_until.load(Ordering::Relaxed) <= now
@@ -353,6 +371,9 @@ impl Egresses {
 /// Interleaved by prefix, so the attempts of one request land in different
 /// allowances rather than walking a run of addresses from the same one.
 fn source_addresses(prefixes: &[Ipv6Net]) -> misstep::Result<Vec<Ipv6Addr>> {
+   if prefixes.is_empty() {
+      return Ok(Vec::new());
+   }
    for prefix in prefixes {
       misstep::ensure!(
          (32..=120).contains(&prefix.prefix_len()),
@@ -372,12 +393,12 @@ fn source_addresses(prefixes: &[Ipv6Net]) -> misstep::Result<Vec<Ipv6Addr>> {
 }
 
 impl Egress {
-   const fn lazy(route: Route) -> Self {
+   fn lazy(route: Route) -> Self {
       Self {
          route,
          http: OnceLock::new(),
          unavailable_until: AtomicI64::new(0),
-         anonymous_until: AtomicI64::new(0),
+         anonymous_until: Arc::default(),
       }
    }
 }

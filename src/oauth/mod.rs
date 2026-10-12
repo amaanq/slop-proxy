@@ -4,6 +4,7 @@ pub mod glm;
 pub mod jwt;
 pub mod refresh;
 
+use std::str::FromStr;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
@@ -169,6 +170,70 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
       &tokens,
    )
    .await
+}
+
+#[derive(Deserialize)]
+struct CodexAuth {
+   tokens: Option<CodexTokens>,
+}
+
+#[derive(Deserialize)]
+struct CodexTokens {
+   id_token: String,
+   access_token: String,
+   refresh_token: String,
+}
+
+/// The login codex keeps in `auth.json`. Storing it leaves both holding one
+/// rotating refresh token, so whichever refreshes first signs the other out.
+pub struct CodexLogin {
+   account_id: String,
+   email: Option<String>,
+   plan: Option<String>,
+   tokens: TokenSet,
+}
+
+impl FromStr for CodexLogin {
+   type Err = misstep::Report;
+
+   fn from_str(auth_json: &str) -> Result<Self> {
+      let tokens = serde_json::from_str::<CodexAuth>(auth_json)
+         .context("parsing codex auth.json")?
+         .tokens
+         .ok_or_else(|| report!("auth.json holds no ChatGPT login"))?;
+      let jwt::IdTokenInfo {
+         email,
+         chatgpt_account_id,
+         plan_type,
+      } = jwt::parse_id_token(&tokens.id_token)?;
+      Ok(Self {
+         account_id: chatgpt_account_id
+            .ok_or_else(|| report!("id_token has no chatgpt account id"))?,
+         email,
+         plan: plan_type,
+         tokens: TokenSet {
+            expires_at: jwt::exp(&tokens.access_token),
+            access_token: tokens.access_token,
+            refresh_token: tokens.refresh_token,
+            id_token: Some(tokens.id_token),
+         },
+      })
+   }
+}
+
+impl CodexLogin {
+   pub async fn store(&self, db: &Db, label: Option<&str>) -> Result<()> {
+      finish_login(
+         db,
+         Provider::OpenAi,
+         &self.account_id,
+         self.email.as_deref(),
+         label,
+         self.plan.as_deref(),
+         &self.tokens,
+      )
+      .await
+   }
 }
 
 pub async fn ok_json<T>(resp: reqwest::Response, what: &str) -> Result<T>

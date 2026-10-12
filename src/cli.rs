@@ -1,6 +1,11 @@
+use std::convert::Infallible;
+use std::fs;
+use std::io;
 use std::path::PathBuf;
+use std::result::Result as StdResult;
+use std::str::FromStr;
 
-use misstep::{Result, bail, report};
+use misstep::{Result, ResultExt as _, bail, report};
 use pound::Parse;
 
 use crate::clock;
@@ -85,6 +90,12 @@ pub enum Command {
 pub enum AccountsCommand {
    /// List stored accounts
    List,
+   /// Import the login codex keeps in auth.json, read from stdin for -
+   ImportCodex {
+      file: Input,
+      #[pound(long)]
+      label: Option<String>,
+   },
    /// Store an account that authenticates with a long-lived API key
    AddKey {
       #[pound(long)]
@@ -214,6 +225,10 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
       },
       Command::Accounts { command } => match command {
          AccountsCommand::List => accounts_list(&db).await,
+         AccountsCommand::ImportCodex { file, label } => {
+            let login = file.read()?.parse::<oauth::CodexLogin>()?;
+            login.store(&db, label.as_deref()).await
+         },
          AccountsCommand::AddKey {
             provider,
             key,
@@ -383,6 +398,37 @@ async fn accounts_add_key(
    }
    println!("stored {provider} account {id} ({account_id})");
    Ok(())
+}
+
+/// A file argument, where `-` reads standard input instead.
+#[derive(Clone, Debug)]
+pub enum Input {
+   Stdin,
+   File(PathBuf),
+}
+
+impl FromStr for Input {
+   type Err = Infallible;
+
+   fn from_str(arg: &str) -> StdResult<Self, Infallible> {
+      Ok(match arg {
+         "-" => Self::Stdin,
+         path => Self::File(path.into()),
+      })
+   }
+}
+
+pound::from_str!(Input);
+
+impl Input {
+   fn read(&self) -> Result<String> {
+      match *self {
+         Self::Stdin => io::read_to_string(io::stdin()).context("reading standard input"),
+         Self::File(ref path) => {
+            fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))
+         },
+      }
+   }
 }
 
 async fn accounts_list(db: &Db) -> Result<()> {

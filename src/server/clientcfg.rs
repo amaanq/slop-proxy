@@ -1,51 +1,146 @@
-use axum::Json;
+use std::str::FromStr;
+
+use axum::extract::State;
 use axum::http::{HeaderMap, Uri};
 use axum::response::IntoResponse as _;
 use axum::response::Response;
-use serde::Serialize;
+use axum::{Extension, Json};
+use serde::{Deserialize, Serialize};
 
 use crate::clock;
-use crate::server::auth::bearer_token;
+use crate::server::AppState;
+use crate::server::auth::{AuthInfo, bearer_token};
+use crate::server::error::BackendError;
 use crate::server::relay::header_str;
 
 /// Ten years out. Codex refreshes when it believes the grant is near expiry,
-/// and the refresh would go to `OpenAI` rather than here, so the claim is dated
-/// far enough ahead that it never fires.
+/// and the refresh goes to `OpenAI` unless `CODEX_REFRESH_TOKEN_URL_OVERRIDE`
+/// points it at [`refresh`], so the claim is dated far enough ahead that it
+/// never fires.
 const LIFETIME_SECS: i64 = 10 * 365 * 24 * 3600;
 
 const JWT_HEADER: &str = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0";
 
-const ACCOUNT_ID: &str = "slop-proxy";
+pub const ACCOUNT_ID: &str = "slop-proxy";
+
+/// Every token reads as this plan, whichever accounts serve it.
+pub const PLAN: &str = "pro";
 
 #[derive(Serialize)]
-struct Claims {
+struct Claims<'a> {
    #[serde(rename = "https://api.openai.com/auth")]
-   auth: AuthClaim,
-   email: &'static str,
+   auth: AuthClaim<'a>,
+   #[serde(rename = "https://api.openai.com/profile")]
+   profile: ProfileClaim<'a>,
+   sub: &'a str,
+   email: &'a str,
+   name: &'a str,
    iat: i64,
    exp: i64,
 }
 
 #[derive(Serialize)]
-struct AuthClaim {
+struct AuthClaim<'a> {
    chatgpt_account_id: &'static str,
    chatgpt_plan_type: &'static str,
+   user_id: &'a str,
+   chatgpt_user_id: &'a str,
+   chatgpt_account_user_id: &'a str,
 }
 
 #[derive(Serialize)]
-struct AuthFile<'a> {
+struct ProfileClaim<'a> {
+   email: &'a str,
+   name: &'a str,
+}
+
+/// The desktop reads its identity from the access token rather than the id
+/// token, so the access token is the same claims with the API key inside.
+#[derive(Serialize)]
+struct AccessClaims<'a> {
+   #[serde(flatten)]
+   claims: &'a Claims<'a>,
+   api_key: &'a str,
+}
+
+/// The API key inside an access token [`codex_auth`] minted.
+#[derive(Deserialize)]
+pub struct AccessKey {
+   pub api_key: String,
+}
+
+impl FromStr for AccessKey {
+   type Err = ();
+
+   fn from_str(token: &str) -> Result<Self, ()> {
+      let payload = token
+         .strip_prefix(JWT_HEADER)
+         .and_then(|rest| rest.strip_prefix('.'))
+         .and_then(|rest| rest.split('.').next())
+         .ok_or(())?;
+      let claims = data_encoding::BASE64URL_NOPAD
+         .decode(payload.as_bytes())
+         .map_err(|_| ())?;
+      serde_json::from_slice(&claims).map_err(|_| ())
+   }
+}
+
+#[derive(Serialize)]
+struct AuthFile {
    #[serde(rename = "OPENAI_API_KEY")]
    openai_api_key: Option<()>,
-   tokens: Tokens<'a>,
+   tokens: Tokens,
    last_refresh: String,
 }
 
 #[derive(Serialize)]
-struct Tokens<'a> {
+pub struct Tokens {
    id_token: String,
-   access_token: &'a str,
-   refresh_token: &'a str,
+   access_token: String,
+   refresh_token: String,
    account_id: &'static str,
+}
+
+impl Tokens {
+   /// The refresh token is the access token, so a refresh only has to find
+   /// the API key inside it to mint the pair again.
+   fn mint(auth: &AuthInfo, api_key: &str, now: i64) -> Self {
+      let user_id = auth.codex_user_id();
+      let user = auth.user.as_str();
+      let claims = Claims {
+         auth: AuthClaim {
+            chatgpt_account_id: ACCOUNT_ID,
+            chatgpt_plan_type: PLAN,
+            user_id: &user_id,
+            chatgpt_user_id: &user_id,
+            chatgpt_account_user_id: &user_id,
+         },
+         profile: ProfileClaim {
+            email: user,
+            name: user,
+         },
+         sub: &user_id,
+         email: user,
+         name: user,
+         iat: now,
+         exp: now + LIFETIME_SECS,
+      };
+      let access_token = jwt(&AccessClaims {
+         claims: &claims,
+         api_key,
+      });
+      Self {
+         id_token: jwt(&claims),
+         refresh_token: access_token.clone(),
+         access_token,
+         account_id: ACCOUNT_ID,
+      }
+   }
+}
+
+#[derive(Deserialize)]
+pub struct RefreshRequest {
+   refresh_token: String,
 }
 
 #[derive(Serialize)]
@@ -62,28 +157,17 @@ struct AccountEntry {
 
 /// Codex only asks a provider for its catalog in ChatGPT-auth mode, which
 /// reads the bearer from `auth.json` rather than `env_key`.
-pub async fn codex_auth(uri: Uri, headers: HeaderMap) -> Response {
+pub async fn codex_auth(
+   Extension(auth): Extension<AuthInfo>,
+   uri: Uri,
+   headers: HeaderMap,
+) -> Response {
    let token = bearer_token(&headers, uri.query()).expect("require_token admitted the request");
 
    let now = clock::unix_now();
-   let claims = Claims {
-      auth: AuthClaim {
-         chatgpt_account_id: ACCOUNT_ID,
-         chatgpt_plan_type: "pro",
-      },
-      email: "slop-proxy",
-      iat: now,
-      exp: now + LIFETIME_SECS,
-   };
-
    Json(AuthFile {
       openai_api_key: None,
-      tokens: Tokens {
-         id_token: jwt(&claims),
-         access_token: &token,
-         refresh_token: &token,
-         account_id: ACCOUNT_ID,
-      },
+      tokens: Tokens::mint(&auth, &token, now),
       last_refresh: clock::rfc3339(now),
    })
    .into_response()
@@ -101,6 +185,29 @@ pub async fn codex_accounts() -> Response {
       }],
    })
    .into_response()
+}
+
+/// Where `CODEX_REFRESH_TOKEN_URL_OVERRIDE` sends codex, outside
+/// `require_token` since the credential rides in the body. A refresh is only
+/// as good as the API key inside it, so a revoked key stops refreshing.
+pub async fn refresh(
+   State(state): State<AppState>,
+   Json(req): Json<RefreshRequest>,
+) -> Result<Json<Tokens>, BackendError> {
+   let AccessKey { api_key } = req
+      .refresh_token
+      .parse()
+      .map_err(|()| BackendError::Unauthorized)?;
+   let token = state
+      .db
+      .auth_token(&api_key)
+      .await?
+      .ok_or(BackendError::Unauthorized)?;
+   Ok(Json(Tokens::mint(
+      &AuthInfo::from(token),
+      &api_key,
+      clock::unix_now(),
+   )))
 }
 
 /// Overriding the base url keeps `model_provider_id` as `openai`, which the

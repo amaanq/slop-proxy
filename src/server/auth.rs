@@ -6,10 +6,11 @@ use axum::middleware::Next;
 use axum::response::Response;
 use tokio::time;
 
-use crate::db::tokens::TokenLimits;
+use crate::db::tokens::{AuthenticatedToken, TokenLimits};
 use crate::db::usage::{Admission, AdmissionError};
 use crate::pool::Route;
 use crate::server::AppState;
+use crate::server::clientcfg::AccessKey;
 use crate::server::error::{Dialect, error_response};
 
 #[derive(Clone, Debug)]
@@ -20,7 +21,24 @@ pub struct AuthInfo {
    pub limits: TokenLimits,
 }
 
+impl From<AuthenticatedToken> for AuthInfo {
+   fn from(token: AuthenticatedToken) -> Self {
+      Self {
+         token_id: token.id,
+         user: token.user,
+         meter_id: None,
+         limits: token.limits,
+      }
+   }
+}
+
 impl AuthInfo {
+   /// Who the token is to codex, so two people sharing the proxy are two
+   /// users of the one workspace rather than the same login.
+   pub fn codex_user_id(&self) -> String {
+      format!("slop-proxy-token-{}", self.token_id)
+   }
+
    pub fn route<'route>(
       &'route self,
       session_key: &'route str,
@@ -95,12 +113,7 @@ pub async fn require_token(
 
 async fn authenticate(state: &AppState, dialect: Dialect, raw: &str) -> Result<AuthInfo, Response> {
    match state.db.auth_token(raw).await {
-      Ok(Some(token)) => Ok(AuthInfo {
-         token_id: token.id,
-         user: token.user,
-         meter_id: None,
-         limits: token.limits,
-      }),
+      Ok(Some(token)) => Ok(AuthInfo::from(token)),
       Ok(None) => {
          tracing::warn!(
             prefix = %raw.chars().take(12).collect::<String>(),
@@ -193,5 +206,10 @@ pub fn bearer_token(headers: &HeaderMap, query: Option<&str>) -> Option<String> 
             .split('&')
             .find_map(|part| part.strip_prefix("key="))
             .map(str::to_owned)
+      })
+      .map(|bearer| {
+         bearer
+            .parse::<AccessKey>()
+            .map_or(bearer, |access| access.api_key)
       })
 }

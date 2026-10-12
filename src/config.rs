@@ -212,6 +212,9 @@ pub struct CodexConfig {
    /// Fraction of a rolling window past which an account is ranked behind
    /// its peers, so traffic moves before the window rejects it.
    pub soft_utilization_limit: f64,
+   /// Statsig gates the desktop is told, by the name or hash it looks each
+   /// up under.
+   pub desktop_gates: BTreeMap<String, bool>,
 }
 
 impl Default for CodexConfig {
@@ -226,6 +229,7 @@ impl Default for CodexConfig {
          forward_max_tokens: true,
          pin_turn_state: true,
          soft_utilization_limit: 0.9,
+         desktop_gates: BTreeMap::new(),
       }
    }
 }

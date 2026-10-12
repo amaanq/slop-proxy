@@ -76,8 +76,13 @@ pub async fn require_token(
       );
    };
 
+   // The desktop's account reads have to keep answering once a token's quota
+   // is spent, or it cannot even show the user that it is.
    let path = req.uri().path();
-   if req.method() == Method::GET && (path == "/v1/responses" || path.starts_with("/v1/cache/")) {
+   let local_read = path.starts_with("/backend-api/") && path != "/backend-api/aura/site_status";
+   if local_read
+      || req.method() == Method::GET && (path == "/v1/responses" || path.starts_with("/v1/cache/"))
+   {
       return match authenticate(&state, dialect, &raw).await {
          Ok(auth) => {
             req.extensions_mut().insert(auth);

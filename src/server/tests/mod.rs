@@ -24,6 +24,7 @@ use crate::pool::Pools;
 use crate::pricing::Prices;
 use crate::provider::{AuthMode, Provider};
 use crate::server::{AppState, Inner, metrics, router};
+use crate::server::metrics::Metrics;
 
 const MOCK_SSE: &str = concat!(
    "event: response.created\n",
@@ -421,7 +422,9 @@ async fn metrics_render_accounts_and_usage() {
       prices: Prices::new(&PathBuf::new(), PricingConfig::default().url),
       pools,
    }));
-   let resp = metrics::metrics(State(state)).await;
+   let metrics = Metrics::new(state);
+   metrics.refresh().await;
+   let resp = metrics::serve(State(metrics)).await;
    let bytes = body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
    let text = String::from_utf8(bytes.to_vec()).unwrap();
 

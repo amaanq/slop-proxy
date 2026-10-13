@@ -1,13 +1,20 @@
 use std::array::from_fn;
 use std::fmt::Display;
 use std::fmt::Write as _;
+use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
+use axum::Router;
 use axum::extract::State;
 use axum::http::header::CONTENT_TYPE;
 use axum::response::IntoResponse as _;
 use axum::response::Response;
+use axum::routing::get;
+use tokio::net::TcpListener;
+use tokio::time::{self, MissedTickBehavior};
 
 use crate::clock;
+use crate::db::Db;
 use crate::db::usage::{
    InsightRow, MetricsRow, SessionRow, ToolRow, USAGE_DIMENSIONS, cache_hit_ratio,
 };
@@ -15,13 +22,65 @@ use crate::pool::{AccountSnapshot, UsageWindow};
 use crate::provider::Provider;
 use crate::server::AppState;
 
-pub async fn metrics(State(state): State<AppState>) -> Response {
-   let accounts = state.pools.snapshots().await;
+/// The usage history behind every counter, rendered off the scrape path.
+/// Aggregating the whole log grows with it, and a scrape that overruns its
+/// timeout blanks every series, live quota gauges included.
+#[derive(Clone)]
+pub struct Metrics {
+   state: AppState,
+   history: Arc<RwLock<Arc<str>>>,
+}
 
+impl Metrics {
+   pub fn new(state: AppState) -> Self {
+      Self {
+         state,
+         history: Arc::new(RwLock::new(Arc::from(""))),
+      }
+   }
+
+   pub async fn refresh(&self) {
+      let text = render_history(&self.state.db).await;
+      *self.history.write().expect("metrics lock poisoned") = Arc::from(text);
+   }
+}
+
+pub fn spawn(state: AppState, listener: TcpListener) {
+   let metrics = Metrics::new(state);
+
+   let refresher = metrics.clone();
+   tokio::spawn(async move {
+      let mut tick = time::interval(Duration::from_mins(1));
+      tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+      loop {
+         tick.tick().await;
+         refresher.refresh().await;
+      }
+   });
+
+   tokio::spawn(async move {
+      let app = Router::new()
+         .route("/metrics", get(serve))
+         .with_state(metrics);
+      if let Err(err) = axum::serve(listener, app).await {
+         tracing::error!("metrics listener failed: {err}");
+      }
+   });
+}
+
+pub async fn serve(State(metrics): State<Metrics>) -> Response {
+   let accounts = metrics.state.pools.snapshots().await;
+   let history = Arc::clone(&metrics.history.read().expect("metrics lock poisoned"));
+
+   let mut text = String::with_capacity(4096 + history.len());
+   render_accounts(&mut text, &accounts, clock::unix_now());
+   text.push_str(&history);
+   ([(CONTENT_TYPE, "text/plain; version=0.0.4")], text).into_response()
+}
+
+async fn render_history(db: &Db) -> String {
    let mut text = String::with_capacity(4096);
    let buf = &mut text;
-   let db = &state.db;
-   render_accounts(buf, &accounts, clock::unix_now());
    emit(buf, "usage", db.usage_metrics().await, render_usage);
    emit(buf, "error", db.error_metrics().await, |out, rows| {
       counter(out, "slop_errors_total", "Failed requests by cause");
@@ -53,8 +112,7 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
          [("user", row.user.as_str())]
       });
    });
-
-   ([(CONTENT_TYPE, "text/plain; version=0.0.4")], text).into_response()
+   text
 }
 
 fn emit<T, F>(out: &mut String, what: &str, rows: misstep::Result<Vec<T>>, render: F)

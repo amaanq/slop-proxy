@@ -94,6 +94,7 @@ impl ZenClient {
                .post(url)
                .header("Accept", "*/*")
                .header("x-opencode-session", session)
+               .header("x-opencode-session-id", session)
                .header("x-opencode-request", request_id)
                .header("x-opencode-client", "cli")
                .header("x-opencode-project", "global");
@@ -194,11 +195,12 @@ async fn fetch_context_windows(url: &str) -> reqwest::Result<HashMap<String, i64
 fn request_id() -> String {
    const ALPHANUMERIC: &[u8; 62] =
       b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-   let mut bytes = [0_u8; 16];
+   let mut bytes = [0_u8; 14];
    getrandom::fill(&mut bytes).expect("the OS random source is readable");
-   let counter = i64::from(u16::from_le_bytes([bytes[0], bytes[1]]) % 0xfff) + 1;
-   let timestamp = (unix_now_ms().saturating_mul(0x1000) + counter) & 0xffff_ffff_ffff;
-   let random = bytes[2..]
+   // Zen's free tier checks that the per-millisecond counter in the low 12
+   // bits is OpenCode's first value, 1, for both message and session ids.
+   let timestamp = (unix_now_ms().saturating_mul(0x1000) + 1) & 0xffff_ffff_ffff;
+   let random = bytes
       .iter()
       .map(|&byte| char::from(ALPHANUMERIC[usize::from(byte) % ALPHANUMERIC.len()]))
       .collect::<String>();

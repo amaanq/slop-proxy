@@ -1,0 +1,66 @@
+[
+  {
+    "type": "function",
+    "name": "bash",
+    "description": "Deprecated placeholder. Never call this tool.",
+    "strict": false,
+    "parameters": {
+      "properties": {
+        "command": { "description": "The command to execute", "type": "string" },
+        "timeout": { "description": "Optional timeout in milliseconds", "type": "integer" },
+        "workdir": {
+          "description": "The working directory to run the command in. Defaults to the current directory. Use this instead of 'cd' commands.",
+          "type": "string"
+        }
+      },
+      "required": ["command"],
+      "type": "object"
+    }
+  },
+  {
+    "type": "function",
+    "name": "edit",
+    "description": "Deprecated placeholder. Never call this tool.",
+    "strict": false,
+    "parameters": {
+      "properties": {
+        "filePath": { "description": "The absolute path to the file to modify", "type": "string" },
+        "oldString": { "description": "The text to replace", "type": "string" },
+        "newString": {
+          "description": "The text to replace it with (must be different from oldString)",
+          "type": "string"
+        },
+        "replaceAll": {
+          "description": "Replace all occurrences of oldString (default false)",
+          "type": "boolean"
+        }
+      },
+      "required": ["filePath", "oldString", "newString"],
+      "type": "object"
+    }
+  },
+  {
+    "type": "function",
+    "name": "read",
+    "description": "Deprecated placeholder. Never call this tool.",
+    "strict": false,
+    "parameters": {
+      "properties": {
+        "filePath": {
+          "description": "The absolute path to the file or directory to read",
+          "type": "string"
+        },
+        "offset": {
+          "description": "The line number to start reading from (1-indexed)",
+          "type": "integer"
+        },
+        "limit": {
+          "description": "The maximum number of lines to read (defaults to 2000)",
+          "type": "integer"
+        }
+      },
+      "required": ["filePath"],
+      "type": "object"
+    }
+  }
+]

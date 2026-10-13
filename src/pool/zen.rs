@@ -2,7 +2,6 @@ use std::mem;
 use std::sync::LazyLock;
 
 use axum::body::Bytes;
-use serde_json::value::RawValue;
 
 use crate::clock::unix_now_ms;
 use crate::codex::types::ToolDef;
@@ -17,48 +16,18 @@ use crate::zen::{ZenClient, ZenModel};
 /// empty pool is a working pool rather than an error.
 pub type ZenPool = Pool<ZenClient>;
 
-const DECOY_HINT: &str = "Deprecated placeholder. Never call this tool.";
+/// Decoys that get a request past the free tier, which since 2026-10-13
+/// also checks each one's parameters against the CLI's own.
+static GATE_TOOLS: LazyLock<Vec<ToolDef>> = LazyLock::new(|| {
+   serde_json::from_str::<Vec<ToolDef>>(include_str!("zen_gate_tools.json"))
+      .expect("zen_gate_tools.json is valid")
+});
 
-/// A tool the free tier insists on. Since 2026-10-13 zen also checks each
-/// one's parameters against the CLI's own, so decoys carry them verbatim.
-struct GateTool {
-   name: &'static str,
-   parameters: &'static str,
-}
-
-const SHELL: GateTool = GateTool {
-   name: "bash",
-   parameters: r#"{"properties":{"command":{"description":"The command to execute","type":"string"},"timeout":{"description":"Optional timeout in milliseconds","type":"integer"},"workdir":{"description":"The working directory to run the command in. Defaults to the current directory. Use this instead of 'cd' commands.","type":"string"}},"required":["command"],"type":"object"}"#,
-};
-
-const EDITOR: GateTool = GateTool {
-   name: "edit",
-   parameters: r#"{"properties":{"filePath":{"description":"The absolute path to the file to modify","type":"string"},"oldString":{"description":"The text to replace","type":"string"},"newString":{"description":"The text to replace it with (must be different from oldString)","type":"string"},"replaceAll":{"description":"Replace all occurrences of oldString (default false)","type":"boolean"}},"required":["filePath","oldString","newString"],"type":"object"}"#,
-};
-
-const READER: GateTool = GateTool {
-   name: "read",
-   parameters: r#"{"properties":{"filePath":{"description":"The absolute path to the file or directory to read","type":"string"},"offset":{"description":"The line number to start reading from (1-indexed)","type":"integer"},"limit":{"description":"The maximum number of lines to read (defaults to 2000)","type":"integer"}},"required":["filePath"],"type":"object"}"#,
-};
-
-impl GateTool {
-   fn parameters(&self) -> Box<RawValue> {
-      RawValue::from_string(self.parameters.to_owned()).expect("gate parameters are valid JSON")
-   }
-}
-
-fn missing_gate_tools(declared: &[&str]) -> Vec<&'static GateTool> {
-   let mut missing = Vec::new();
-   if !declared.contains(&SHELL.name) {
-      missing.push(&SHELL);
-   }
-   if !declared.iter().any(|&name| name == EDITOR.name || name == "write") {
-      missing.push(&EDITOR);
-   }
-   if !declared.contains(&READER.name) {
-      missing.push(&READER);
-   }
-   missing
+fn missing_gate_tools(declared: &[&str]) -> Vec<&'static ToolDef> {
+   GATE_TOOLS
+      .iter()
+      .filter(|tool| !declared.contains(&tool.name.as_str()))
+      .collect()
 }
 
 /// `None` when the caller already satisfies the gate, so the usual request
@@ -95,12 +64,7 @@ pub fn satisfy_tool_gate(body: &Bytes) -> Option<Bytes> {
    }
 
    for tool in &missing {
-      let decoy = ToolDef::function(
-         tool.name.to_owned(),
-         Some(DECOY_HINT.to_owned()),
-         Some(tool.parameters()),
-      );
-      tools.push(serde_json::to_value(decoy).ok()?);
+      tools.push(serde_json::to_value(tool).ok()?);
    }
    req.insert("tools".into(), serde_json::Value::Array(tools));
    tracing::debug!(
@@ -126,10 +90,10 @@ pub fn satisfy_chat_tool_gate(req: &mut ChatRequest) {
 
    tools.extend(missing.iter().map(|tool| {
       ChatToolDef::function(FunctionDef {
-         name: Some(tool.name.to_owned()),
-         description: Some(DECOY_HINT.to_owned()),
-         parameters: Some(tool.parameters()),
-         strict: Some(false),
+         name: Some(tool.name.clone()),
+         description: tool.description.clone(),
+         parameters: tool.parameters.clone(),
+         strict: Some(tool.strict),
       })
    }));
    tracing::debug!(

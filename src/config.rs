@@ -155,11 +155,11 @@ impl Default for ZenConfig {
    fn default() -> Self {
       Self {
          base_urls: vec![
-            "https://opencode.ai/zen/v1".into(),
-            "https://dev.opencode.ai/zen/v1".into(),
+            "https://opencode.ai/inference/v1".into(),
+            "https://dev.opencode.ai/inference/v1".into(),
          ],
          models_dev_url: "https://models.dev/api.json".into(),
-         user_agent: "opencode/1.18.31 ai-sdk/provider-utils/4.0.46 runtime/bun/1.3.13".into(),
+         user_agent: "opencode/1.19.0 ai-sdk/provider-utils/4.0.40 runtime/bun/1.3.13".into(),
          egress: EgressConfig::default(),
       }
    }

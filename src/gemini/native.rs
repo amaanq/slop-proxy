@@ -84,7 +84,9 @@ pub fn request(req: &ChatRequest) -> Result<NativeRequest, NativeError> {
                call_names.insert(id.clone(), name.clone());
             }
             let args = match call.function.arguments.as_deref() {
-               Some(raw) => serde_json::from_str(raw).map_err(NativeError::CallArguments)?,
+               Some(raw) => {
+                  serde_json::from_slice(raw.as_bytes()).map_err(NativeError::CallArguments)?
+               },
                None => Value::Object(Map::new()),
             };
             parts.push(Part {

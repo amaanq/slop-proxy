@@ -480,7 +480,7 @@ pub struct ErrorEnvelope {
 
 impl ErrorEnvelope {
    pub fn reason(body: String) -> String {
-      match serde_json::from_str::<Self>(&body) {
+      match serde_json::from_slice::<Self>(body.as_bytes()) {
          Ok(env) => env.detail.or(env.error.message).unwrap_or(body),
          Err(_) => body,
       }

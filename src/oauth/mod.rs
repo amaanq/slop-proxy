@@ -197,7 +197,7 @@ impl FromStr for CodexLogin {
    type Err = misstep::Report;
 
    fn from_str(auth_json: &str) -> Result<Self> {
-      let tokens = serde_json::from_str::<CodexAuth>(auth_json)
+      let tokens = serde_json::from_slice::<CodexAuth>(auth_json.as_bytes())
          .context("parsing codex auth.json")?
          .tokens
          .ok_or_else(|| report!("auth.json holds no ChatGPT login"))?;

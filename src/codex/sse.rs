@@ -71,7 +71,7 @@ pub fn event_stream(resp: reqwest::Response) -> EventStream {
          return None;
       }
       Some(
-         serde_json::from_str::<ResponsesEvent>(&event.data).unwrap_or_else(|err| {
+         serde_json::from_slice::<ResponsesEvent>(event.data.as_bytes()).unwrap_or_else(|err| {
             tracing::debug!("unparsed SSE event {:?}: {err}", event.event);
             ResponsesEvent::Other
          }),

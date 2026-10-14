@@ -3,7 +3,7 @@ use std::io::Cursor;
 
 use data_encoding::BASE64;
 use image_webp::WebPDecoder;
-use png::{BitDepth, ColorType, Encoder};
+use miniz_oxide::deflate::compress_to_vec_zlib;
 use serde::Serialize;
 use serde_json::value::RawValue;
 
@@ -217,8 +217,8 @@ enum TranscodeError {
    Base64(#[source] data_encoding::DecodeError),
    #[error("webp decode")]
    Decode(#[source] image_webp::DecodingError),
-   #[error("png encode")]
-   Encode(#[source] png::EncodingError),
+   #[error("webp has no pixels")]
+   Empty,
 }
 
 /// Zen's image sandbox 415s anything but PNG or JPEG.
@@ -235,26 +235,45 @@ fn accepted_image(url: &str) -> String {
    }
 }
 
+#[expect(clippy::big_endian_bytes, reason = "PNG stores its integers big-endian")]
 fn webp_to_png(data: &str) -> Result<String, TranscodeError> {
    let bytes = BASE64.decode(data.as_bytes()).map_err(TranscodeError::Base64)?;
    let mut decoder = WebPDecoder::new(Cursor::new(bytes)).map_err(TranscodeError::Decode)?;
    let (width, height) = decoder.dimensions();
-   let color = if decoder.has_alpha() {
-      ColorType::Rgba
-   } else {
-      ColorType::Rgb
-   };
+   let alpha = decoder.has_alpha();
+   let stride = width as usize * if alpha { 4 } else { 3 };
+   if stride == 0 || height == 0 {
+      return Err(TranscodeError::Empty);
+   }
+
    let mut pixels = vec![0; decoder.output_buffer_size().unwrap_or_default()];
    decoder.read_image(&mut pixels).map_err(TranscodeError::Decode)?;
 
-   let mut out = Vec::new();
-   let mut encoder = Encoder::new(&mut out, width, height);
-   encoder.set_color(color);
-   encoder.set_depth(BitDepth::Eight);
-   let mut writer = encoder.write_header().map_err(TranscodeError::Encode)?;
-   writer.write_image_data(&pixels).map_err(TranscodeError::Encode)?;
-   writer.finish().map_err(TranscodeError::Encode)?;
-   Ok(BASE64.encode(&out))
+   let mut scanlines = Vec::with_capacity(pixels.len() + height as usize);
+   for row in pixels.chunks_exact(stride) {
+      scanlines.push(0);
+      scanlines.extend_from_slice(row);
+   }
+
+   let mut header = [0_u8; 13];
+   header[..4].copy_from_slice(&width.to_be_bytes());
+   header[4..8].copy_from_slice(&height.to_be_bytes());
+   header[8] = 8;
+   header[9] = if alpha { 6 } else { 2 };
+
+   let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+   let mut chunk = |kind: &[u8; 4], body: &[u8]| {
+      png.extend_from_slice(&(body.len() as u32).to_be_bytes());
+      let start = png.len();
+      png.extend_from_slice(kind);
+      png.extend_from_slice(body);
+      let crc = crc32fast::hash(&png[start..]);
+      png.extend_from_slice(&crc.to_be_bytes());
+   };
+   chunk(b"IHDR", &header);
+   chunk(b"IDAT", &compress_to_vec_zlib(&scanlines, 6));
+   chunk(b"IEND", &[]);
+   Ok(BASE64.encode(&png))
 }
 
 fn parts(content: &[ContentPart]) -> ChatContent {

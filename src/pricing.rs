@@ -117,7 +117,7 @@ impl PriceTable {
 
    fn parse(body: &str) -> Result<Self> {
       let raw: HashMap<String, Entry> =
-         serde_json::from_str(body).context("parsing the price table")?;
+         serde_json::from_slice(body.as_bytes()).context("parsing the price table")?;
       Ok(Self(
          raw.into_iter()
             .filter_map(|(name, entry)| entry.into_price().map(|price| (name, price)))

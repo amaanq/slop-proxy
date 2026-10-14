@@ -92,7 +92,7 @@ pub async fn refresh_at(
          RefreshError::Transient(detail)
       });
    }
-   serde_json::from_str::<TokenResponse>(&body)
+   serde_json::from_slice::<TokenResponse>(body.as_bytes())
       .map_err(|err| RefreshError::Transient(format!("bad token response: {err}")))?
       .into_token_set(prior)
       .ok_or_else(|| RefreshError::Transient("token response missing refresh_token".into()))

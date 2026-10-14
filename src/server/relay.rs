@@ -545,7 +545,7 @@ impl SseScan {
             );
          } else if self.interesting
             && let Some(data) = line.strip_prefix("data:")
-            && let Ok(event) = serde_json::from_str::<RelayEvent>(data.trim_start())
+            && let Ok(event) = serde_json::from_slice::<RelayEvent>(data.trim_start().as_bytes())
          {
             apply_event(&self.capture, event);
          }

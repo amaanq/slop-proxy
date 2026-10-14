@@ -164,7 +164,7 @@ fn opening(head: &[u8]) -> Opening {
       if data.is_empty() {
          continue;
       }
-      let Ok(event) = serde_json::from_str::<OpeningEvent>(&data) else {
+      let Ok(event) = serde_json::from_slice::<OpeningEvent>(data.as_bytes()) else {
          return Opening::Serve;
       };
       let error = match event.kind.as_deref().unwrap_or_default() {

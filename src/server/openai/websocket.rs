@@ -17,6 +17,7 @@ use serde_json::{Map, Value};
 use tokio::time::{MissedTickBehavior, interval, timeout};
 use tokio_tungstenite::tungstenite::Message as UpstreamMessage;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame as UpstreamCloseFrame;
+use tracing::{Instrument as _, info_span};
 
 use crate::codex::turn_state::TurnState;
 use crate::codex::types::{ResponsesEvent, ResponsesRequest};
@@ -98,10 +99,11 @@ pub async fn responses(
       pending: BTreeMap::new(),
       upstream_failed: false,
    };
+   let span = info_span!("run", account_id = ?relay.account_id, session = %relay.session_key);
    let mut response = upgrade
       .max_message_size(MAX_MESSAGE_SIZE)
       .max_frame_size(MAX_MESSAGE_SIZE)
-      .on_upgrade(move |socket| relay.run(socket, upstream.socket));
+      .on_upgrade(move |socket| relay.run(socket, upstream.socket).instrument(span));
    for name in [
       "x-codex-turn-state",
       "x-reasoning-included",
@@ -152,7 +154,7 @@ struct Relay {
 
 impl Relay {
    async fn request(&mut self, text: &str, upstream: &mut Socket) -> Result<String, Response> {
-      let value: Value = serde_json::from_str(text)
+      let value: Value = serde_json::from_slice(text.as_bytes())
          .map_err(|err| translation_error(DIALECT, &format!("invalid request {err}")))?;
       if value.get("type").and_then(Value::as_str) != Some("response.create") {
          return Ok(text.to_owned());
@@ -232,7 +234,7 @@ impl Relay {
       req.rest.remove("background");
       let encoded = serde_json::to_string(&req)
          .map_err(|err| translation_error(DIALECT, &format!("serializing request {err}")))?;
-      let facts = serde_json::from_str::<ResponsesRequest>(&encoded)
+      let facts = serde_json::from_slice::<ResponsesRequest>(encoded.as_bytes())
          .ok()
          .map(|typed| RequestFacts::from_responses(&typed, &self.headers))
          .unwrap_or_default();
@@ -261,7 +263,7 @@ impl Relay {
    }
 
    async fn observe(&mut self, text: String) -> String {
-      let Ok(mut value) = serde_json::from_str::<Value>(&text) else {
+      let Ok(mut value) = serde_json::from_slice::<Value>(text.as_bytes()) else {
          return text;
       };
       if value.get("type").and_then(Value::as_str) == Some("codex.rate_limits") {
@@ -377,7 +379,7 @@ impl Relay {
       }
    }
 
-   #[tracing::instrument(skip_all, fields(account_id = ?self.account_id, session = %self.session_key))]
+   #[expect(clippy::cognitive_complexity, reason = "one select loop over both sockets")]
    async fn run(mut self, mut client: WebSocket, mut upstream: Socket) {
       let mut keepalive = interval(PING_INTERVAL);
       keepalive.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -409,7 +411,7 @@ impl Relay {
                   Message::Text(text) => match self.request(&text, &mut upstream).await {
                      Ok(text) => UpstreamMessage::Text(text.into()),
                      Err(response) => {
-                        let lane = serde_json::from_str::<Value>(&text).ok()
+                        let lane = serde_json::from_slice::<Value>(text.as_bytes()).ok()
                            .and_then(|value| value.get("stream_id").cloned());
                         let error = response_error(response, lane).await;
                         if !send(&mut client, error, "client").await { break; }

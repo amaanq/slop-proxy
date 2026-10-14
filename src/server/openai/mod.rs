@@ -645,7 +645,7 @@ fn repair_tool_arguments(rest: &mut Map<String, Value>) -> (usize, usize) {
             item.insert("arguments".into(), Value::String("{}".into()));
             repaired += 1;
          }
-      } else if serde_json::from_str::<Value>(arguments).is_err() {
+      } else if serde_json::from_slice::<Value>(arguments.as_bytes()).is_err() {
          *item = Value::Null;
          malformed += 1;
       }
@@ -964,13 +964,13 @@ async fn raw_response(
    let mut final_response = Option::<Box<RawValue>>::None;
    while let Some(event) = raw_events.next().await {
       let Ok(event) = event else { break };
-      if let Ok(parsed) = serde_json::from_str::<ResponsesEvent>(&event.data) {
+      if let Ok(parsed) = serde_json::from_slice::<ResponsesEvent>(event.data.as_bytes()) {
          capture.observe(&parsed);
       }
       if let Ok(TerminalEvent {
          kind,
          response: Some(response),
-      }) = serde_json::from_str::<TerminalEvent>(&event.data)
+      }) = serde_json::from_slice::<TerminalEvent>(event.data.as_bytes())
          && matches!(
             kind.as_str(),
             "response.completed" | "response.incomplete" | "response.failed"
@@ -1108,7 +1108,9 @@ fn relay_stream(resp: reqwest::Response, guard: LogGuard, capture: UsageCapture)
                      capture.note_event(&event.event);
                   }
                   capture.note_bytes(event.data.len());
-                  if let Ok(parsed) = serde_json::from_str::<ResponsesEvent>(&event.data) {
+                  if let Ok(parsed) =
+                     serde_json::from_slice::<ResponsesEvent>(event.data.as_bytes())
+                  {
                      capture.observe(&parsed);
                   }
                   if event.data.starts_with(r#"{"type":"error""#)

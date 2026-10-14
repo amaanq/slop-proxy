@@ -19,7 +19,7 @@ pub type ZenPool = Pool<ZenClient>;
 /// Decoys that get a request past the free tier, which since 2026-10-13
 /// also checks each one's parameters against the CLI's own.
 static GATE_TOOLS: LazyLock<Vec<ToolDef>> = LazyLock::new(|| {
-   serde_json::from_str::<Vec<ToolDef>>(include_str!("zen_gate_tools.json"))
+   serde_json::from_slice::<Vec<ToolDef>>(include_bytes!("zen_gate_tools.json"))
       .expect("zen_gate_tools.json is valid")
 });
 

@@ -125,7 +125,7 @@ pub fn with_zen_entries<'zen, Zen>(raw: &str, template: &str, zen: Zen) -> Optio
 where
    Zen: IntoIterator<Item = &'zen ZenModel>,
 {
-   let mut catalog: Catalog = serde_json::from_str(raw).ok()?;
+   let mut catalog: Catalog = serde_json::from_slice(raw.as_bytes()).ok()?;
    let present: Vec<String> = catalog
       .models
       .iter()

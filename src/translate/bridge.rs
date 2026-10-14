@@ -245,7 +245,7 @@ impl ChatToResponses {
             // offered as is unwrapped before the item is handed back.
             let custom = self.custom.contains(&call.name);
             let body = if custom {
-               serde_json::from_str::<HashMap<String, String>>(&call.arguments)
+               serde_json::from_slice::<HashMap<String, String>>(call.arguments.as_bytes())
                   .ok()
                   .and_then(|mut args| args.remove(FREEFORM_ARG))
                   .unwrap_or_else(|| call.arguments.clone())

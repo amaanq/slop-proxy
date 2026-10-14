@@ -1,6 +1,6 @@
 use std::array::from_fn;
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Display;
 use std::fmt::Write as _;
 use std::hash::Hash;
@@ -135,7 +135,7 @@ pub struct Totals {
    errors: Family<[String; 3], ErrorRow>,
    tools: Family<[String; 2], ToolRow>,
    insights: Family<[String; 3], InsightRow>,
-   sessions: HashMap<(String, String), Session>,
+   sessions: BTreeMap<(String, String), Session>,
 }
 
 impl Totals {
@@ -181,8 +181,8 @@ impl Totals {
    }
 
    fn session_rows(&self) -> Vec<SessionRow> {
-      let mut users = HashMap::<&str, SessionRow>::new();
-      for ((user, _), session) in &self.sessions {
+      let mut users = BTreeMap::<&str, SessionRow>::new();
+      for (&(ref user, _), session) in &self.sessions {
          let row = users.entry(user).or_insert_with(|| SessionRow {
             user: user.clone(),
             sessions: 0,

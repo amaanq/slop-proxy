@@ -449,45 +449,45 @@ pub struct MetricsDelta {
 }
 
 impl AddAssign for MetricsRow {
-   fn add_assign(&mut self, other: Self) {
-      self.requests += other.requests;
-      self.errors += other.errors;
-      self.input_tokens += other.input_tokens;
-      self.output_tokens += other.output_tokens;
-      self.cache_read_tokens += other.cache_read_tokens;
-      self.cache_write_tokens += other.cache_write_tokens;
-      self.reasoning_tokens += other.reasoning_tokens;
-      self.cost_usd += other.cost_usd;
-      self.list_cost_usd += other.list_cost_usd;
-      self.duration_ms += other.duration_ms;
+   fn add_assign(&mut self, rhs: Self) {
+      self.requests += rhs.requests;
+      self.errors += rhs.errors;
+      self.input_tokens += rhs.input_tokens;
+      self.output_tokens += rhs.output_tokens;
+      self.cache_read_tokens += rhs.cache_read_tokens;
+      self.cache_write_tokens += rhs.cache_write_tokens;
+      self.reasoning_tokens += rhs.reasoning_tokens;
+      self.cost_usd += rhs.cost_usd;
+      self.list_cost_usd += rhs.list_cost_usd;
+      self.duration_ms += rhs.duration_ms;
    }
 }
 
 impl AddAssign for ErrorRow {
-   fn add_assign(&mut self, other: Self) {
-      self.count += other.count;
+   fn add_assign(&mut self, rhs: Self) {
+      self.count += rhs.count;
    }
 }
 
 impl AddAssign for ToolRow {
-   fn add_assign(&mut self, other: Self) {
-      self.count += other.count;
-      self.errors += other.errors;
+   fn add_assign(&mut self, rhs: Self) {
+      self.count += rhs.count;
+      self.errors += rhs.errors;
    }
 }
 
 impl AddAssign for InsightRow {
-   fn add_assign(&mut self, other: Self) {
-      self.requests += other.requests;
-      self.request_bytes += other.request_bytes;
-      self.response_bytes += other.response_bytes;
-      self.turns += other.turns;
-      self.images += other.images;
-      self.thinking_budget += other.thinking_budget;
-      self.tools_declared += other.tools_declared;
-      self.ttft_ms += other.ttft_ms;
-      self.ttft_samples += other.ttft_samples;
-      self.attempts += other.attempts;
+   fn add_assign(&mut self, rhs: Self) {
+      self.requests += rhs.requests;
+      self.request_bytes += rhs.request_bytes;
+      self.response_bytes += rhs.response_bytes;
+      self.turns += rhs.turns;
+      self.images += rhs.images;
+      self.thinking_budget += rhs.thinking_budget;
+      self.tools_declared += rhs.tools_declared;
+      self.ttft_ms += rhs.ttft_ms;
+      self.ttft_samples += rhs.ttft_samples;
+      self.attempts += rhs.attempts;
    }
 }
 

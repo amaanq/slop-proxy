@@ -3,6 +3,7 @@ name        = "slop-proxy"
 version     = "0.1.0"
 edition     = "2024"
 description = "Pools subscription accounts behind one Anthropic, OpenAI and Gemini compatible endpoint"
+license     = "AGPL-3.0-only"
 repository  = "https://github.com/amaanq/slop-proxy"
 keywords    = [ "proxy", "llm", "anthropic", "openai", "gemini" ]
 categories  = [ "command-line-utilities", "web-programming::http-server" ]

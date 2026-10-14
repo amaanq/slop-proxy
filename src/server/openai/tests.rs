@@ -8,7 +8,7 @@ mod passthrough_tests {
           "service_tier": "priority",
           "input": [],
       });
-      let req: PassthroughRequest = serde_json::from_value(body).unwrap();
+      let req = serde_json::from_value::<PassthroughRequest>(body).unwrap();
       assert_eq!(req.service_tier.as_deref(), Some("priority"));
       let out = serde_json::to_value(&req).unwrap();
       assert_eq!(out["service_tier"], "priority");
@@ -24,7 +24,7 @@ mod passthrough_tests {
           "tools": [{"type": "custom", "name": "apply_patch", "format": {"type": "grammar", "syntax": "lark"}}],
           "reasoning": {"summary": "auto"},
       });
-      let req: PassthroughRequest = serde_json::from_value(body.clone()).unwrap();
+      let req = serde_json::from_value::<PassthroughRequest>(body.clone()).unwrap();
       let out = serde_json::to_value(&req).unwrap();
       assert_eq!(out["input"], body["input"]);
       assert_eq!(out["tools"], body["tools"]);
@@ -73,12 +73,12 @@ mod unpaired_tool_tests {
           {"type": "reasoning", "summary": []},
       ]));
       assert_eq!(drop_unpaired_tool_items(&mut rest), 2);
-      let kinds: Vec<_> = rest["input"]
+      let kinds = rest["input"]
          .as_array()
          .unwrap()
          .iter()
          .map(|item| item["type"].as_str().unwrap())
-         .collect();
+         .collect::<Vec<_>>();
       assert_eq!(
          kinds,
          [
@@ -105,12 +105,12 @@ mod unpaired_tool_tests {
          serde_json::json!([{"type": "function", "name": "shell"}]),
       );
       zen_input_fixups(&mut rest, "u1");
-      let names: Vec<_> = rest["tools"]
+      let names = rest["tools"]
          .as_array()
          .unwrap()
          .iter()
          .map(|tool| tool["name"].as_str().unwrap())
-         .collect();
+         .collect::<Vec<_>>();
       assert_eq!(names, ["shell", "spawn_agent", "wait_agent"]);
       assert_eq!(
          rest["input"],
@@ -222,7 +222,7 @@ mod terminal_event_tests {
    #[test]
    fn the_final_response_survives_the_terminal_frame() {
       let frame = r#"{"type":"response.completed","sequence_number":9,"response":{"id":"resp_1","usage":{"input_tokens":1}}}"#;
-      let event: TerminalEvent = serde_json::from_str(frame).unwrap();
+      let event = serde_json::from_str::<TerminalEvent>(frame).unwrap();
       assert_eq!(event.kind, "response.completed");
       assert_eq!(
          event.response.unwrap().get(),

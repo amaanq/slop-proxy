@@ -262,7 +262,7 @@ mod finish_reason_tests {
 
    #[test]
    fn an_unlisted_reason_keeps_googles_word() {
-      let reason: FinishReason = serde_json::from_str(r#""RECITATION""#).unwrap();
+      let reason = serde_json::from_str::<FinishReason>(r#""RECITATION""#).unwrap();
       assert_eq!(reason.label(), "recitation");
       assert_eq!(
          serde_json::from_str::<FinishReason>(r#""MAX_TOKENS""#).unwrap(),

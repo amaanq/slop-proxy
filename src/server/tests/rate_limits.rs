@@ -102,7 +102,7 @@ async fn retry_after_on_request_limit_for_both_dialects() {
       .parse::<i64>()
       .unwrap();
    assert!(retry >= 1);
-   let value: serde_json::Value = second.json().await.unwrap();
+   let value = second.json::<serde_json::Value>().await.unwrap();
    assert_eq!(value["error"]["type"], "rate_limit_error");
    let third = client
       .post(format!("{base}/v1/messages"))
@@ -125,7 +125,7 @@ async fn retry_after_on_request_limit_for_both_dialects() {
       .parse::<i64>()
       .unwrap();
    assert!(retry_third >= 1);
-   let third_value: serde_json::Value = third.json().await.unwrap();
+   let third_value = third.json::<serde_json::Value>().await.unwrap();
    assert_eq!(third_value["type"], "error");
    assert_eq!(third_value["error"]["type"], "rate_limit_error");
 }
@@ -184,7 +184,7 @@ async fn retry_after_on_token_limit() {
       .parse::<i64>()
       .unwrap();
    assert!(retry >= 1);
-   let value: serde_json::Value = second.json().await.unwrap();
+   let value = second.json::<serde_json::Value>().await.unwrap();
    assert_eq!(value["error"]["type"], "rate_limit_error");
 }
 
@@ -212,7 +212,7 @@ async fn retry_after_on_codex_upstream_rate_limit() {
       .parse::<i64>()
       .unwrap();
    assert!(retry >= 1);
-   let value: serde_json::Value = response.json().await.unwrap();
+   let value = response.json::<serde_json::Value>().await.unwrap();
    assert_eq!(value["error"]["type"], "rate_limit_exceeded");
 }
 
@@ -259,7 +259,7 @@ async fn retry_after_on_anthropic_upstream_rate_limit() {
       .parse::<i64>()
       .unwrap();
    assert!(retry >= 1);
-   let value: serde_json::Value = response.json().await.unwrap();
+   let value = response.json::<serde_json::Value>().await.unwrap();
    assert_eq!(value["type"], "error");
    assert_eq!(value["error"]["type"], "rate_limit_error");
 }

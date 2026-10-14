@@ -125,7 +125,7 @@ async fn chat_preserves_payloads_usage_and_provider_scope() {
       {
          let seen = requests.lock().unwrap();
          assert_eq!(seen.len(), 1);
-         let sent: serde_json::Value = serde_json::from_slice(&seen[0].1).unwrap();
+         let sent = serde_json::from_slice::<serde_json::Value>(&seen[0].1).unwrap();
          assert_eq!(sent["model"], "gpt-5-copilot");
          if streaming {
             assert_eq!(sent["stream_options"]["include_usage"], true);

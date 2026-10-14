@@ -38,7 +38,7 @@ async fn mock() -> (String, Db, mpsc::Receiver<Value>, Arc<Mutex<HeaderMap>>) {
                   let ServerMessage::Text(text) = message else {
                      continue;
                   };
-                  let value: Value = serde_json::from_str(&text).unwrap();
+                  let value = serde_json::from_str::<Value>(&text).unwrap();
                   let _ = sender.send(value.clone()).await;
                   if value["hold"] == true {
                      continue;

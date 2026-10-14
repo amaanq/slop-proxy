@@ -266,7 +266,7 @@ mod tests {
             },
          });
          assert_eq!(frames.len(), 1);
-         let value: serde_json::Value = serde_json::from_str(&frames[0]).unwrap();
+         let value = serde_json::from_str::<serde_json::Value>(&frames[0]).unwrap();
          indices.push(
             value["choices"][0]["delta"]["tool_calls"][0]["index"]
                .as_u64()
@@ -289,7 +289,7 @@ mod tests {
          },
       });
       assert_eq!(frames.len(), 1);
-      let value: serde_json::Value = serde_json::from_str(&frames[0]).unwrap();
+      let value = serde_json::from_str::<serde_json::Value>(&frames[0]).unwrap();
       assert_eq!(
          value,
          json!({"error": {"message": "boom", "type": "api_error", "code": null}})

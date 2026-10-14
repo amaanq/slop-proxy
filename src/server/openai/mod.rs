@@ -178,10 +178,10 @@ pub async fn chat_completions(
             Some(event) => (translator.handle(event), false),
             None => (translator.finalize(), true),
          };
-         let mut out: Vec<Event> = chunks
+         let mut out = chunks
             .into_iter()
             .map(|chunk| Event::default().data(chunk))
-            .collect();
+            .collect::<Vec<Event>>();
          if done {
             out.push(Event::default().data("[DONE]"));
          }
@@ -1074,7 +1074,7 @@ struct TerminalEvent {
 
 /// What codex reads for `/status`.
 fn rate_limit_headers(windows: &[UsageWindow], headers: &mut HeaderMap) {
-   let mut sorted: Vec<_> = windows.iter().collect();
+   let mut sorted = windows.iter().collect::<Vec<_>>();
    sorted.sort_by_key(|window| window_seconds(&window.name).unwrap_or(i64::MAX));
    for (tier, window) in ["primary", "secondary"].iter().zip(sorted) {
       let Some(minutes) = window_seconds(&window.name).map(|secs| secs / 60) else {
@@ -1116,7 +1116,7 @@ fn relay_stream(resp: reqwest::Response, guard: LogGuard, capture: UsageCapture)
                   if event.data.starts_with(r#"{"type":"error""#)
                      || event.data.starts_with(r#"{"type":"response.failed""#)
                   {
-                     let head: String = event.data.chars().take(600).collect();
+                     let head = event.data.chars().take(600).collect::<String>();
                      tracing::warn!(frame = %head, "upstream failed inside a 200");
                   }
                   let mut out = Event::default().data(restore_reserved_namespace(event.data));

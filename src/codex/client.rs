@@ -98,7 +98,7 @@ const DROPPED_PAYLOAD_NOTE: &str =
 /// the backend refuses the whole request over them. Dropping the parts it
 /// cannot read is the only way the thread continues.
 fn drop_undecryptable_payloads(req: &Bytes) -> Option<Bytes> {
-   let mut body: Value = serde_json::from_slice(req).ok()?;
+   let mut body = serde_json::from_slice::<Value>(req).ok()?;
    let items = body.get_mut("input")?.as_array_mut()?;
    let mut dropped = 0_usize;
    for item in items.iter_mut() {
@@ -491,8 +491,8 @@ mod tests {
       let req = Bytes::from(
          r#"{"input":[{"type":"agent_message","author":"/root/a","recipient":"/root","content":[{"type":"input_text","text":"Payload:\n"},{"type":"encrypted_content","encrypted_content":"gAAAAx"}]},{"type":"message","role":"user","content":"hi"}]}"#,
       );
-      let retry: Value =
-         serde_json::from_slice(&drop_undecryptable_payloads(&req).unwrap()).unwrap();
+      let retry =
+         serde_json::from_slice::<Value>(&drop_undecryptable_payloads(&req).unwrap()).unwrap();
       assert_eq!(retry["input"][0]["content"][1]["type"], "input_text");
       assert!(
          drop_undecryptable_payloads(&Bytes::from(

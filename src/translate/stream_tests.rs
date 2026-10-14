@@ -58,7 +58,7 @@ async fn interleaved_calls_keep_their_arguments_in_every_renderer() {
       .into_iter()
       .flat_map(|event| chat.handle(event))
    {
-      let value: Value = serde_json::from_str(&frame).unwrap();
+      let value = serde_json::from_str::<Value>(&frame).unwrap();
       let delta = &value["choices"][0]["delta"];
       if let Some(content) = delta["content"].as_str() {
          text.push_str(content);
@@ -89,7 +89,7 @@ async fn interleaved_calls_keep_their_arguments_in_every_renderer() {
       .into_iter()
       .flat_map(|event| messages.handle(event))
    {
-      let value: Value = serde_json::from_str(&frame).unwrap();
+      let value = serde_json::from_str::<Value>(&frame).unwrap();
       if kind == "content_block_start" && value["content_block"]["type"] == "tool_use" {
          assert_eq!(value["content_block"]["input"], json!({}));
          assert_eq!(
@@ -264,8 +264,8 @@ fn additional_tool_definitions_reach_gemini() {
    let chat = to_chat(&req);
    let tool = &chat.tools.as_ref().unwrap()[0];
    assert_eq!(tool.def().name.as_deref(), Some("shell"));
-   let parameters: Value =
-      serde_json::from_str(tool.def().parameters.as_ref().unwrap().get()).unwrap();
+   let parameters =
+      serde_json::from_str::<Value>(tool.def().parameters.as_ref().unwrap().get()).unwrap();
    assert_eq!(parameters["required"], json!(["input"]));
 }
 

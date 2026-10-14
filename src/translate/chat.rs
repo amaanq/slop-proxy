@@ -497,7 +497,7 @@ mod tests {
    /// value cannot be read back out of that buffer without help.
    #[test]
    fn a_flat_tool_keeps_its_parameters() {
-      let def: ChatToolDef = serde_json::from_str(
+      let def = serde_json::from_str::<ChatToolDef>(
          r#"{"type":"function","name":"f","parameters":{"type":"object","properties":{}}}"#,
       )
       .unwrap();
@@ -605,7 +605,7 @@ mod tests {
 
    #[test]
    fn a_bare_image_part_type_is_accepted() {
-      let part: ChatPart = serde_json::from_value(json!({
+      let part = serde_json::from_value::<ChatPart>(json!({
           "type": "image",
           "image_url": {"url": "u"},
       }))
@@ -614,8 +614,9 @@ mod tests {
          panic!("expected image part: {part:?}");
       };
       assert_eq!(first.url(), "u");
-      let part2: ChatPart =
-         serde_json::from_value(json!({"type": "image_url", "image_url": "u"})).unwrap();
+      let part2 =
+         serde_json::from_value::<ChatPart>(json!({"type": "image_url", "image_url": "u"}))
+            .unwrap();
       let ChatPart::ImageUrl { image_url: second } = part2 else {
          panic!("expected image part: {part2:?}");
       };

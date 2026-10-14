@@ -34,16 +34,16 @@ fn missing_gate_tools(declared: &[&str]) -> Vec<&'static ToolDef> {
 /// reaches zen byte for byte. The CLI's SDK leaves input messages untagged,
 /// and the gate now rejects an explicit `"type": "message"`.
 pub fn satisfy_tool_gate(body: &Bytes) -> Option<Bytes> {
-   let mut req: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(body).ok()?;
+   let mut req = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(body).ok()?;
    let mut tools: Vec<serde_json::Value> = req
       .get_mut("tools")
       .and_then(serde_json::Value::as_array_mut)
       .map(mem::take)
       .unwrap_or_default();
-   let declared: Vec<&str> = tools
+   let declared = tools
       .iter()
       .filter_map(|tool| tool.get("name")?.as_str())
-      .collect();
+      .collect::<Vec<&str>>();
    let missing = missing_gate_tools(&declared);
 
    let mut untagged = 0_usize;
@@ -79,10 +79,10 @@ pub fn satisfy_tool_gate(body: &Bytes) -> Option<Bytes> {
 /// rather than at the top level.
 pub fn satisfy_chat_tool_gate(req: &mut ChatRequest) {
    let tools = req.tools.get_or_insert_with(Vec::new);
-   let declared: Vec<&str> = tools
+   let declared = tools
       .iter()
       .filter_map(|tool| tool.def().name.as_deref())
-      .collect();
+      .collect::<Vec<&str>>();
    let missing = missing_gate_tools(&declared);
    if missing.is_empty() {
       return;

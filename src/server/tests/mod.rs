@@ -597,7 +597,7 @@ async fn responses_preserve_terminal_status_and_bill_partial_usage() {
                   .contains(&format!("response.{kind}"))
             );
          } else {
-            let response: serde_json::Value = response.json().await.unwrap();
+            let response = response.json::<serde_json::Value>().await.unwrap();
             assert_eq!(response["status"], kind);
             assert_eq!(response["usage"]["output_tokens"], 5_i32);
          }
@@ -701,7 +701,7 @@ async fn bridged_responses_preserve_status_usage_and_output_order() {
          .await
          .unwrap();
       assert_eq!(response.status(), 200);
-      let value: serde_json::Value = response.json().await.unwrap();
+      let value = response.json::<serde_json::Value>().await.unwrap();
       assert_eq!(value["status"], status);
       assert_eq!(value["id"], "r");
       assert_eq!(value["usage"]["output_tokens"], 5_i32);

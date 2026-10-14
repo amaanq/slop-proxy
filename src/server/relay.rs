@@ -60,7 +60,7 @@ struct MetadataPeek {
 
 impl Peek {
    pub fn from_slice(body: &[u8], cfg: &ModelsConfig) -> Self {
-      let peek: PeekBody = serde_json::from_slice(body).unwrap_or_default();
+      let peek = serde_json::from_slice::<PeekBody>(body).unwrap_or_default();
       let model = peek.model.unwrap_or_default();
       let resolved = resolve(cfg, &model);
       Self {
@@ -673,7 +673,7 @@ mod tests {
       let anthropic = super::normalized_body(&body, &peek, Provider::Anthropic);
       assert_eq!(anthropic, body);
       let glm = super::normalized_body(&body, &peek, Provider::Glm);
-      let parsed: serde_json::Value = serde_json::from_slice(&glm).unwrap();
+      let parsed = serde_json::from_slice::<serde_json::Value>(&glm).unwrap();
       assert_eq!(
          parsed["messages"][0]["content"][0]["cache_control"]["type"],
          "ephemeral"

@@ -192,7 +192,7 @@ async fn price_history(state: &AppState) {
       },
    };
    let table = state.prices.table();
-   let priced: Vec<_> = rows
+   let priced = rows
       .iter()
       .filter_map(|row| {
          let cost = state.prices.cost(&row.model, row.tokens);
@@ -202,7 +202,7 @@ async fn price_history(state: &AppState) {
             cost.to_bits() != row.cost.to_bits() || list_cost.to_bits() != row.list_cost.to_bits();
          (billable && changed).then_some((row.id, cost, list_cost))
       })
-      .collect();
+      .collect::<Vec<_>>();
    if priced.is_empty() {
       return;
    }

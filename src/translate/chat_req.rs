@@ -151,7 +151,7 @@ pub fn to_chat(req: &ResponsesRequest) -> ChatRequest {
       }
    }
 
-   let tools: Vec<ChatToolDef> = request_tools(req)
+   let tools = request_tools(req)
       .filter(|tool| !tool.name.is_empty())
       .map(|tool| {
          let parameters = if tool.kind == "custom" {
@@ -166,7 +166,7 @@ pub fn to_chat(req: &ResponsesRequest) -> ChatRequest {
             strict: None,
          })
       })
-      .collect();
+      .collect::<Vec<ChatToolDef>>();
 
    ChatRequest {
       model: req.model.clone(),

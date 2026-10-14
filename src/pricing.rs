@@ -116,8 +116,8 @@ impl PriceTable {
    }
 
    fn parse(body: &str) -> Result<Self> {
-      let raw: HashMap<String, Entry> =
-         serde_json::from_slice(body.as_bytes()).context("parsing the price table")?;
+      let raw = serde_json::from_slice::<HashMap<String, Entry>>(body.as_bytes())
+         .context("parsing the price table")?;
       Ok(Self(
          raw.into_iter()
             .filter_map(|(name, entry)| entry.into_price().map(|price| (name, price)))
@@ -165,7 +165,7 @@ impl Entry {
    fn long_context(&self, base: Rates) -> Option<(i64, Rates)> {
       let mut threshold = None;
       let mut above = base;
-      let mut keys: Vec<&String> = self.rest.keys().collect();
+      let mut keys = self.rest.keys().collect::<Vec<&String>>();
       keys.sort();
       for key in keys {
          let value = &self.rest[key];

@@ -154,14 +154,14 @@ struct Relay {
 
 impl Relay {
    async fn request(&mut self, text: &str, upstream: &mut Socket) -> Result<String, Response> {
-      let value: Value = serde_json::from_slice(text.as_bytes())
+      let value = serde_json::from_slice::<Value>(text.as_bytes())
          .map_err(|err| translation_error(DIALECT, &format!("invalid request {err}")))?;
       if value.get("type").and_then(Value::as_str) != Some("response.create") {
          return Ok(text.to_owned());
       }
       let started = Instant::now();
       let stream = stream_id(&value).to_owned();
-      let req: PassthroughRequest = serde_json::from_value(value)
+      let req = serde_json::from_value::<PassthroughRequest>(value)
          .map_err(|err| translation_error(DIALECT, &format!("invalid request {err}")))?;
       let (auth, _) = admit_token(&self.state, DIALECT, &self.token).await?;
       if auth
@@ -548,11 +548,11 @@ struct ErrorFrame {
 
 async fn response_error(response: Response, stream: Option<Value>) -> Message {
    let status = response.status();
-   let headers: BTreeMap<_, _> = response
+   let headers = response
       .headers()
       .iter()
       .filter_map(|(name, value)| Some((name.as_str().to_owned(), value.to_str().ok()?.to_owned())))
-      .collect();
+      .collect::<BTreeMap<_, _>>();
    let body = to_bytes(response.into_body(), 64 * 1024)
       .await
       .unwrap_or_default();

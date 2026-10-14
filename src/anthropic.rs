@@ -127,14 +127,14 @@ impl Usage {
    }
 
    pub fn windows(&self) -> impl Iterator<Item = (&'static str, &Window)> {
-      let dormant: Vec<&'static str> = self
+      let dormant = self
          .limits
          .iter()
          .filter(|limit| {
             limit.scope.is_none() && limit.is_active == Some(false) && limit.percent == 0.0_f64
          })
          .map(Limit::window_name)
-         .collect();
+         .collect::<Vec<&'static str>>();
       [("5h", &self.five_hour), ("7d", &self.seven_day)]
          .into_iter()
          .filter_map(|(name, slot)| slot.as_ref().map(|window| (name, window)))
@@ -353,17 +353,17 @@ mod tests {
 
    #[test]
    fn a_scoped_model_is_named_from_its_scope() {
-      let usage: Usage = serde_json::from_str(USAGE).unwrap();
-      let got: Vec<_> = usage
+      let usage = serde_json::from_str::<Usage>(USAGE).unwrap();
+      let got = usage
          .model_windows()
          .map(|(model, window, limit)| (model, window, limit.percent / 100.0_f64))
-         .collect();
+         .collect::<Vec<_>>();
       assert_eq!(got, vec![("fable".to_owned(), "7d", 0.63_f64)]);
    }
 
    #[test]
    fn a_dormant_window_is_not_reported() {
-      let usage: Usage = serde_json::from_str(
+      let usage = serde_json::from_str::<Usage>(
          r#"{
               "five_hour": {"utilization": 1.0},
               "seven_day": {"utilization": 0.0},
@@ -374,7 +374,7 @@ mod tests {
             }"#,
       )
       .unwrap();
-      let got: Vec<_> = usage.windows().map(|(name, _)| name).collect();
+      let got = usage.windows().map(|(name, _)| name).collect::<Vec<_>>();
       assert_eq!(got, vec!["5h"]);
    }
 
@@ -382,7 +382,7 @@ mod tests {
    /// array must not start reporting sub-limits that are not there.
    #[test]
    fn a_payload_without_limits_reports_none() {
-      let usage: Usage = serde_json::from_str(r#"{"seven_day": {"utilization": 10.0}}"#).unwrap();
+      let usage = serde_json::from_str::<Usage>(r#"{"seven_day": {"utilization": 10.0}}"#).unwrap();
       assert_eq!(usage.model_windows().count(), 0);
    }
 

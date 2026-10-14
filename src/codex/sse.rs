@@ -25,7 +25,7 @@ where
       |(mut bytes, mut buf, mut event, mut data)| async move {
          loop {
             while let Some(newline) = buf.iter().position(|&byte| byte == b'\n') {
-               let line: Vec<u8> = buf.drain(..=newline).collect();
+               let line = buf.drain(..=newline).collect::<Vec<u8>>();
                let line = String::from_utf8_lossy(&line);
                let line = line.trim_end_matches(['\n', '\r']);
                if line.is_empty() {

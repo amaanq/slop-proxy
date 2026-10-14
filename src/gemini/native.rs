@@ -314,8 +314,8 @@ fn tool_config(req: &ChatRequest) -> Option<ToolConfig> {
 }
 
 pub fn response(body: &[u8], requested_model: &str) -> Result<ChatCompletion, NativeError> {
-   let native: GenerateContentResponse =
-      serde_json::from_slice(body).map_err(NativeError::Response)?;
+   let native =
+      serde_json::from_slice::<GenerateContentResponse>(body).map_err(NativeError::Response)?;
    let choices = native
       .candidates
       .iter()
@@ -658,7 +658,7 @@ mod tests {
       let mut stream = NativeStream::new("m");
       let output = stream.feed(b"data: {\"error\":{\"code\":429,\"message\":\"slow down\",\"status\":\"RESOURCE_EXHAUSTED\",\"details\":[{\"@type\":\"x\"}]}}\n\n");
       assert_eq!(output.len(), 2);
-      let first: Value = serde_json::from_slice(&output[0][6..]).unwrap();
+      let first = serde_json::from_slice::<Value>(&output[0][6..]).unwrap();
       assert_eq!(first["error"]["code"], 429_i32);
       assert_eq!(first["error"]["status"], "RESOURCE_EXHAUSTED");
       assert_eq!(first["error"]["details"][0]["@type"], "x");
@@ -719,12 +719,12 @@ mod cutoff_tests {
       for chunk in include_bytes!("fixtures/native_cutoff.sse").chunks(64) {
          frames.extend(stream.feed(chunk));
       }
-      let tail: Vec<String> = frames
+      let tail = frames
          .iter()
          .rev()
          .take(2)
          .map(|frame| String::from_utf8_lossy(frame).into_owned())
-         .collect();
+         .collect::<Vec<String>>();
       assert_eq!(tail[0], "data: [DONE]\n\n");
       assert!(
          tail[1].contains("\"error\"") && tail[1].contains("UNAVAILABLE"),

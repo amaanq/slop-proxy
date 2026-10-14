@@ -55,7 +55,7 @@ struct CopilotToken {
 }
 
 pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
-   let code: DeviceCode = http()
+   let code = http()
       .post(DEVICE_CODE_URL)
       .header("accept", "application/json")
       .json(&DeviceCodeRequest {
@@ -65,7 +65,7 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
       .send()
       .await
       .context("requesting device code")?
-      .json()
+      .json::<DeviceCode>()
       .await
       .context("parsing device code response")?;
    println!(
@@ -81,7 +81,7 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
          bail!("device authorization timed out");
       }
       sleep(interval).await;
-      let grant: AccessGrant = http()
+      let grant = http()
          .post(ACCESS_TOKEN_URL)
          .header("accept", "application/json")
          .json(&AccessTokenRequest {
@@ -92,7 +92,7 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
          .send()
          .await
          .context("polling device authorization")?
-         .json()
+         .json::<AccessGrant>()
          .await
          .context("parsing device token response")?;
       if let Some(token) = grant.access_token {
@@ -157,8 +157,8 @@ pub async fn mint(github_token: &str) -> Result<TokenSet, RefreshError> {
          _ => RefreshError::Transient(format!("{status}: {text}")),
       });
    }
-   let minted: CopilotToken = resp
-      .json()
+   let minted = resp
+      .json::<CopilotToken>()
       .await
       .map_err(|err| RefreshError::Transient(format!("parsing copilot token: {err}")))?;
    Ok(TokenSet {

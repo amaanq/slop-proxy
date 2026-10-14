@@ -168,7 +168,7 @@ const MIN_RESET_SECS: i64 = 300;
 
 pub fn window_seconds(name: &str) -> Option<i64> {
    let (value, unit) = name.split_at(name.len().checked_sub(1)?);
-   let value: i64 = value.parse().ok()?;
+   let value = value.parse::<i64>().ok()?;
    match unit {
       "m" => Some(value * 60),
       "h" => Some(value * 3600),
@@ -245,13 +245,13 @@ impl Slots {
    /// the in-memory grant is stale.
    pub async fn reload(&self) -> misstep::Result<()> {
       let _reload = self.reload_gate.lock().await;
-      let accounts: Vec<_> = self
+      let accounts = self
          .db
          .list_accounts()
          .await?
          .into_iter()
          .filter(|account| account.provider == self.provider)
-         .collect();
+         .collect::<Vec<_>>();
 
       let slots = self.list().await;
       let mut next = Vec::with_capacity(accounts.len());

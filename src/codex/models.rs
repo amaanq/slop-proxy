@@ -125,12 +125,12 @@ pub fn with_zen_entries<'zen, Zen>(raw: &str, template: &str, zen: Zen) -> Optio
 where
    Zen: IntoIterator<Item = &'zen ZenModel>,
 {
-   let mut catalog: Catalog = serde_json::from_slice(raw.as_bytes()).ok()?;
-   let present: Vec<String> = catalog
+   let mut catalog = serde_json::from_slice::<Catalog>(raw.as_bytes()).ok()?;
+   let present = catalog
       .models
       .iter()
       .filter_map(|entry| entry.slug.clone())
-      .collect();
+      .collect::<Vec<String>>();
    let base = catalog
       .models
       .iter()
@@ -142,7 +142,7 @@ where
             .find(|entry| entry.visibility.as_deref() == Some("list"))
       })?
       .clone();
-   let levels: Vec<ReasoningLevel> = base
+   let levels = base
       .supported_reasoning_levels
       .iter()
       .flatten()
@@ -153,7 +153,7 @@ where
             .is_some_and(|effort| ZEN_EFFORTS.contains(&effort))
       })
       .cloned()
-      .collect();
+      .collect::<Vec<ReasoningLevel>>();
    for model in zen {
       let id = &model.id;
       if present.contains(id) {
@@ -216,7 +216,7 @@ mod zen_entry_tests {
    fn a_zen_model_inherits_the_template_with_function_tools_only() {
       let ids = [zen("muse-spark-1.3-contributor-free"), zen("muse-old")];
       let out = with_zen_entries(CATALOG, "gpt-5.6-sol", &ids).unwrap();
-      let catalog: serde_json::Value = serde_json::from_str(&out).unwrap();
+      let catalog = serde_json::from_str::<serde_json::Value>(&out).unwrap();
       let models = catalog["models"].as_array().unwrap();
       assert_eq!(models.len(), 3);
       let muse = &models[2];
@@ -227,12 +227,12 @@ mod zen_entry_tests {
       assert_eq!(muse["prefer_websockets"], false);
       assert_eq!(muse["web_search_tool_type"], "text");
       assert_eq!(muse["model_messages"]["instructions_template"], "be codex");
-      let efforts: Vec<_> = muse["supported_reasoning_levels"]
+      let efforts = muse["supported_reasoning_levels"]
          .as_array()
          .unwrap()
          .iter()
          .map(|level| level["effort"].as_str().unwrap())
-         .collect();
+         .collect::<Vec<_>>();
       assert_eq!(efforts, ["low", "xhigh"]);
    }
 

@@ -321,7 +321,7 @@ mod tests {
       let reported = snapshots[0].usage.as_ref().unwrap();
       assert_eq!(reported.windows.len(), 2);
       assert!((reported.peak() - 0.99_f64).abs() < f64::EPSILON);
-      let models: Vec<_> = reported
+      let models = reported
          .model_windows
          .iter()
          .map(|window| {
@@ -333,7 +333,7 @@ mod tests {
                window.resets_at,
             )
          })
-         .collect();
+         .collect::<Vec<_>>();
       assert_eq!(
          models,
          vec![

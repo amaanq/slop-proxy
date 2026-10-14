@@ -14,7 +14,7 @@ impl Frames {
       self.buf.extend_from_slice(bytes);
       let mut payloads = Vec::new();
       while let Some(newline) = self.buf.iter().position(|byte| *byte == b'\n') {
-         let line: Vec<u8> = self.buf.drain(..=newline).collect();
+         let line = self.buf.drain(..=newline).collect::<Vec<u8>>();
          let line = line.strip_suffix(b"\n").unwrap_or(&line);
          let line = line.strip_suffix(b"\r").unwrap_or(line);
          match line.strip_prefix(b"data:") {

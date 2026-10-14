@@ -551,6 +551,16 @@ impl Slots {
       {
          return Ok(credentials.access_token.clone());
       }
+      // Refresh tokens are single-use, and a draining predecessor shares the
+      // database, so one it already rotated is adopted rather than spent.
+      if let Ok(Some(stored)) = self.db.find_account(&slot.id.to_string()).await
+         && stored.refresh_token != credentials.refresh_token
+      {
+         credentials.access_token = stored.access_token;
+         credentials.refresh_token = stored.refresh_token;
+         credentials.expires_at = stored.access_expires_at;
+         return Ok(credentials.access_token.clone());
+      }
       tracing::info!(
          "refreshing {} access token for {}",
          self.provider,

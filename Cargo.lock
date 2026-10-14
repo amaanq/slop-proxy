@@ -1277,6 +1277,7 @@ dependencies = [
  "image-webp",
  "ipnet",
  "jiff",
+ "libc",
  "misstep",
  "png",
  "pound",

@@ -1,4 +1,5 @@
 use std::convert::Infallible;
+use std::env;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
@@ -24,6 +25,7 @@ use crate::oauth::glm;
 use crate::pool::codex::CodexPool;
 use crate::provider::{AuthMode, Provider};
 use crate::server;
+use crate::server::handoff::Successor;
 use crate::stats;
 
 /// Anthropic/OpenAI API proxy backed by pooled provider accounts
@@ -70,6 +72,12 @@ pub enum Command {
    /// Run the API server
    Serve {
       /// Listen address
+      #[pound(long)]
+      bind: Option<String>,
+   },
+   /// Start this binary as the running server's successor on the same sockets
+   Handoff {
+      /// Listen address, for when no socket is inherited
       #[pound(long)]
       bind: Option<String>,
    },
@@ -341,6 +349,15 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
       Command::Serve { bind } => {
          let bind = bind.unwrap_or_else(|| cfg.bind.clone());
          server::serve(db, cfg, &bind).await
+      },
+      Command::Handoff { bind } => {
+         let paths = [("--db", args.db), ("--config", args.config)]
+            .into_iter()
+            .filter_map(|(flag, path)| Some([flag.to_owned(), path?.to_string_lossy().into_owned()]))
+            .flatten();
+         let listen = bind.into_iter().flat_map(|addr| ["--bind".to_owned(), addr]);
+         let arguments = paths.chain(["serve".to_owned()]).chain(listen);
+         Successor::new(&env::current_exe()?, arguments).request().await
       },
       Command::Stats { since, until } => stats::run(&db, since, until).await,
       Command::Models => models(&db, &cfg).await,

@@ -15,6 +15,8 @@ use axum::response::IntoResponse as _;
 use axum::response::Response;
 use axum::routing::get;
 use tokio::net::TcpListener;
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
 use tokio::time::{self, MissedTickBehavior};
 
 use crate::clock;
@@ -54,11 +56,15 @@ impl Metrics {
    }
 }
 
-pub fn spawn(state: AppState, listener: TcpListener) {
+pub fn spawn(
+   state: AppState,
+   listener: TcpListener,
+   mut drain: watch::Receiver<bool>,
+) -> [JoinHandle<()>; 2] {
    let metrics = Metrics::new(state);
 
    let refresher = metrics.clone();
-   tokio::spawn(async move {
+   let refresh = tokio::spawn(async move {
       let mut totals = Totals::default();
       let mut tick = time::interval(Duration::from_mins(1));
       tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -68,14 +74,18 @@ pub fn spawn(state: AppState, listener: TcpListener) {
       }
    });
 
-   tokio::spawn(async move {
+   let listen = tokio::spawn(async move {
       let app = Router::new()
          .route("/metrics", get(serve))
          .with_state(metrics);
-      if let Err(err) = axum::serve(listener, app).await {
+      let stopped = async move {
+         let _ = drain.wait_for(|&draining| draining).await;
+      };
+      if let Err(err) = axum::serve(listener, app).with_graceful_shutdown(stopped).await {
          tracing::error!("metrics listener failed: {err}");
       }
    });
+   [refresh, listen]
 }
 
 pub async fn serve(State(metrics): State<Metrics>) -> Response {

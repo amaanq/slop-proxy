@@ -18,6 +18,7 @@ idna_adapter = "=1.0.0"
 image-webp = "0.2"
 ipnet = { features = [ "serde" ], version = "2" }
 jiff = { default-features = false, features = [ "serde", "std" ], version = "0.2" }
+libc = "0.2"
 misstep = { features = [ "panic-hook" ], version = "0.3" }
 png = "0.18"
 pound = "0.3"
@@ -40,6 +41,7 @@ tokio = {
 	features = [
 		"macros",
 		"net",
+		"process",
 		"rt-multi-thread",
 		"signal",
 		"sync",

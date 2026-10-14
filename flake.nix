@@ -80,6 +80,8 @@
           cfg = config.services.slop-proxy;
           settingsFormat = pkgs.formats.toml { };
           configFile = settingsFormat.generate "slop-proxy-config.toml" cfg.settings;
+          flags = "--db /var/lib/slop-proxy/slop.db --config ${configFile}";
+          metricsBind = cfg.settings.metrics_bind or null;
         in
         {
           options.services.slop-proxy = {
@@ -119,16 +121,40 @@
             };
             users.groups.slop-proxy = { };
 
+            systemd.sockets = {
+              slop-proxy = {
+                wantedBy = [ "sockets.target" ];
+                listenStreams = [ cfg.bind ];
+                socketConfig.FileDescriptorName = "api";
+              };
+              slop-proxy-metrics = lib.mkIf (metricsBind != null) {
+                wantedBy = [ "sockets.target" ];
+                listenStreams = [ metricsBind ];
+                socketConfig = {
+                  FileDescriptorName = "metrics";
+                  Service = "slop-proxy.service";
+                };
+              };
+            };
+
+            # A reload hands the sockets to the new binary and lets the old one
+            # drain, where a restart would drop every open stream.
             systemd.services.slop-proxy = {
               description = "slop-proxy API server";
               wantedBy = [ "multi-user.target" ];
               after = [ "network-online.target" ];
               wants = [ "network-online.target" ];
+              reloadIfChanged = true;
               serviceConfig = {
+                Type = "notify";
+                NotifyAccess = "all";
+                Sockets = [ "slop-proxy.socket" ] ++ lib.optional (metricsBind != null) "slop-proxy-metrics.socket";
                 User = "slop-proxy";
                 Group = "slop-proxy";
                 StateDirectory = "slop-proxy";
-                ExecStart = "${lib.getExe cfg.package} --db /var/lib/slop-proxy/slop.db --config ${configFile} serve --bind ${cfg.bind}";
+                RuntimeDirectory = "slop-proxy";
+                ExecStart = "${lib.getExe cfg.package} ${flags} serve --bind ${cfg.bind}";
+                ExecReload = "${lib.getExe cfg.package} ${flags} handoff --bind ${cfg.bind}";
                 Restart = "on-failure";
                 RestartSec = 5;
                 LimitNOFILE = 65536;

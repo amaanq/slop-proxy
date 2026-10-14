@@ -8,6 +8,7 @@ pub mod decompress;
 mod desktop;
 pub mod error;
 pub mod facts;
+pub mod handoff;
 mod gemini;
 pub mod metrics;
 pub mod openai;
@@ -27,8 +28,8 @@ use axum::extract::DefaultBodyLimit;
 use axum::middleware;
 use axum::routing::{get, post};
 use misstep::Result;
-use misstep::ResultExt as _;
-use tokio::net::TcpListener;
+use tokio::signal::unix::{self, SignalKind};
+use tokio::sync::watch;
 use tokio::{signal, time};
 
 use crate::codex::models::ModelsResponse;
@@ -36,6 +37,7 @@ use crate::codex::types::ResponsesRequest;
 use crate::config::Config;
 use crate::db::Db;
 use crate::db::usage::UsageRecord;
+use crate::server::handoff::{Inherited, Predecessor, Socket};
 use crate::pool::Pools;
 use crate::pricing::{Prices, Tokens};
 use crate::translate::UsageCapture;
@@ -69,7 +71,20 @@ impl AppState {
    }
 }
 
+/// How long a draining process keeps serving its open streams after a
+/// successor or a stop has taken over the sockets.
+const DRAIN_LIMIT: Duration = Duration::from_mins(15);
+
 pub async fn serve(db: Db, cfg: Config, bind: &str) -> Result<()> {
+   // Bound before the slow startup below, so connections queue in the
+   // kernel meanwhile rather than being refused.
+   let mut inherited = Inherited::take()?;
+   let listener = inherited.listen(Socket::Api, bind).await?;
+   let metrics_listener = match cfg.metrics_bind.as_deref() {
+      Some(addr) => Some(inherited.listen(Socket::Metrics, addr).await?),
+      None => None,
+   };
+
    let pools = Pools::load(&db, &cfg).await?;
    pools.refresh_catalogs().await;
    let prices = Prices::new(&cfg.db_path, cfg.pricing.url.clone());
@@ -80,8 +95,11 @@ pub async fn serve(db: Db, cfg: Config, bind: &str) -> Result<()> {
       prices,
       pools,
    }));
+   let (start_drain, drain) = watch::channel(false);
+   let mut tasks = Vec::new();
+
    let price_state = state.clone();
-   tokio::spawn(async move {
+   tasks.push(tokio::spawn(async move {
       price_history(&price_state).await;
       let mut tick = time::interval(Duration::from_hours(12));
       tick.tick().await;
@@ -91,18 +109,18 @@ pub async fn serve(db: Db, cfg: Config, bind: &str) -> Result<()> {
             price_history(&price_state).await;
          }
       }
-   });
+   }));
    let catalog_state = state.clone();
-   tokio::spawn(async move {
+   tasks.push(tokio::spawn(async move {
       let mut tick = time::interval(Duration::from_mins(5));
       tick.tick().await;
       loop {
          tick.tick().await;
          catalog_state.pools.refresh_catalogs().await;
       }
-   });
+   }));
    let reload_state = state.clone();
-   tokio::spawn(async move {
+   tasks.push(tokio::spawn(async move {
       let mut tick = time::interval(Duration::from_mins(1));
       tick.tick().await;
       loop {
@@ -111,27 +129,56 @@ pub async fn serve(db: Db, cfg: Config, bind: &str) -> Result<()> {
          reload_state.pools.refresh_egresses(&reload_state.cfg);
          reload_state.pools.poll_usage().await;
       }
+   }));
+
+   let mut sockets = vec![(Socket::Api, &listener)];
+   sockets.extend(metrics_listener.as_ref().map(|metrics| (Socket::Metrics, metrics)));
+   handoff::accept(&sockets, drain.clone())?;
+   if let Some(metrics_socket) = metrics_listener {
+      tracing::info!("metrics on http://{}/metrics", metrics_socket.local_addr()?);
+      tasks.extend(metrics::spawn(state.clone(), metrics_socket, drain.clone()));
+   }
+   tracing::info!("listening on http://{}", listener.local_addr()?);
+   handoff::notify_ready();
+   if let Some(predecessor) = Predecessor::from_env() {
+      predecessor.relieve();
+   }
+   tokio::spawn(async move {
+      wait_for_stop().await;
+      tracing::info!("draining open connections");
+      let _ = start_drain.send(true);
    });
 
-   if let Some(mbind) = state.cfg.metrics_bind.clone() {
-      let listener = TcpListener::bind(&mbind)
-         .await
-         .with_context(|| format!("binding metrics listener {mbind}"))?;
-      tracing::info!("metrics on http://{mbind}/metrics");
-      metrics::spawn(state.clone(), listener);
-   }
-   let app = router(state.clone());
-
-   let listener = TcpListener::bind(bind)
-      .await
-      .with_context(|| format!("binding {bind}"))?;
-   tracing::info!("listening on http://{bind}");
-   axum::serve(listener, app)
-      .with_graceful_shutdown(async {
-         let _ = signal::ctrl_c().await;
+   let mut stopped = drain.clone();
+   let server = axum::serve(listener, router(state.clone()))
+      .with_graceful_shutdown(async move {
+         let _ = stopped.wait_for(|&draining| draining).await;
       })
-      .await?;
+      .into_future();
+   tokio::pin!(server);
+   let mut limit = drain;
+   tokio::select! {
+      outcome = &mut server => outcome?,
+      () = async {
+         let _ = limit.wait_for(|&draining| draining).await;
+         for task in &tasks {
+            task.abort();
+         }
+         time::sleep(DRAIN_LIMIT).await;
+      } => tracing::warn!("dropping connections still open after {}s", DRAIN_LIMIT.as_secs()),
+   }
    state.db.flush().await
+}
+
+async fn wait_for_stop() {
+   let Ok(mut term) = unix::signal(SignalKind::terminate()) else {
+      let _ = signal::ctrl_c().await;
+      return;
+   };
+   tokio::select! {
+      _ = term.recv() => {},
+      _ = signal::ctrl_c() => {},
+   }
 }
 
 /// Costs the rows that were logged before their model had a price, so a table

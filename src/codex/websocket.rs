@@ -1,19 +1,57 @@
+use std::io;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use axum::http::Response;
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::Value;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
+use tokio_rustls::TlsConnector;
+use tokio_rustls::rustls::pki_types::ServerName;
+use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async_with_config, tungstenite};
+use tokio_tungstenite::{WebSocketStream, client_async_with_config, tungstenite};
 
 use crate::codex::client::{CodexClient, EXHAUSTED_CODES, RULES};
 use crate::upstream::{SendError, classify};
 
 pub const MAX_MESSAGE_SIZE: usize = 192 * 1024 * 1024;
-pub type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+pub type Socket = WebSocketStream<Box<dyn Transport>>;
+
+pub trait Transport: AsyncRead + AsyncWrite + Unpin + Send {}
+
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> Transport for T {}
+
+/// tokio-tungstenite's own TLS would put rustls ahead of axum in the build.
+static TLS: LazyLock<TlsConnector> = LazyLock::new(|| {
+   let roots = RootCertStore {
+      roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+   };
+   let config = ClientConfig::builder()
+      .with_root_certificates(roots)
+      .with_no_client_auth();
+   TlsConnector::from(Arc::new(config))
+});
+
+async fn open(url: &reqwest::Url, tls: bool) -> Result<Box<dyn Transport>, SendError> {
+   let network = |err: io::Error| SendError::Network(err.to_string());
+   let (Some(host), Some(port)) = (url.host_str(), url.port_or_known_default()) else {
+      return Err(SendError::Network(
+         "WebSocket upstream URL has no host".into(),
+      ));
+   };
+   let tcp = TcpStream::connect((host, port)).await.map_err(network)?;
+   if !tls {
+      return Ok(Box::new(tcp));
+   }
+
+   let name =
+      ServerName::try_from(host.to_owned()).map_err(|err| SendError::Network(err.to_string()))?;
+   Ok(Box::new(TLS.connect(name, tcp).await.map_err(network)?))
+}
 
 pub struct Connection {
    pub socket: Socket,
@@ -241,12 +279,13 @@ impl CodexClient {
       let config = WebSocketConfig::default()
          .max_message_size(Some(MAX_MESSAGE_SIZE))
          .max_frame_size(Some(MAX_MESSAGE_SIZE));
-      let result = timeout(
-         Duration::from_secs(30),
-         connect_async_with_config(request, Some(config), false),
-      )
-      .await
-      .map_err(|_| SendError::Network("WebSocket handshake timed out".into()))?;
+      let handshake = async {
+         let stream = open(&url, scheme == "wss").await?;
+         Ok::<_, SendError>(client_async_with_config(request, stream, Some(config)).await)
+      };
+      let result = timeout(Duration::from_secs(30), handshake)
+         .await
+         .map_err(|_| SendError::Network("WebSocket handshake timed out".into()))??;
       match result {
          Ok((socket, response)) => Ok(Connection {
             socket,

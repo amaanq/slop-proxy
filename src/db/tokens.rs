@@ -1,4 +1,5 @@
 use misstep::Result;
+use pound::ArgValue as _;
 use rusqlite::params;
 
 use crate::db::Db;
@@ -40,7 +41,7 @@ impl TokenLimits {
       self
          .providers
          .iter()
-         .map(|provider| provider.as_str())
+         .map(Provider::as_str)
          .collect::<Vec<_>>()
          .join(",")
    }

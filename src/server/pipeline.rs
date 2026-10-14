@@ -14,6 +14,7 @@ use axum::response::Response;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures_util::StreamExt as _;
 use futures_util::stream;
+use pound::ArgValue as _;
 use serde::Serialize;
 use tokio::time::timeout;
 
@@ -232,7 +233,7 @@ where
           status = record.status,
           body = %String::from_utf8_lossy(&bytes).chars().take(2000).collect::<String>(),
           "{} rejected the request",
-          record.provider.map_or("upstream", Provider::as_str)
+          record.provider.as_ref().map_or("upstream", Provider::as_str)
       );
       record.error_kind = Some(S::REJECTED.into());
       record.response_bytes = bytes.len() as i64;

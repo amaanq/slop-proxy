@@ -7,7 +7,7 @@ use std::result::Result as StdResult;
 use std::str::FromStr;
 
 use misstep::{Result, ResultExt as _, bail, report};
-use pound::Parse;
+use pound::{ArgValue as _, Parse};
 
 use crate::clock;
 use crate::codex::client::CodexClient;
@@ -141,8 +141,8 @@ pub enum AccountsCommand {
    /// Restrict an account to these users, comma separated. Omit to allow all.
    Users {
       account: String,
-      #[pound(long)]
-      allow: Option<String>,
+      #[pound(long, delimiter = ",")]
+      allow: Vec<String>,
    },
    /// Take an account out of service until `enable`
    Disable {
@@ -160,29 +160,8 @@ pub enum TokenCommand {
    Create {
       #[pound(long)]
       user: String,
-      /// Maximum requests in each rolling window
-      #[pound(long, min = "1")]
-      requests: Option<i64>,
-      /// Maximum input plus output tokens in each rolling window
-      #[pound(long, min = "1")]
-      tokens: Option<i64>,
-      #[pound(long, default = "3600", min = "1")]
-      window_seconds: i64,
-      /// Delay every admitted request by this many milliseconds
-      #[pound(long, default = "0", min = "0")]
-      slowdown_ms: i64,
-      /// Serve this token from trusted accounts when any are available
-      #[pound(long)]
-      prefer_trusted: bool,
-      /// Serve this token only from reserved accounts
-      #[pound(long)]
-      reserved_only: bool,
-      /// Providers this token may reach, comma separated. Empty allows all.
-      #[pound(long)]
-      providers: Option<String>,
-      /// Serve this token only from the named account, by id, email or label
-      #[pound(long)]
-      pin_account: Option<String>,
+      #[pound(flatten)]
+      limits: LimitArgs,
    },
    /// List issued tokens
    List,
@@ -191,28 +170,38 @@ pub enum TokenCommand {
    /// Replace limits for a token id or prefix; omitted limits are unlimited
    Limits {
       token: String,
-      #[pound(long, min = "1")]
-      requests: Option<i64>,
-      #[pound(long, min = "1")]
-      tokens: Option<i64>,
-      #[pound(long, default = "3600", min = "1")]
-      window_seconds: i64,
-      #[pound(long, default = "0", min = "0")]
-      slowdown_ms: i64,
-      #[pound(long)]
-      prefer_trusted: bool,
-      /// Serve this token only from reserved accounts
-      #[pound(long)]
-      reserved_only: bool,
-      /// Providers this token may reach, comma separated. Empty allows all.
-      #[pound(long)]
-      providers: Option<String>,
-      /// Serve this token only from the named account, by id, email or label
-      #[pound(long)]
-      pin_account: Option<String>,
+      #[pound(flatten)]
+      limits: LimitArgs,
    },
    /// Show metered usage for a token's current rolling window
    Usage { token: String },
+}
+
+#[derive(Parse)]
+pub struct LimitArgs {
+   /// Maximum requests in each rolling window
+   #[pound(long, min = "1")]
+   requests: Option<i64>,
+   /// Maximum input plus output tokens in each rolling window
+   #[pound(long, min = "1")]
+   tokens: Option<i64>,
+   #[pound(long, default = "3600", min = "1")]
+   window_seconds: i64,
+   /// Delay every admitted request by this many milliseconds
+   #[pound(long, default = "0", min = "0")]
+   slowdown_ms: i64,
+   /// Serve this token from trusted accounts when any are available
+   #[pound(long)]
+   prefer_trusted: bool,
+   /// Serve this token only from reserved accounts
+   #[pound(long)]
+   reserved_only: bool,
+   /// Providers this token may reach, comma separated. Omit to allow all.
+   #[pound(long, delimiter = ",")]
+   providers: Vec<Provider>,
+   /// Serve this token only from the named account, by id, email or label
+   #[pound(long)]
+   pin_account: Option<String>,
 }
 
 pub async fn run(args: Cli, cfg: Config) -> Result<()> {
@@ -285,9 +274,7 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
             )
             .await
          },
-         AccountsCommand::Users { account, allow } => {
-            accounts_users(&db, &account, allow.as_deref().unwrap_or_default()).await
-         },
+         AccountsCommand::Users { account, allow } => accounts_users(&db, &account, &allow).await,
          AccountsCommand::Disable { account, reason } => {
             accounts_status(&db, &account, AccountStatus::Disabled, reason.as_deref()).await
          },
@@ -296,53 +283,13 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
          },
       },
       Command::Token { command } => match command {
-         TokenCommand::Create {
-            user,
-            requests,
-            tokens,
-            window_seconds,
-            slowdown_ms,
-            prefer_trusted,
-            reserved_only,
-            providers,
-            pin_account,
-         } => {
-            let limits = token_limits(
-               requests,
-               tokens,
-               window_seconds,
-               slowdown_ms,
-               prefer_trusted,
-               reserved_only,
-               providers,
-               resolve_pin(&db, pin_account).await?,
-            )?;
-            token_create(&db, &user, &limits).await
+         TokenCommand::Create { user, limits } => {
+            token_create(&db, &user, &limits.resolve(&db).await?).await
          },
          TokenCommand::List => token_list(&db).await,
          TokenCommand::Revoke { token } => token_revoke(&db, &token).await,
-         TokenCommand::Limits {
-            token,
-            requests,
-            tokens,
-            window_seconds,
-            slowdown_ms,
-            prefer_trusted,
-            reserved_only,
-            providers,
-            pin_account,
-         } => {
-            let limits = token_limits(
-               requests,
-               tokens,
-               window_seconds,
-               slowdown_ms,
-               prefer_trusted,
-               reserved_only,
-               providers,
-               resolve_pin(&db, pin_account).await?,
-            )?;
-            token_set_limits(&db, &token, &limits).await
+         TokenCommand::Limits { token, limits } => {
+            token_set_limits(&db, &token, &limits.resolve(&db).await?).await
          },
          TokenCommand::Usage { token } => token_usage(&db, &token).await,
       },
@@ -523,12 +470,12 @@ async fn accounts_status(
    Ok(())
 }
 
-async fn accounts_users(db: &Db, account: &str, allow: &str) -> Result<()> {
-   let users: Vec<&str> = allow
-      .split(',')
-      .map(str::trim)
+async fn accounts_users(db: &Db, account: &str, allow: &[String]) -> Result<()> {
+   let users = allow
+      .iter()
+      .map(|user| user.trim())
       .filter(|user| !user.is_empty())
-      .collect();
+      .collect::<Vec<_>>();
    let found = lookup(db, account).await?;
    db.set_account(found.id, AccountField::AllowedUsers(users.join(",")))
       .await?;
@@ -556,48 +503,25 @@ async fn token_create(db: &Db, user: &str, limits: &TokenLimits) -> Result<()> {
    Ok(())
 }
 
-/// A pin is stored by id, so a label that no longer resolves must fail loudly
-/// rather than quietly leaving the token free to use the whole pool.
-async fn resolve_pin(db: &Db, account: Option<String>) -> Result<Option<i64>> {
-   let Some(key) = account else {
-      return Ok(None);
-   };
-   Ok(Some(lookup(db, &key).await?.id))
-}
-
-#[expect(
-   clippy::too_many_arguments,
-   reason = "both token subcommands hand over the same set of flags"
-)]
-fn token_limits(
-   requests: Option<i64>,
-   tokens: Option<i64>,
-   window_seconds: i64,
-   slowdown_ms: i64,
-   prefer_trusted: bool,
-   reserved_only: bool,
-   providers: Option<String>,
-   pinned_account: Option<i64>,
-) -> Result<TokenLimits> {
-   let providers = providers
-      .filter(|csv| !csv.trim().is_empty())
-      .map(|raw| {
-         raw.split(',')
-            .map(|part| part.parse::<Provider>().map_err(misstep::Report::msg))
-            .collect::<Result<Vec<_>>>()
+impl LimitArgs {
+   /// A pin is stored by id, so a label that no longer resolves must fail
+   /// loudly rather than quietly leaving the token free to use the whole pool.
+   async fn resolve(self, db: &Db) -> Result<TokenLimits> {
+      let pinned_account = match self.pin_account {
+         Some(key) => Some(lookup(db, &key).await?.id),
+         None => None,
+      };
+      Ok(TokenLimits {
+         requests: self.requests,
+         tokens: self.tokens,
+         window_seconds: self.window_seconds,
+         slowdown_ms: self.slowdown_ms,
+         prefer_trusted: self.prefer_trusted,
+         reserved_only: self.reserved_only,
+         pinned_account,
+         providers: self.providers,
       })
-      .transpose()?
-      .unwrap_or_default();
-   Ok(TokenLimits {
-      requests,
-      tokens,
-      window_seconds,
-      slowdown_ms,
-      prefer_trusted,
-      reserved_only,
-      pinned_account,
-      providers,
-   })
+   }
 }
 
 async fn token_set_limits(db: &Db, token: &str, limits: &TokenLimits) -> Result<()> {

@@ -1,57 +1,21 @@
 use std::fmt;
 use std::str::FromStr;
 
+use pound::ArgValue as _;
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, pound::ValueEnum)]
 pub enum Provider {
+   #[pound(name = "openai")]
    OpenAi,
    Anthropic,
    Gemini,
    Zen,
    Glm,
+   #[pound(name = "deepseek")]
    DeepSeek,
    Experiential,
    Copilot,
-}
-
-/// `ValueEnum` would derive `open-ai` from the variant name, which is a
-/// spelling no config pattern, database row or `--providers` list accepts.
-impl pound::FromArg for Provider {
-   const POSSIBLE: Option<&'static [&'static str]> = Some(&Self::NAMES);
-
-   fn from_arg(text: &str) -> Result<Self, pound::ValueError> {
-      text
-         .parse()
-         .map_err(|_| pound::ValueError::new(text, "unrecognised provider"))
-   }
-}
-
-impl Provider {
-   const ALL: [Self; 8] = [
-      Self::OpenAi,
-      Self::Anthropic,
-      Self::Gemini,
-      Self::Zen,
-      Self::Glm,
-      Self::DeepSeek,
-      Self::Experiential,
-      Self::Copilot,
-   ];
-   const NAMES: [&str; 8] = [
-      "openai",
-      "anthropic",
-      "gemini",
-      "zen",
-      "glm",
-      "deepseek",
-      "experiential",
-      "copilot",
-   ];
-
-   pub const fn as_str(self) -> &'static str {
-      Self::NAMES[self as usize]
-   }
 }
 
 impl FromStr for Provider {
@@ -59,10 +23,10 @@ impl FromStr for Provider {
 
    fn from_str(text: &str) -> Result<Self, Self::Err> {
       let text = text.trim();
-      Self::NAMES
+      Self::ALL
          .iter()
-         .position(|name| *name == text)
-         .map(|index| Self::ALL[index])
+         .copied()
+         .find(|provider| provider.as_str() == text)
          .ok_or_else(|| format!("unknown provider {text:?}"))
    }
 }

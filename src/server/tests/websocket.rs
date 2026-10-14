@@ -3,16 +3,18 @@ use axum::http::{HeaderMap, Request};
 use axum::routing::get;
 use futures_util::{SinkExt as _, StreamExt as _};
 use serde_json::{Value, json};
+use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::yield_now;
 use tokio::time::timeout;
-use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame as UpstreamCloseFrame;
 use tokio_tungstenite::tungstenite::{Error, Message};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
 use super::*;
-use crate::codex::websocket::Socket;
+
+type Client = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 async fn serve_upstream(app: Router) -> (String, Db) {
    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -110,14 +112,14 @@ fn upgrade_request(base: &str) -> Request<()> {
    request
 }
 
-async fn send(socket: &mut Socket, value: Value) {
+async fn send(socket: &mut Client, value: Value) {
    socket
       .send(Message::Text(value.to_string().into()))
       .await
       .unwrap();
 }
 
-async fn event(socket: &mut Socket) -> Value {
+async fn event(socket: &mut Client) -> Value {
    let message = timeout(Duration::from_secs(3), socket.next())
       .await
       .unwrap()

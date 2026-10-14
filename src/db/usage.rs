@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use jiff::civil::Date;
 use jiff::tz::TimeZone;
 use misstep::Result;
+use pound::ArgValue as _;
 use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension as _, Row, TransactionBehavior, params};
 use serde::Serialize;
@@ -869,7 +870,7 @@ fn insert_usage(conn: &mut rusqlite::Connection, record: &UsageRecord) -> Result
                 record.token_id,
                 record.user,
                 record.account_id,
-                record.provider.map(Provider::as_str).unwrap_or_default(),
+                record.provider.as_ref().map(Provider::as_str).unwrap_or_default(),
                 record.dialect,
                 record.requested_model,
                 record.upstream_model,

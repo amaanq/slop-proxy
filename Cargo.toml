@@ -10,20 +10,20 @@ categories  = [ "command-line-utilities", "web-programming::http-server" ]
 publish     = false
 
 [dependencies]
-axum = { features = [ "ws" ], version = "0.8" }
-crc32fast = "1"
-data-encoding = "2"
-futures-util = { default-features = false, features = [ "sink", "std" ], version = "0.3" }
-getrandom = "0.4"
-hmac-sha256 = "1"
+axum = { features = [ "ws" ], version = "0.8.9" }
+crc32fast = "1.5.2"
+data-encoding = "2.11.1"
+futures-util = { default-features = false, features = [ "sink", "std" ], version = "0.3.34" }
+getrandom = "0.4.3"
+hmac-sha256 = "1.1.15"
 idna_adapter = "=1.0.0"
-image-webp = "0.2"
-ipnet = { features = [ "serde" ], version = "2" }
-jiff = { default-features = false, features = [ "serde", "std" ], version = "0.2" }
-libc = "0.2"
-miniz_oxide = "0.9"
-misstep = { features = [ "panic-hook" ], version = "0.3" }
-pound = "0.3"
+image-webp = "0.2.4"
+ipnet = { features = [ "serde" ], version = "2.12.2" }
+jiff = { default-features = false, features = [ "serde", "std" ], version = "0.2.38" }
+libc = "0.2.190"
+miniz_oxide = "0.9.1"
+misstep = { features = [ "panic-hook" ], version = "0.3.0" }
+pound = "0.4.2"
 reqwest = {
 	default-features = false,
 	features = [
@@ -32,13 +32,13 @@ reqwest = {
 		"json",
 		"gzip",
 	],
-	version = "0.12",
+	version = "0.12.28",
 }
 rusqlite = "0.40"
-ruzstd = { default-features = false, features = [ "std" ], version = "0.9.0" }
-serde = { features = [ "derive" ], version = "1" }
-serde_json = "1"
-thiserror = "2"
+ruzstd = { default-features = false, features = [ "std" ], version = "0.9.1" }
+serde = { features = [ "derive" ], version = "1.0.229" }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
 tokio = {
 	features = [
 		"macros",
@@ -51,9 +51,10 @@ tokio = {
 	],
 	version = "1",
 }
-tokio-tungstenite = { features = [ "rustls-tls-webpki-roots" ], version = "0.29" }
-toml = { default-features = false, features = [ "parse", "serde", "std" ], version = "1" }
-tracing = { default-features = false, features = [ "std" ], version = "0.1" }
+tokio-rustls = { default-features = false, features = [ "ring", "tls12" ], version = "0.26" }
+tokio-tungstenite = "0.29.0"
+toml = { default-features = false, features = [ "parse", "serde", "std" ], version = "1.1.8" }
+tracing = { default-features = false, features = [ "std" ], version = "0.1.44" }
 tracing-subscriber = {
 	default-features = false,
 	features = [
@@ -62,9 +63,10 @@ tracing-subscriber = {
 		"registry",
 		"std",
 	],
-	version = "0.3",
+	version = "0.3.23",
 }
-uuid = { features = [ "v4" ], version = "1" }
+uuid = { features = [ "v4" ], version = "1.28.0" }
+webpki-roots = "1.0.9"
 
 [profile.dev]
 debug = "line-tables-only"

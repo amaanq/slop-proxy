@@ -7,7 +7,7 @@ license     = "AGPL-3.0-only"
 repository  = "https://github.com/amaanq/slop-proxy"
 keywords    = [ "proxy", "llm", "anthropic", "openai", "gemini" ]
 categories  = [ "command-line-utilities", "web-programming::http-server" ]
-publish     = false
+include     = [ "src/**", "LICENSE", "README.md" ]
 
 [dependencies]
 axum = { features = [ "ws" ], version = "0.8.9" }

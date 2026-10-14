@@ -1,11 +1,12 @@
-use std::ops::RangeInclusive;
+use std::ops::{AddAssign, RangeInclusive};
 use std::result::Result as StdResult;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use jiff::civil::Date;
 use jiff::tz::TimeZone;
 use misstep::Result;
 use rusqlite::types::Type;
-use rusqlite::{OptionalExtension as _, Row, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension as _, Row, TransactionBehavior, params};
 use serde::Serialize;
 
 use crate::clock;
@@ -392,7 +393,7 @@ const PROVIDER_LABEL: &str = "COALESCE(NULLIF(u.provider, ''),
                 (SELECT a.provider FROM accounts a WHERE a.id = u.account_id),
                 'none')";
 
-/// Every column `usage_metrics` groups by, against its exported label. A
+/// Every column `usage_delta` groups by, against its exported label. A
 /// column missing here duplicates a label set, and Prometheus keeps whichever
 /// the scrape emitted first.
 pub const USAGE_DIMENSIONS: [(&str, &str); 8] = [
@@ -421,56 +422,124 @@ pub struct MetricsRow {
    pub duration_ms: i64,
 }
 
+/// One session's slice of the log within a single account, so sessions that
+/// straddle a fold still count each account once.
+#[derive(Debug, Clone)]
+pub struct SessionPart {
+   pub user: String,
+   pub session_key: String,
+   pub account_id: Option<i64>,
+   pub deepest: i64,
+   pub tokens: i64,
+}
+
+/// Rows logged after some id, aggregated per metric family. The log is
+/// append-only, so folding successive deltas yields monotonic counters.
+#[derive(Debug)]
+pub struct MetricsDelta {
+   pub last_id: i64,
+   /// Every account's identity, because the labels resolve against it and
+   /// a rename relabels rows already folded in.
+   pub accounts: String,
+   pub usage: Vec<MetricsRow>,
+   pub errors: Vec<ErrorRow>,
+   pub tools: Vec<ToolRow>,
+   pub insights: Vec<InsightRow>,
+   pub sessions: Vec<SessionPart>,
+}
+
+impl AddAssign for MetricsRow {
+   fn add_assign(&mut self, other: Self) {
+      self.requests += other.requests;
+      self.errors += other.errors;
+      self.input_tokens += other.input_tokens;
+      self.output_tokens += other.output_tokens;
+      self.cache_read_tokens += other.cache_read_tokens;
+      self.cache_write_tokens += other.cache_write_tokens;
+      self.reasoning_tokens += other.reasoning_tokens;
+      self.cost_usd += other.cost_usd;
+      self.list_cost_usd += other.list_cost_usd;
+      self.duration_ms += other.duration_ms;
+   }
+}
+
+impl AddAssign for ErrorRow {
+   fn add_assign(&mut self, other: Self) {
+      self.count += other.count;
+   }
+}
+
+impl AddAssign for ToolRow {
+   fn add_assign(&mut self, other: Self) {
+      self.count += other.count;
+      self.errors += other.errors;
+   }
+}
+
+impl AddAssign for InsightRow {
+   fn add_assign(&mut self, other: Self) {
+      self.requests += other.requests;
+      self.request_bytes += other.request_bytes;
+      self.response_bytes += other.response_bytes;
+      self.turns += other.turns;
+      self.images += other.images;
+      self.thinking_budget += other.thinking_budget;
+      self.tools_declared += other.tools_declared;
+      self.ttft_ms += other.ttft_ms;
+      self.ttft_samples += other.ttft_samples;
+      self.attempts += other.attempts;
+   }
+}
+
+/// Bumped whenever logged rows change after the fact, which invalidates
+/// every running total folded from them.
+static REWRITES: AtomicU64 = AtomicU64::new(0);
+
+pub fn rewrites() -> u64 {
+   REWRITES.load(Ordering::Relaxed)
+}
+
+fn delta_rows<T>(
+   conn: &Connection,
+   sql: &str,
+   range: (i64, i64),
+   map: impl FnMut(&Row) -> rusqlite::Result<T>,
+) -> Result<Vec<T>> {
+   Ok(conn
+      .prepare(sql)?
+      .query_map(range, map)?
+      .collect::<rusqlite::Result<_>>()?)
+}
+
 impl Db {
-   /// Whole-table sums per [`USAGE_DIMENSIONS`]. The log is append-only, so
-   /// these are monotonic and safe to expose as Prometheus counters.
-   pub async fn usage_metrics(&self) -> Result<Vec<MetricsRow>> {
-      let selected = USAGE_DIMENSIONS
-         .into_iter()
-         .map(|(label, expr)| format!("{expr} AS {label}"))
-         .collect::<Vec<_>>()
-         .join(", ");
-      let grouped = USAGE_DIMENSIONS
-         .into_iter()
-         .map(|(label, _)| label)
-         .collect::<Vec<_>>()
-         .join(", ");
-      let after = USAGE_DIMENSIONS.len();
+   /// Everything logged after `after`, read in one snapshot so the families
+   /// agree on where it ends.
+   pub async fn metrics_since(&self, after: i64) -> Result<MetricsDelta> {
       self
          .reports
-         .rows(
-            format!(
-               "SELECT {selected}, COUNT(*),
-                    SUM(u.status >= 400 OR u.error_kind IS NOT NULL),
-                    COALESCE(SUM(u.input_tokens),0), COALESCE(SUM(u.output_tokens),0),
-                    COALESCE(SUM(u.cache_read_tokens),0), COALESCE(SUM(u.cache_write_tokens),0),
-                    COALESCE(SUM(u.reasoning_tokens),0), COALESCE(SUM(u.cost_usd),0),
-                    COALESCE(SUM(u.list_cost_usd),0),
-                    COALESCE(SUM(u.duration_ms),0)
-             FROM usage_log u
-             GROUP BY {grouped}",
-            ),
-            [],
-            move |row| {
-               let mut dimensions = USAGE_DIMENSIONS.map(|_| String::new());
-               for (index, value) in dimensions.iter_mut().enumerate() {
-                  *value = row.get(index)?;
-               }
-               Ok(MetricsRow {
-                  dimensions,
-                  requests: row.get(after)?,
-                  errors: row.get::<_, Option<i64>>(after + 1)?.unwrap_or(0),
-                  input_tokens: row.get(after + 2)?,
-                  output_tokens: row.get(after + 3)?,
-                  cache_read_tokens: row.get(after + 4)?,
-                  cache_write_tokens: row.get(after + 5)?,
-                  reasoning_tokens: row.get(after + 6)?,
-                  cost_usd: row.get(after + 7)?,
-                  list_cost_usd: row.get(after + 8)?,
-                  duration_ms: row.get(after + 9)?,
-               })
-            },
-         )
+         .call(move |conn| {
+            let txn = conn.transaction()?;
+            let last_id = txn.query_row("SELECT COALESCE(MAX(id), 0) FROM usage_log", [], |row| {
+               row.get::<_, i64>(0)
+            })?;
+            let accounts = txn.query_row(
+               "SELECT COALESCE(group_concat(id || ':' || COALESCE(label, '') || ':'
+                                  || COALESCE(email, '') || ':' || provider, ','), '')
+                FROM (SELECT * FROM accounts ORDER BY id)",
+               [],
+               |row| row.get::<_, String>(0),
+            )?;
+            let range = (after, last_id);
+            Ok(MetricsDelta {
+               last_id,
+               accounts,
+               usage: usage_delta(&txn, range)?,
+               errors: error_delta(&txn, range)?,
+               tools: tool_delta(&txn, range)?,
+               insights: insight_delta(&txn, range)?,
+               sessions: session_delta(&txn, range)?,
+            })
+         })
          .await
    }
 
@@ -518,111 +587,9 @@ impl Db {
                }
             }
             txn.commit()?;
+            REWRITES.fetch_add(1, Ordering::Relaxed);
             Ok(())
          })
-         .await
-   }
-
-   /// Failures grouped by what went wrong. Kept off `MetricsRow` because
-   /// `error_kind` would otherwise split every token counter by it too.
-   /// `tools_called` holds a comma-joined list, so the split has to happen in
-   /// SQL to yield one row per tool.
-   pub async fn tool_metrics(&self) -> Result<Vec<ToolRow>> {
-      self
-         .reports
-         .rows(
-            "WITH RECURSIVE split(user, failed, tool, rest) AS (
-               SELECT user, (status >= 400 OR error_kind IS NOT NULL), '', tools_called || ','
-               FROM usage_log WHERE tools_called <> ''
-               UNION ALL
-               SELECT user, failed, substr(rest, 1, instr(rest, ',') - 1), substr(rest, instr(rest, ',') + 1)
-               FROM split WHERE rest <> ''
-             )
-             SELECT user, tool, COUNT(*), SUM(failed)
-             FROM split WHERE tool <> '' GROUP BY user, tool",
-            [],
-            |row| {
-               Ok(ToolRow {
-                  user: row.get(0)?,
-                  tool: row.get(1)?,
-                  count: row.get(2)?,
-                  errors: row.get::<_, Option<i64>>(3)?.unwrap_or(0),
-               })
-            },
-         )
-         .await
-   }
-
-   pub async fn insight_metrics(&self) -> Result<Vec<InsightRow>> {
-      self
-         .reports
-         .rows(
-            format!(
-               "SELECT u.user,
-                    {ACCOUNT_LABEL} AS account,
-                    COALESCE(NULLIF(u.stop_reason, ''), u.error_kind,
-                             CASE WHEN u.status >= 400
-                                  THEN 'http_' || (u.status / 100) || 'xx' END,
-                             'unrecorded') AS stop_reason,
-                    COUNT(*),
-                    COALESCE(SUM(u.request_bytes),0), COALESCE(SUM(u.response_bytes),0),
-                    COALESCE(SUM(u.turn_index),0), COALESCE(SUM(u.image_count),0),
-                    COALESCE(SUM(u.thinking_budget),0), COALESCE(SUM(u.tools_declared),0),
-                    COALESCE(SUM(u.ttft_ms),0), SUM(u.ttft_ms IS NOT NULL),
-                    COALESCE(SUM(u.attempts),0)
-             FROM usage_log u
-             GROUP BY u.user, account, stop_reason"
-            ),
-            [],
-            |row| {
-               Ok(InsightRow {
-                  user: row.get(0)?,
-                  account: row.get(1)?,
-                  stop_reason: row.get(2)?,
-                  requests: row.get(3)?,
-                  request_bytes: row.get(4)?,
-                  response_bytes: row.get(5)?,
-                  turns: row.get(6)?,
-                  images: row.get(7)?,
-                  thinking_budget: row.get(8)?,
-                  tools_declared: row.get(9)?,
-                  ttft_ms: row.get(10)?,
-                  ttft_samples: row.get::<_, Option<i64>>(11)?.unwrap_or(0),
-                  attempts: row.get(12)?,
-               })
-            },
-         )
-         .await
-   }
-
-   /// Grouped by user alone, because a session spans models and accounts and
-   /// counting it once per group would multiply it.
-   pub async fn session_metrics(&self) -> Result<Vec<SessionRow>> {
-      self
-         .reports
-         .rows(
-            "SELECT user, COUNT(*), COALESCE(MAX(deepest),0),
-                    COALESCE(SUM(MAX(accounts - 1, 0)),0),
-                    COALESCE(MAX(tokens),0)
-             FROM (SELECT user, COUNT(DISTINCT account_id) AS accounts,
-                          MAX(turn_index) AS deepest,
-                          SUM(input_tokens + output_tokens
-                              + cache_read_tokens + cache_write_tokens) AS tokens
-                   FROM usage_log
-                   WHERE session_key <> '' AND (account_id IS NOT NULL OR provider <> '')
-                   GROUP BY user, session_key)
-             GROUP BY user",
-            [],
-            |row| {
-               Ok(SessionRow {
-                  user: row.get(0)?,
-                  sessions: row.get(1)?,
-                  deepest: row.get(2)?,
-                  switches: row.get(3)?,
-                  tokens_max: row.get(4)?,
-               })
-            },
-         )
          .await
    }
 
@@ -744,32 +711,150 @@ impl Db {
          )
          .await
    }
+}
 
-   pub async fn error_metrics(&self) -> Result<Vec<ErrorRow>> {
-      self
-         .reports
-         .rows(
-            format!(
-               "SELECT u.user,
-                    {PROVIDER_LABEL} AS provider,
-                    COALESCE(u.error_kind, 'http_' || (u.status / 100) || 'xx') AS kind,
-                    COUNT(*)
-             FROM usage_log u
-             WHERE u.status >= 400 OR u.error_kind IS NOT NULL
-             GROUP BY u.user, provider, kind"
-            ),
-            [],
-            |row| {
-               Ok(ErrorRow {
-                  user: row.get(0)?,
-                  provider: row.get(1)?,
-                  kind: row.get(2)?,
-                  count: row.get(3)?,
-               })
-            },
-         )
-         .await
-   }
+fn usage_delta(conn: &Connection, range: (i64, i64)) -> Result<Vec<MetricsRow>> {
+   let selected = USAGE_DIMENSIONS
+      .into_iter()
+      .map(|(label, expr)| format!("{expr} AS {label}"))
+      .collect::<Vec<_>>()
+      .join(", ");
+   let grouped = USAGE_DIMENSIONS
+      .into_iter()
+      .map(|(label, _)| label)
+      .collect::<Vec<_>>()
+      .join(", ");
+   let after = USAGE_DIMENSIONS.len();
+   let sql = format!(
+      "SELECT {selected}, COUNT(*),
+           SUM(u.status >= 400 OR u.error_kind IS NOT NULL),
+           COALESCE(SUM(u.input_tokens),0), COALESCE(SUM(u.output_tokens),0),
+           COALESCE(SUM(u.cache_read_tokens),0), COALESCE(SUM(u.cache_write_tokens),0),
+           COALESCE(SUM(u.reasoning_tokens),0), COALESCE(SUM(u.cost_usd),0),
+           COALESCE(SUM(u.list_cost_usd),0),
+           COALESCE(SUM(u.duration_ms),0)
+       FROM usage_log u
+       WHERE u.id > ?1 AND u.id <= ?2
+       GROUP BY {grouped}",
+   );
+   delta_rows(conn, &sql, range, |row| {
+      let mut dimensions = USAGE_DIMENSIONS.map(|_| String::new());
+      for (index, value) in dimensions.iter_mut().enumerate() {
+         *value = row.get(index)?;
+      }
+      Ok(MetricsRow {
+         dimensions,
+         requests: row.get(after)?,
+         errors: row.get::<_, Option<i64>>(after + 1)?.unwrap_or(0),
+         input_tokens: row.get(after + 2)?,
+         output_tokens: row.get(after + 3)?,
+         cache_read_tokens: row.get(after + 4)?,
+         cache_write_tokens: row.get(after + 5)?,
+         reasoning_tokens: row.get(after + 6)?,
+         cost_usd: row.get(after + 7)?,
+         list_cost_usd: row.get(after + 8)?,
+         duration_ms: row.get(after + 9)?,
+      })
+   })
+}
+
+/// Failures grouped by what went wrong. Kept off `MetricsRow` because
+/// `error_kind` would otherwise split every token counter by it too.
+fn error_delta(conn: &Connection, range: (i64, i64)) -> Result<Vec<ErrorRow>> {
+   let sql = format!(
+      "SELECT u.user,
+           {PROVIDER_LABEL} AS provider,
+           COALESCE(u.error_kind, 'http_' || (u.status / 100) || 'xx') AS kind,
+           COUNT(*)
+       FROM usage_log u
+       WHERE (u.status >= 400 OR u.error_kind IS NOT NULL) AND u.id > ?1 AND u.id <= ?2
+       GROUP BY u.user, provider, kind"
+   );
+   delta_rows(conn, &sql, range, |row| {
+      Ok(ErrorRow {
+         user: row.get(0)?,
+         provider: row.get(1)?,
+         kind: row.get(2)?,
+         count: row.get(3)?,
+      })
+   })
+}
+
+/// `tools_called` holds a comma-joined list, so the split has to happen in
+/// SQL to yield one row per tool.
+fn tool_delta(conn: &Connection, range: (i64, i64)) -> Result<Vec<ToolRow>> {
+   let sql = "WITH RECURSIVE split(user, failed, tool, rest) AS (
+        SELECT user, (status >= 400 OR error_kind IS NOT NULL), '', tools_called || ','
+        FROM usage_log WHERE tools_called <> '' AND id > ?1 AND id <= ?2
+        UNION ALL
+        SELECT user, failed, substr(rest, 1, instr(rest, ',') - 1), substr(rest, instr(rest, ',') + 1)
+        FROM split WHERE rest <> ''
+      )
+      SELECT user, tool, COUNT(*), SUM(failed)
+      FROM split WHERE tool <> '' GROUP BY user, tool";
+   delta_rows(conn, sql, range, |row| {
+      Ok(ToolRow {
+         user: row.get(0)?,
+         tool: row.get(1)?,
+         count: row.get(2)?,
+         errors: row.get::<_, Option<i64>>(3)?.unwrap_or(0),
+      })
+   })
+}
+
+fn insight_delta(conn: &Connection, range: (i64, i64)) -> Result<Vec<InsightRow>> {
+   let sql = format!(
+      "SELECT u.user,
+           {ACCOUNT_LABEL} AS account,
+           COALESCE(NULLIF(u.stop_reason, ''), u.error_kind,
+                    CASE WHEN u.status >= 400
+                         THEN 'http_' || (u.status / 100) || 'xx' END,
+                    'unrecorded') AS stop_reason,
+           COUNT(*),
+           COALESCE(SUM(u.request_bytes),0), COALESCE(SUM(u.response_bytes),0),
+           COALESCE(SUM(u.turn_index),0), COALESCE(SUM(u.image_count),0),
+           COALESCE(SUM(u.thinking_budget),0), COALESCE(SUM(u.tools_declared),0),
+           COALESCE(SUM(u.ttft_ms),0), SUM(u.ttft_ms IS NOT NULL),
+           COALESCE(SUM(u.attempts),0)
+       FROM usage_log u
+       WHERE u.id > ?1 AND u.id <= ?2
+       GROUP BY u.user, account, stop_reason"
+   );
+   delta_rows(conn, &sql, range, |row| {
+      Ok(InsightRow {
+         user: row.get(0)?,
+         account: row.get(1)?,
+         stop_reason: row.get(2)?,
+         requests: row.get(3)?,
+         request_bytes: row.get(4)?,
+         response_bytes: row.get(5)?,
+         turns: row.get(6)?,
+         images: row.get(7)?,
+         thinking_budget: row.get(8)?,
+         tools_declared: row.get(9)?,
+         ttft_ms: row.get(10)?,
+         ttft_samples: row.get::<_, Option<i64>>(11)?.unwrap_or(0),
+         attempts: row.get(12)?,
+      })
+   })
+}
+
+fn session_delta(conn: &Connection, range: (i64, i64)) -> Result<Vec<SessionPart>> {
+   let sql = "SELECT user, session_key, account_id, COALESCE(MAX(turn_index),0),
+           COALESCE(SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens),0)
+       FROM usage_log
+       WHERE session_key <> '' AND (account_id IS NOT NULL OR provider <> '')
+         AND id > ?1 AND id <= ?2
+       GROUP BY user, session_key, account_id";
+   delta_rows(conn, sql, range, |row| {
+      Ok(SessionPart {
+         user: row.get(0)?,
+         session_key: row.get(1)?,
+         account_id: row.get(2)?,
+         deepest: row.get(3)?,
+         tokens: row.get(4)?,
+      })
+   })
 }
 
 fn insert_usage(conn: &mut rusqlite::Connection, record: &UsageRecord) -> Result<()> {

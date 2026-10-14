@@ -251,7 +251,7 @@ async fn websocket_terminal_statuses_log_usage_per_lane() {
    let totals = db.usage_totals(0, i64::MAX).await.unwrap();
    assert_eq!(totals.requests, 3);
    assert_eq!(totals.output_tokens, 15);
-   let rows = db.usage_metrics().await.unwrap();
+   let rows = db.metrics_since(0).await.unwrap().usage;
    assert_eq!(rows[0].errors, 1);
 }
 
@@ -421,7 +421,7 @@ async fn websocket_relays_upstream_errors_and_close_codes() {
    assert_eq!(frame.reason, "retry later");
    db.flush().await.unwrap();
    assert_eq!(
-      db.error_metrics().await.unwrap()[0].kind,
+      db.metrics_since(0).await.unwrap().errors[0].kind,
       "upstream_rejected"
    );
 }
@@ -504,7 +504,7 @@ async fn websocket_ping_and_client_disconnect_close_the_upstream() {
    timeout(Duration::from_secs(3), async {
       loop {
          db.flush().await.unwrap();
-         if let Some(error) = db.error_metrics().await.unwrap().first() {
+         if let Some(error) = db.metrics_since(0).await.unwrap().errors.first() {
             assert_eq!(error.kind, "client_disconnect");
             break;
          }

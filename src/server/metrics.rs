@@ -1,6 +1,10 @@
 use std::array::from_fn;
+use std::collections::hash_map::Entry;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt::Display;
 use std::fmt::Write as _;
+use std::hash::Hash;
+use std::ops::AddAssign;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -16,15 +20,16 @@ use tokio::time::{self, MissedTickBehavior};
 use crate::clock;
 use crate::db::Db;
 use crate::db::usage::{
-   InsightRow, MetricsRow, SessionRow, ToolRow, USAGE_DIMENSIONS, cache_hit_ratio,
+   ErrorRow, InsightRow, MetricsDelta, MetricsRow, SessionRow, ToolRow, USAGE_DIMENSIONS,
+   cache_hit_ratio, rewrites,
 };
 use crate::pool::{AccountSnapshot, UsageWindow};
 use crate::provider::Provider;
 use crate::server::AppState;
 
 /// The usage history behind every counter, rendered off the scrape path.
-/// Aggregating the whole log grows with it, and a scrape that overruns its
-/// timeout blanks every series, live quota gauges included.
+/// A scrape that overruns its timeout blanks every series, live quota
+/// gauges included.
 #[derive(Clone)]
 pub struct Metrics {
    state: AppState,
@@ -39,8 +44,12 @@ impl Metrics {
       }
    }
 
-   pub async fn refresh(&self) {
-      let text = render_history(&self.state.db).await;
+   pub async fn refresh(&self, totals: &mut Totals) {
+      if let Err(err) = totals.update(&self.state.db).await {
+         tracing::error!("reading usage metrics: {err}");
+         return;
+      }
+      let text = totals.render();
       *self.history.write().expect("metrics lock poisoned") = Arc::from(text);
    }
 }
@@ -50,11 +59,12 @@ pub fn spawn(state: AppState, listener: TcpListener) {
 
    let refresher = metrics.clone();
    tokio::spawn(async move {
+      let mut totals = Totals::default();
       let mut tick = time::interval(Duration::from_mins(1));
       tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
       loop {
          tick.tick().await;
-         refresher.refresh().await;
+         refresher.refresh(&mut totals).await;
       }
    });
 
@@ -78,13 +88,122 @@ pub async fn serve(State(metrics): State<Metrics>) -> Response {
    ([(CONTENT_TYPE, "text/plain; version=0.0.4")], text).into_response()
 }
 
-async fn render_history(db: &Db) -> String {
-   let mut text = String::with_capacity(4096);
-   let buf = &mut text;
-   emit(buf, "usage", db.usage_metrics().await, render_usage);
-   emit(buf, "error", db.error_metrics().await, |out, rows| {
-      counter(out, "slop_errors_total", "Failed requests by cause");
+/// Rows of one family summed per label set, in first-seen order.
+struct Family<K, R> {
+   index: HashMap<K, usize>,
+   rows: Vec<R>,
+}
+
+impl<K, R> Default for Family<K, R> {
+   fn default() -> Self {
+      Self {
+         index: HashMap::new(),
+         rows: Vec::new(),
+      }
+   }
+}
+
+impl<K: Hash + Eq, R: AddAssign> Family<K, R> {
+   fn fold(&mut self, rows: Vec<R>, key: impl Fn(&R) -> K) {
       for row in rows {
+         match self.index.entry(key(&row)) {
+            Entry::Occupied(slot) => self.rows[*slot.get()] += row,
+            Entry::Vacant(slot) => {
+               slot.insert(self.rows.len());
+               self.rows.push(row);
+            },
+         }
+      }
+   }
+}
+
+#[derive(Default)]
+struct Session {
+   accounts: BTreeSet<i64>,
+   deepest: i64,
+   tokens: i64,
+}
+
+/// The whole log folded one delta at a time, so each refresh reads only
+/// what was logged since the last.
+#[derive(Default)]
+pub struct Totals {
+   rewrites: u64,
+   accounts: String,
+   last_id: i64,
+   usage: Family<[String; USAGE_DIMENSIONS.len()], MetricsRow>,
+   errors: Family<[String; 3], ErrorRow>,
+   tools: Family<[String; 2], ToolRow>,
+   insights: Family<[String; 3], InsightRow>,
+   sessions: HashMap<(String, String), Session>,
+}
+
+impl Totals {
+   async fn update(&mut self, db: &Db) -> misstep::Result<()> {
+      let rewrites = rewrites();
+      if rewrites != self.rewrites {
+         *self = Self {
+            rewrites,
+            ..Self::default()
+         };
+      }
+      let mut delta = db.metrics_since(self.last_id).await?;
+      if self.last_id > 0 && delta.accounts != self.accounts {
+         *self = Self {
+            rewrites,
+            ..Self::default()
+         };
+         delta = db.metrics_since(0).await?;
+      }
+      self.fold(delta);
+      Ok(())
+   }
+
+   fn fold(&mut self, delta: MetricsDelta) {
+      self.accounts = delta.accounts;
+      self.last_id = delta.last_id;
+      self.usage.fold(delta.usage, |row| row.dimensions.clone());
+      self.errors.fold(delta.errors, |row| {
+         [row.user.clone(), row.provider.clone(), row.kind.clone()]
+      });
+      self
+         .tools
+         .fold(delta.tools, |row| [row.user.clone(), row.tool.clone()]);
+      self.insights.fold(delta.insights, |row| {
+         [row.user.clone(), row.account.clone(), row.stop_reason.clone()]
+      });
+      for part in delta.sessions {
+         let session = self.sessions.entry((part.user, part.session_key)).or_default();
+         session.accounts.extend(part.account_id);
+         session.deepest = session.deepest.max(part.deepest);
+         session.tokens += part.tokens;
+      }
+   }
+
+   fn session_rows(&self) -> Vec<SessionRow> {
+      let mut users = HashMap::<&str, SessionRow>::new();
+      for ((user, _), session) in &self.sessions {
+         let row = users.entry(user).or_insert_with(|| SessionRow {
+            user: user.clone(),
+            sessions: 0,
+            deepest: 0,
+            switches: 0,
+            tokens_max: 0,
+         });
+         row.sessions += 1;
+         row.deepest = row.deepest.max(session.deepest);
+         row.switches += i64::try_from(session.accounts.len().saturating_sub(1)).unwrap_or(i64::MAX);
+         row.tokens_max = row.tokens_max.max(session.tokens);
+      }
+      users.into_values().collect()
+   }
+
+   fn render(&self) -> String {
+      let mut text = String::with_capacity(4096);
+      let out = &mut text;
+      render_usage(out, &self.usage.rows);
+      counter(out, "slop_errors_total", "Failed requests by cause");
+      for row in &self.errors.rows {
          let labels = [
             ("user", row.user.as_str()),
             ("provider", &row.provider),
@@ -92,38 +211,23 @@ async fn render_history(db: &Db) -> String {
          ];
          sample(out, "slop_errors_total", &labels, row.count);
       }
-   });
-   emit(buf, "tool", db.tool_metrics().await, |out, rows| {
-      families(out, "counter", &TOOL_COUNTERS, rows, |row| {
+      families(out, "counter", &TOOL_COUNTERS, &self.tools.rows, |row| {
          [("user", row.user.as_str()), ("tool", &row.tool)]
       });
-   });
-   emit(buf, "insight", db.insight_metrics().await, |out, rows| {
-      families(out, "counter", &INSIGHTS, rows, |row| {
+      families(out, "counter", &INSIGHTS, &self.insights.rows, |row| {
          [
             ("user", row.user.as_str()),
             ("account", &row.account),
             ("stop_reason", &row.stop_reason),
          ]
       });
-   });
-   emit(buf, "session", db.session_metrics().await, |out, rows| {
-      families(out, "gauge", &SESSION_GAUGES, rows, |row| {
+      families(out, "gauge", &SESSION_GAUGES, &self.session_rows(), |row| {
          [("user", row.user.as_str())]
       });
-   });
-   text
-}
-
-fn emit<T, F>(out: &mut String, what: &str, rows: misstep::Result<Vec<T>>, render: F)
-where
-   F: FnOnce(&mut String, &[T]),
-{
-   match rows {
-      Ok(rows) => render(out, &rows),
-      Err(err) => tracing::error!("reading {what} metrics: {err}"),
+      text
    }
 }
+
 
 type Column<R, V> = (&'static str, &'static str, fn(&R) -> V);
 

@@ -24,7 +24,7 @@ use crate::pool::Pools;
 use crate::pricing::Prices;
 use crate::provider::{AuthMode, Provider};
 use crate::server::{AppState, Inner, metrics, router};
-use crate::server::metrics::Metrics;
+use crate::server::metrics::{Metrics, Totals};
 
 const MOCK_SSE: &str = concat!(
    "event: response.created\n",
@@ -267,7 +267,7 @@ async fn openai_non_streaming_end_to_end() {
    let by_user = db.usage_by(UsageDim::User, 0, i64::MAX).await.unwrap();
    assert_eq!(by_user[0].key, "alice");
    assert_eq!(by_user[0].input_tokens, 80);
-   let metrics = db.insight_metrics().await.unwrap();
+   let metrics = db.metrics_since(0).await.unwrap().insights;
    assert_eq!(
       metrics[0].response_bytes,
       serde_json::to_vec(&value).unwrap().len() as i64
@@ -423,7 +423,7 @@ async fn metrics_render_accounts_and_usage() {
       pools,
    }));
    let metrics = Metrics::new(state);
-   metrics.refresh().await;
+   metrics.refresh(&mut Totals::default()).await;
    let resp = metrics::serve(State(metrics)).await;
    let bytes = body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
    let text = String::from_utf8(bytes.to_vec()).unwrap();
@@ -552,7 +552,7 @@ async fn a_rejected_chat_request_keeps_googles_reason() {
    assert_eq!(resp.text().await.unwrap(), GEMINI_REJECTION);
 
    db.flush().await.unwrap();
-   let kinds = db.error_metrics().await.unwrap();
+   let kinds = db.metrics_since(0).await.unwrap().errors;
    assert_eq!(kinds[0].kind, "upstream_rejected");
    assert_eq!(kinds[0].provider, "gemini");
 
@@ -603,7 +603,7 @@ async fn responses_preserve_terminal_status_and_bill_partial_usage() {
          }
       }
       db.flush().await.unwrap();
-      let rows = db.usage_metrics().await.unwrap();
+      let rows = db.metrics_since(0).await.unwrap().usage;
       assert_eq!(rows[0].requests, 2);
       assert_eq!(rows[0].input_tokens, 24);
       assert_eq!(rows[0].output_tokens, 10);
@@ -626,7 +626,7 @@ async fn responses_eof_is_logged_as_failure() {
    assert_eq!(response.status(), 502);
    response.bytes().await.unwrap();
    db.flush().await.unwrap();
-   let rows = db.error_metrics().await.unwrap();
+   let rows = db.metrics_since(0).await.unwrap().errors;
    assert_eq!(rows[0].kind, "upstream_eof");
 }
 
@@ -713,7 +713,7 @@ async fn bridged_responses_preserve_status_usage_and_output_order() {
          assert_eq!(value["output"][1]["name"], "read");
       }
       db.flush().await.unwrap();
-      let rows = db.usage_metrics().await.unwrap();
+      let rows = db.metrics_since(0).await.unwrap().usage;
       assert_eq!(rows[0].input_tokens, 12);
       assert_eq!(rows[0].output_tokens, 5);
       assert_eq!(rows[0].errors, i64::from(status == "failed"));

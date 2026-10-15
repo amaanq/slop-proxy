@@ -28,8 +28,8 @@ use crate::server::auth::{AuthInfo, admit_token, bearer_token};
 use crate::server::error::{error_response, pool_error_response, translation_error};
 use crate::server::facts::RequestFacts;
 use crate::server::openai::{
-   DIALECT, PassthroughRequest, passthrough_record, prepare_request, responses_upgrade_required,
-   restore_reserved_namespace,
+   DIALECT, PassthroughRequest, SAFETY_BUFFERING_HEADERS, passthrough_record, prepare_request,
+   responses_upgrade_required, restore_reserved_namespace,
 };
 use crate::server::relay::header_str;
 use crate::server::{AppState, LogGuard, pipeline};
@@ -110,7 +110,10 @@ pub async fn responses(
       "x-models-etag",
       "openai-model",
       "x-request-id",
-   ] {
+   ]
+   .into_iter()
+   .chain(SAFETY_BUFFERING_HEADERS)
+   {
       if let Some(value) = upstream.headers.get(name) {
          response.headers_mut().insert(name, value.clone());
       }

@@ -45,6 +45,12 @@ pub mod websocket;
 
 const DIALECT: Dialect = Dialect::OpenAi;
 
+/// Codex offers to retry a safety-buffered turn on the faster model these name.
+const SAFETY_BUFFERING_HEADERS: [&str; 2] = [
+   "x-codex-safety-buffering-enabled",
+   "x-codex-safety-buffering-faster-model",
+];
+
 #[derive(serde::Deserialize)]
 pub struct ModelsQuery {
    client_version: Option<String>,
@@ -925,8 +931,15 @@ pub async fn responses_passthrough(
    };
 
    if client_streams {
+      let safety = SAFETY_BUFFERING_HEADERS
+         .into_iter()
+         .filter_map(|name| Some((name, resp.headers().get(name)?.clone())))
+         .collect::<Vec<_>>();
       let guard = LogGuard::new(state.clone(), capture.clone(), record, started);
       let mut response = relay_stream(resp, guard, capture);
+      for (name, value) in safety {
+         response.headers_mut().insert(name, value);
+      }
       if provider == Provider::OpenAi {
          let windows = state
             .pools

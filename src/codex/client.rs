@@ -140,6 +140,7 @@ struct OpeningError {
    code: Option<String>,
    #[serde(rename = "type")]
    kind: Option<String>,
+   message: Option<String>,
 }
 
 /// `response.created` always arrives first, even when the next event is
@@ -175,7 +176,11 @@ fn opening(head: &[u8]) -> Opening {
       let error = error.unwrap_or_default();
       return if error.code.as_deref() == Some("invalid_encrypted_content") {
          Opening::Undecryptable
-      } else if error.kind.as_deref() == Some("invalid_request_error") {
+      } else if error.kind.as_deref() == Some("invalid_request_error")
+         // The safety review behind a buffered turn refuses that conversation
+         // on every account alike, so rotating only benched the whole pool.
+         || error.message.as_deref() == Some("response protection is unavailable")
+      {
          Opening::Serve
       } else {
          Opening::Refused(data)

@@ -620,7 +620,8 @@ impl Slots {
    }
 
    pub async fn cool(&self, slot: &Slot, secs: i64, why: &str) {
-      let until = clock::unix_now() + secs;
+      let now = clock::unix_now();
+      let until = now + secs;
       let persist = {
          let mut state = slot.state.lock().await;
          let extend = match state.status {
@@ -628,7 +629,9 @@ impl Slots {
             Status::Active => true,
             Status::Disabled => false,
          };
-         if state.status != Status::Disabled {
+         // Requests already in flight when the bench starts report the same
+         // refusal, and counting each one took glm2 from 60s to 3600s in 200ms.
+         if state.status != Status::Disabled && state.status.cooling(now).is_none() {
             state.consecutive_fails += 1;
          }
          extend.then(|| {

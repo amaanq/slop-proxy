@@ -222,6 +222,15 @@ impl Egresses {
       );
    }
 
+   fn bench_flagged(&self, egress: &Egress, index: usize) {
+      tracing::warn!(
+         egress = index,
+         "{} egress refused as not opencode while another served, benched until 00:00 UTC",
+         self.label
+      );
+      Self::cool(&egress.anonymous_until, 86_400 - clock::unix_now().rem_euclid(86_400));
+   }
+
    fn retry_after(entries: &[Arc<Egress>], now: i64) -> i64 {
       entries
          .iter()
@@ -299,6 +308,7 @@ impl Egresses {
 
       let mut throttled = None;
       let mut unreachable = None;
+      let mut refused = Option::<(usize, String)>::None;
       let mut tried = 0_usize;
       for index in order.iter().copied().take(ATTEMPTS) {
          tried += 1;
@@ -308,6 +318,9 @@ impl Egresses {
          {
             Ok(mut response) => {
                response.extensions_mut().insert(EgressIndex(index));
+               if let Some(&(flagged, _)) = refused.as_ref() {
+                  self.bench_flagged(&entries[flagged], flagged);
+               }
                if tried > 1 {
                   tracing::info!(
                      egress = index,
@@ -327,6 +340,13 @@ impl Egresses {
                );
                Self::cool(&entries[index].anonymous_until, retry_after.unwrap_or(60));
                throttled = Some(body);
+            },
+            // Zen answers a flagged source with the same FreeTierError it gives
+            // a malformed request, so a second refusal means the request.
+            Err(SendError::Auth(body))
+               if anonymous && refused.is_none() && body.contains("FreeTierError") =>
+            {
+               refused = Some((index, body));
             },
             Err(SendError::Network(error)) => {
                tracing::warn!(egress = index, "{} egress unreachable: {error}", self.label);
@@ -358,6 +378,9 @@ impl Egresses {
             retry_after: Some(retry_after),
             body,
          });
+      }
+      if let Some((_, body)) = refused {
+         return Err(SendError::Auth(body));
       }
       let error = unreachable.unwrap_or_else(|| format!("all {} egresses failed", self.label));
       Err(SendError::Network(if untried > 0 {

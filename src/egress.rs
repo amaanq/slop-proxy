@@ -311,7 +311,8 @@ impl Egresses {
 
       let mut throttled = None;
       let mut unreachable = None;
-      let mut refused = Option::<(usize, String)>::None;
+      let mut refused = Vec::<usize>::new();
+      let mut refusal = None;
       let mut tried = 0_usize;
       for index in order.iter().copied() {
          if tried >= ATTEMPTS {
@@ -320,8 +321,8 @@ impl Egresses {
          let bench = &entries[index].anonymous_until;
          let spent = bench.load(Ordering::Relaxed) > clock::unix_now()
             || refused
-               .as_ref()
-               .is_some_and(|&(flagged, _)| Arc::ptr_eq(&entries[flagged].anonymous_until, bench));
+               .iter()
+               .any(|&flagged| Arc::ptr_eq(&entries[flagged].anonymous_until, bench));
          if anonymous && spent {
             continue;
          }
@@ -332,7 +333,7 @@ impl Egresses {
          {
             Ok(mut response) => {
                response.extensions_mut().insert(EgressIndex(index));
-               if let Some(&(flagged, _)) = refused.as_ref() {
+               for &flagged in &refused {
                   self.bench_flagged(&entries[flagged], flagged);
                }
                if tried > 1 {
@@ -355,10 +356,9 @@ impl Egresses {
                Self::cool(&entries[index].anonymous_until, retry_after.unwrap_or(60));
                throttled = Some(body);
             },
-            Err(SendError::Auth(body))
-               if anonymous && refused.is_none() && body.contains("FreeTierError") =>
-            {
-               refused = Some((index, body));
+            Err(SendError::Auth(body)) if anonymous && body.contains("FreeTierError") => {
+               refused.push(index);
+               refusal = Some(body);
             },
             Err(SendError::Network(error)) => {
                tracing::warn!(egress = index, "{} egress unreachable: {error}", self.label);
@@ -391,7 +391,7 @@ impl Egresses {
             body,
          });
       }
-      if let Some((_, body)) = refused {
+      if let Some(body) = refusal {
          return Err(SendError::Auth(body));
       }
       let error = unreachable.unwrap_or_else(|| format!("all {} egresses failed", self.label));

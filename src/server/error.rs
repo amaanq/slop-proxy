@@ -129,6 +129,11 @@ pub fn pool_error_response(dialect: Dialect, models: &ModelsConfig, err: PoolErr
          model,
          body,
       } => {
+         let body = if body.trim().is_empty() {
+            "<empty body>".to_owned()
+         } else {
+            body
+         };
          tracing::warn!(%provider, %model, "upstream rejected request: {body}");
          let message = if models.matched(&model).is_some() {
             format!("the {provider} backend rejected {model}: {body}")

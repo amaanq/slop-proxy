@@ -101,9 +101,14 @@ pub fn to_chat(req: &ResponsesRequest) -> ChatRequest {
          } if role == "assistant"
             && let Some(last) = messages.last_mut()
             && last.role == "assistant"
-            && last.content.is_none() =>
+            && (last.content.is_none() || last.tool_calls.is_some()) =>
          {
-            last.content = Some(parts(content));
+            last.content = Some(
+               last
+                  .content
+                  .take()
+                  .map_or_else(|| parts(content), |existing| existing.append(parts(content))),
+            );
          },
          InputItem::Message {
             ref role,
@@ -170,7 +175,7 @@ pub fn to_chat(req: &ResponsesRequest) -> ChatRequest {
 
    ChatRequest {
       model: req.model.clone(),
-      messages,
+      messages: sequence_tool_replies(messages),
       stream: Some(true),
       // Without this the terminal chunk carries no usage and the request
       // bills as zero tokens.
@@ -190,6 +195,53 @@ pub fn to_chat(req: &ResponsesRequest) -> ChatRequest {
       }),
       ..Default::default()
    }
+}
+
+fn sequence_tool_replies(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+   let mut out = Vec::<ChatMessage>::with_capacity(messages.len());
+   let mut held = Vec::<ChatMessage>::new();
+   let mut pending = BTreeSet::<String>::new();
+   for message in messages {
+      let in_block = out
+         .last()
+         .is_some_and(|last| last.role == "tool" || last.tool_calls.is_some());
+      if message.role == "tool" {
+         if in_block {
+            if let Some(id) = message.tool_call_id.as_deref() {
+               pending.remove(id);
+            }
+            out.push(message);
+            if pending.is_empty() {
+               out.append(&mut held);
+            }
+         } else {
+            let id = message.tool_call_id.as_deref().unwrap_or_default();
+            out.push(ChatMessage {
+               role: "user".into(),
+               content: Some(ChatContent::Text(format!(
+                  "[output of tool call {id}]\n{}",
+                  message.text()
+               ))),
+               ..Default::default()
+            });
+         }
+         continue;
+      }
+      if !pending.is_empty() && message.tool_calls.is_none() {
+         held.push(message);
+         continue;
+      }
+      out.append(&mut held);
+      pending = message
+         .tool_calls
+         .iter()
+         .flatten()
+         .filter_map(|call| call.id.clone())
+         .collect();
+      out.push(message);
+   }
+   out.append(&mut held);
+   out
 }
 
 /// Gemini and zen both take none, low, medium or high and reject anything
@@ -235,9 +287,14 @@ fn accepted_image(url: &str) -> String {
    }
 }
 
-#[expect(clippy::big_endian_bytes, reason = "PNG stores its integers big-endian")]
+#[expect(
+   clippy::big_endian_bytes,
+   reason = "PNG stores its integers big-endian"
+)]
 fn webp_to_png(data: &str) -> Result<String, TranscodeError> {
-   let bytes = BASE64.decode(data.as_bytes()).map_err(TranscodeError::Base64)?;
+   let bytes = BASE64
+      .decode(data.as_bytes())
+      .map_err(TranscodeError::Base64)?;
    let mut decoder = WebPDecoder::new(Cursor::new(bytes)).map_err(TranscodeError::Decode)?;
    let (width, height) = decoder.dimensions();
    let alpha = decoder.has_alpha();
@@ -247,7 +304,9 @@ fn webp_to_png(data: &str) -> Result<String, TranscodeError> {
    }
 
    let mut pixels = vec![0; decoder.output_buffer_size().unwrap_or_default()];
-   decoder.read_image(&mut pixels).map_err(TranscodeError::Decode)?;
+   decoder
+      .read_image(&mut pixels)
+      .map_err(TranscodeError::Decode)?;
 
    let mut scanlines = Vec::with_capacity(pixels.len() + height as usize);
    for row in pixels.chunks_exact(stride) {

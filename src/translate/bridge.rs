@@ -715,13 +715,16 @@ mod tests {
    fn a_tool_result_flattens_to_a_string() {
       let body = serde_json::to_value(to_chat(&request(json!({
           "model": "g", "instructions": "s", "stream": true,
-          "input": [{"type": "custom_tool_call_output", "call_id": "c1", "output": [
-              {"type": "input_text", "text": "Script completed\n"},
-              {"type": "input_text", "text": "mango"},
-          ]}],
+          "input": [
+              {"type": "custom_tool_call", "call_id": "c1", "name": "exec", "input": "ls"},
+              {"type": "custom_tool_call_output", "call_id": "c1", "output": [
+                  {"type": "input_text", "text": "Script completed\n"},
+                  {"type": "input_text", "text": "mango"},
+              ]},
+          ],
       }))))
       .unwrap();
-      assert_eq!(body["messages"][1]["content"], "Script completed\nmango");
+      assert_eq!(body["messages"][2]["content"], "Script completed\nmango");
    }
 
    #[test]

@@ -140,6 +140,22 @@ pub enum ChatContent {
    Parts(Vec<ChatPart>),
 }
 
+impl ChatContent {
+   fn into_parts(self) -> Vec<ChatPart> {
+      match self {
+         Self::Text(text) => vec![ChatPart::Text { text }],
+         Self::Parts(parts) => parts,
+      }
+   }
+
+   #[must_use]
+   pub fn append(self, other: Self) -> Self {
+      let mut parts = self.into_parts();
+      parts.extend(other.into_parts());
+      Self::Parts(parts)
+   }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ChatPart {

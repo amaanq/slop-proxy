@@ -228,7 +228,10 @@ impl Egresses {
          "{} egress refused as not opencode while another served, benched until 00:00 UTC",
          self.label
       );
-      Self::cool(&egress.anonymous_until, 86_400 - clock::unix_now().rem_euclid(86_400));
+      Self::cool(
+         &egress.anonymous_until,
+         86_400 - clock::unix_now().rem_euclid(86_400),
+      );
    }
 
    fn retry_after(entries: &[Arc<Egress>], now: i64) -> i64 {
@@ -310,7 +313,18 @@ impl Egresses {
       let mut unreachable = None;
       let mut refused = Option::<(usize, String)>::None;
       let mut tried = 0_usize;
-      for index in order.iter().copied().take(ATTEMPTS) {
+      for index in order.iter().copied() {
+         if tried >= ATTEMPTS {
+            break;
+         }
+         let bench = &entries[index].anonymous_until;
+         let spent = bench.load(Ordering::Relaxed) > clock::unix_now()
+            || refused
+               .as_ref()
+               .is_some_and(|&(flagged, _)| Arc::ptr_eq(&entries[flagged].anonymous_until, bench));
+         if anonymous && spent {
+            continue;
+         }
          tried += 1;
          match attempt(self.client(&entries[index]))
             .await
@@ -341,8 +355,6 @@ impl Egresses {
                Self::cool(&entries[index].anonymous_until, retry_after.unwrap_or(60));
                throttled = Some(body);
             },
-            // Zen answers a flagged source with the same FreeTierError it gives
-            // a malformed request, so a second refusal means the request.
             Err(SendError::Auth(body))
                if anonymous && refused.is_none() && body.contains("FreeTierError") =>
             {

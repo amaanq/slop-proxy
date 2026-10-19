@@ -43,6 +43,8 @@ pub enum PoolError {
       model: String,
       body: String,
    },
+   #[error("the {provider} free tier refused every egress: {body}")]
+   Refused { provider: Provider, body: String },
    #[error("upstream failure: {0}")]
    Upstream(String),
 }
@@ -57,7 +59,10 @@ impl PoolError {
    pub const fn attempts(&self) -> u32 {
       match *self {
          Self::AllCoolingDown { attempts, .. } => attempts,
-         Self::NoAccounts(_) | Self::BadRequest { .. } | Self::Upstream(_) => 0,
+         Self::NoAccounts(_)
+         | Self::BadRequest { .. }
+         | Self::Refused { .. }
+         | Self::Upstream(_) => 0,
       }
    }
 }
@@ -479,6 +484,10 @@ impl<B: Backend> Pool<B> {
                Err(SendError::RateLimited { retry_after, .. }) => Err(PoolError::AllCoolingDown {
                   retry_after: retry_after.unwrap_or(30),
                   attempts: prior_attempts,
+               }),
+               Err(SendError::Auth(body)) => Err(PoolError::Refused {
+                  provider: B::PROVIDER,
+                  body,
                }),
                Err(err) => Err(PoolError::Upstream(err.to_string())),
             };

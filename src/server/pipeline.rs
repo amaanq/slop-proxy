@@ -104,6 +104,7 @@ pub fn dispatch_failed(
       PoolError::NoAccounts(_) => "pool_no_accounts",
       PoolError::AllCoolingDown { .. } => "pool_cooling_down",
       PoolError::BadRequest { .. } => "pool_bad_request",
+      PoolError::Refused { .. } => "pool_refused",
       PoolError::Upstream(_) => "pool_upstream",
    };
    let response = pool_error_response(dialect, &state.cfg.models, err);

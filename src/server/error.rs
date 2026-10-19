@@ -151,6 +151,15 @@ pub fn pool_error_response(dialect: Dialect, models: &ModelsConfig, err: PoolErr
             &message,
          )
       },
+      PoolError::Refused { provider, body } => {
+         tracing::warn!(%provider, "every egress refused: {body}");
+         error_response(
+            dialect,
+            StatusCode::FORBIDDEN,
+            "permission_error",
+            &format!("the {provider} free tier refused every egress: {body}"),
+         )
+      },
       PoolError::Upstream(msg) => {
          error_response(dialect, StatusCode::BAD_GATEWAY, "api_error", &msg)
       },

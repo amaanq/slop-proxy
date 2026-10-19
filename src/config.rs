@@ -98,6 +98,17 @@ pub struct EgressConfig {
    /// Zen's free tier counts a whole /48 as one client, so each prefix here
    /// is one allowance and requests alternate between them.
    pub source_prefixes: Vec<Ipv6Net>,
+   /// Proxies whose address the operator can replace, such as one per VPN
+   /// tunnel. Tried after the source prefixes and before the proxy list.
+   pub exits: Vec<ExitConfig>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ExitConfig {
+   pub proxy_url: String,
+   /// Run through `/bin/sh -c` when zen throttles or flags this exit. Exits
+   /// zero once the proxy serves from a new address.
+   pub rotate_command: String,
 }
 
 impl EgressConfig {
@@ -576,7 +587,7 @@ mod zen_tests {
       let config = EgressConfig {
          proxy_urls: vec!["http://inline.example:80".into()],
          proxy_urls_file: Some(path.clone()),
-         source_prefixes: Vec::new(),
+         ..EgressConfig::default()
       };
 
       assert_eq!(

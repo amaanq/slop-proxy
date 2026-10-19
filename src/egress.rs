@@ -4,15 +4,18 @@
 //! leaves no egress, never the host's own address.
 
 use std::net::{IpAddr, Ipv6Addr};
-use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
 use ipnet::Ipv6Net;
 use misstep::ResultExt as _;
+use tokio::process::Command;
+use tokio::time::timeout;
 
 use crate::clock;
-use crate::config::EgressConfig;
+use crate::config::{EgressConfig, ExitConfig};
 use crate::upstream::SendError;
 
 /// How many egresses one request may burn before it gives up. A long proxy
@@ -23,8 +26,12 @@ const UNREACHABLE_COOLDOWN: i64 = 30;
 
 const SOURCE_EGRESSES: usize = 1 << 16;
 
+const ROTATE_SPACING: i64 = 60;
+const ROTATE_TIMEOUT: Duration = Duration::from_secs(120);
+
 pub struct Egresses {
    sources: Arc<[Arc<Egress>]>,
+   exits: Arc<[Arc<Exit>]>,
    entries: RwLock<Arc<[Arc<Egress>]>>,
    next: AtomicUsize,
    label: &'static str,
@@ -42,6 +49,17 @@ struct Egress {
    /// prefix, since zen counts a whole prefix as one client and a 429 on one
    /// address means every other address in it is spent too.
    anonymous_until: Arc<AtomicI64>,
+   /// The exit this rides and how many rotations its client predates.
+   exit: Option<(Arc<Exit>, u64)>,
+}
+
+/// Shared by every host that walks it, so one throttled address rotates once
+/// and each host swaps in a fresh client on its next request.
+pub struct Exit {
+   config: ExitConfig,
+   rotations: AtomicU64,
+   rotating: AtomicBool,
+   rotated_at: AtomicI64,
 }
 
 enum Route {
@@ -68,6 +86,15 @@ impl Egresses {
       label: &'static str,
       user_agent: Option<&str>,
    ) -> misstep::Result<Self> {
+      Self::sharing(cfg, label, user_agent, Exit::all(cfg))
+   }
+
+   pub fn sharing(
+      cfg: &EgressConfig,
+      label: &'static str,
+      user_agent: Option<&str>,
+      exits: Arc<[Arc<Exit>]>,
+   ) -> misstep::Result<Self> {
       let benches = cfg
          .source_prefixes
          .iter()
@@ -86,6 +113,7 @@ impl Egresses {
       let egresses = Self {
          entries: RwLock::new(Arc::clone(&sources)),
          sources,
+         exits,
          next: AtomicUsize::new(0),
          label,
          user_agent: user_agent.map(str::to_owned),
@@ -94,10 +122,19 @@ impl Egresses {
          egresses.build(&first.route, 0)?;
       }
 
+      let fixed = egresses
+         .exits
+         .iter()
+         .enumerate()
+         .map(|(index, exit)| egresses.exit_egress(exit, index).map(Arc::new))
+         .collect::<misstep::Result<Vec<_>>>()?;
+      let entries = egresses.sources.iter().cloned().chain(fixed).collect();
+      egresses.store(entries);
+
       let proxy_urls = cfg.urls()?;
       if !proxy_urls.is_empty() || cfg.proxy_urls_file.is_some() {
          egresses.replace(&proxy_urls)?;
-      } else if egresses.sources.is_empty() {
+      } else if egresses.sources.is_empty() && egresses.exits.is_empty() {
          let direct = egresses.built(Route::Direct, 0)?;
          egresses.store(Arc::new([Arc::new(direct)]));
       }
@@ -110,6 +147,55 @@ impl Egresses {
          http: OnceLock::from(http),
          ..Egress::lazy(route)
       })
+   }
+
+   fn exit_egress(&self, exit: &Arc<Exit>, index: usize) -> misstep::Result<Egress> {
+      let rotations = exit.rotations.load(Ordering::Acquire);
+      Ok(Egress {
+         exit: Some((Arc::clone(exit), rotations)),
+         ..self.built(Route::Proxy(exit.config.proxy_url.clone()), index)?
+      })
+   }
+
+   /// Rotates every exit this host has benched, and rebuilds the ones a
+   /// rotation has moved so their benches and pooled connections go with
+   /// the old address.
+   fn refresh(&self) -> Arc<[Arc<Egress>]> {
+      let entries = self.snapshot();
+      let start = self.sources.len();
+      let now = clock::unix_now();
+      let mut stale = false;
+      for egress in entries
+         .get(start..start + self.exits.len())
+         .unwrap_or_default()
+      {
+         let Some(&(ref exit, built)) = egress.exit.as_ref() else {
+            continue;
+         };
+         if egress.anonymous_until.load(Ordering::Relaxed) > now {
+            exit.rotate();
+         }
+         stale |= exit.rotations.load(Ordering::Acquire) != built;
+      }
+      if !stale {
+         return entries;
+      }
+
+      let mut current = self.entries.write().expect("egress lock poisoned");
+      let fresh = current
+         .iter()
+         .enumerate()
+         .map(|(index, egress)| match egress.exit.as_ref() {
+            Some(&(ref exit, built)) if exit.rotations.load(Ordering::Acquire) != built => {
+               tracing::info!(exit = %exit.name(), "{} exit rotated, rebuilt its client", self.label);
+               let rebuilt = self.exit_egress(exit, index - start);
+               Arc::new(rebuilt.expect("egress client config is proven at startup"))
+            },
+            _ => Arc::clone(egress),
+         })
+         .collect::<Arc<[_]>>();
+      *current = Arc::clone(&fresh);
+      fresh
    }
 
    fn client(&self, egress: &Egress) -> reqwest::Client {
@@ -151,8 +237,9 @@ impl Egresses {
    }
 
    pub fn replace(&self, proxy_urls: &[String]) -> misstep::Result<()> {
+      let fixed = self.sources.len() + self.exits.len();
       let snapshot = self.snapshot();
-      let current = snapshot.get(self.sources.len()..).unwrap_or_default();
+      let current = snapshot.get(fixed..).unwrap_or_default();
       let mut added = 0_usize;
       let proxies = proxy_urls
          .iter()
@@ -178,7 +265,11 @@ impl Egresses {
             self.label
          );
       }
-      self.store(self.sources.iter().cloned().chain(proxies).collect());
+      let mut entries = self
+         .entries
+         .write()
+         .map_err(|_| misstep::report!("egress lock poisoned"))?;
+      *entries = entries.iter().take(fixed).cloned().chain(proxies).collect();
       Ok(())
    }
 
@@ -197,16 +288,19 @@ impl Egresses {
    /// Every egress still in service, starting one past the last request so
    /// concurrent callers spread across the list rather than stacking on the
    /// first healthy one. Sources go before proxies, which are slower and
-   /// metered, so proxies only carry what the prefixes cannot.
+   /// metered, so proxies only carry what the prefixes cannot. Exits sit
+   /// between, since they cost nothing per request.
    fn order(&self, entries: &[Arc<Egress>], anonymous: bool) -> Vec<usize> {
       let now = clock::unix_now();
       let start = self.next.fetch_add(1, Ordering::Relaxed);
       let sources = self.sources.len();
+      let fixed = sources + self.exits.len();
       let rotate = |base: usize, len: usize| {
          (0..len).map(move |offset| base + start.wrapping_add(offset) % len)
       };
       rotate(0, sources)
-         .chain(rotate(sources, entries.len() - sources))
+         .chain(rotate(sources, self.exits.len()))
+         .chain(rotate(fixed, entries.len() - fixed))
          .filter(|&index| {
             let egress = &entries[index];
             egress.unavailable_until.load(Ordering::Relaxed) <= now
@@ -285,7 +379,7 @@ impl Egresses {
       Fut: Future<Output = Result<reqwest::Response, Error>>,
       Error: Into<SendError>,
    {
-      let entries = self.snapshot();
+      let entries = self.refresh();
       let order = self.order(&entries, anonymous);
       if order.is_empty() {
          let now = clock::unix_now();
@@ -434,6 +528,77 @@ impl Egress {
          http: OnceLock::new(),
          unavailable_until: AtomicI64::new(0),
          anonymous_until: Arc::default(),
+         exit: None,
+      }
+   }
+}
+
+impl Exit {
+   pub fn all(cfg: &EgressConfig) -> Arc<[Arc<Self>]> {
+      cfg.exits
+         .iter()
+         .map(|config| {
+            Arc::new(Self {
+               config: config.clone(),
+               rotations: AtomicU64::new(0),
+               rotating: AtomicBool::new(false),
+               rotated_at: AtomicI64::new(0),
+            })
+         })
+         .collect()
+   }
+
+   /// The proxy's credentials stay out of the journal.
+   fn name(&self) -> String {
+      reqwest::Url::parse(&self.config.proxy_url)
+         .ok()
+         .and_then(|url| {
+            Some(format!(
+               "{}:{}",
+               url.host_str()?,
+               url.port_or_known_default()?
+            ))
+         })
+         .unwrap_or_else(|| "exit".into())
+   }
+
+   fn rotate(self: &Arc<Self>) {
+      let now = clock::unix_now();
+      if now < self.rotated_at.load(Ordering::Relaxed) + ROTATE_SPACING
+         || self.rotating.swap(true, Ordering::AcqRel)
+      {
+         return;
+      }
+      self.rotated_at.store(now, Ordering::Relaxed);
+      let exit = Arc::clone(self);
+      tokio::spawn(async move {
+         exit.run_hook().await;
+         exit.rotating.store(false, Ordering::Release);
+      });
+   }
+
+   async fn run_hook(&self) {
+      let name = self.name();
+      tracing::warn!(exit = %name, "rotating exit");
+      let output = Command::new("/bin/sh")
+         .arg("-c")
+         .arg(&self.config.rotate_command)
+         .stdin(Stdio::null())
+         .stdout(Stdio::null())
+         .stderr(Stdio::piped())
+         .kill_on_drop(true)
+         .output();
+      match timeout(ROTATE_TIMEOUT, output).await {
+         Ok(Ok(output)) if output.status.success() => {
+            self.rotations.fetch_add(1, Ordering::AcqRel);
+         },
+         Ok(Ok(output)) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let tail = stderr.trim().chars().take(500).collect::<String>();
+            tracing::warn!(exit = %name, status = %output.status, "exit rotation failed: {tail}");
+         },
+         Ok(Err(error)) => tracing::warn!(exit = %name, "exit rotation could not start: {error}"),
+         Err(_) => tracing::warn!(exit = %name, "exit rotation timed out"),
       }
    }
 }

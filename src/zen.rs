@@ -13,7 +13,7 @@ use tokio::time::sleep;
 
 use crate::clock::{unix_now, unix_now_ms};
 use crate::config::ZenConfig;
-use crate::egress::Egresses;
+use crate::egress::{Egresses, Exit};
 use crate::upstream::{Classify, IdList, SendError, classify, json};
 
 const CONTEXT_REFRESH_SECS: i64 = 12 * 60 * 60;
@@ -54,13 +54,19 @@ pub struct ZenModel {
 impl ZenClient {
    pub fn new(cfg: ZenConfig) -> misstep::Result<Self> {
       misstep::ensure!(!cfg.base_urls.is_empty(), "zen needs at least one base url");
+      let exits = Exit::all(&cfg.egress);
       let hosts = cfg
          .base_urls
          .into_iter()
          .map(|base_url| {
             Ok(Host {
                base_url: base_url.trim_end_matches('/').to_owned(),
-               egresses: Egresses::new(&cfg.egress, "zen", Some(&cfg.user_agent))?,
+               egresses: Egresses::sharing(
+                  &cfg.egress,
+                  "zen",
+                  Some(&cfg.user_agent),
+                  Arc::clone(&exits),
+               )?,
                drained_until: AtomicI64::new(0),
             })
          })
@@ -315,8 +321,7 @@ mod tests {
          user_agent: "opencode/1.18.31".into(),
          egress: EgressConfig {
             proxy_urls: vec![authenticated(&first_url), authenticated(&second_url)],
-            proxy_urls_file: None,
-            source_prefixes: Vec::new(),
+            ..EgressConfig::default()
          },
       })
       .unwrap();
@@ -357,8 +362,7 @@ mod tests {
          user_agent: "opencode/1.18.31".into(),
          egress: EgressConfig {
             proxy_urls: vec![authenticated(&limited_url), authenticated(&working_url)],
-            proxy_urls_file: None,
-            source_prefixes: Vec::new(),
+            ..EgressConfig::default()
          },
       })
       .unwrap();
@@ -391,8 +395,7 @@ mod tests {
       let error = ZenClient::new(ZenConfig {
          egress: EgressConfig {
             proxy_urls: vec!["http://user:secret@[".into()],
-            proxy_urls_file: None,
-            source_prefixes: Vec::new(),
+            ..EgressConfig::default()
          },
          ..ZenConfig::default()
       })
@@ -425,8 +428,7 @@ mod tests {
                .iter()
                .map(|&(ref url, _)| authenticated(url))
                .collect(),
-            proxy_urls_file: None,
-            source_prefixes: Vec::new(),
+            ..EgressConfig::default()
          },
       })
       .unwrap();

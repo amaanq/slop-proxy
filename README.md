@@ -166,6 +166,25 @@ list. Use the file setting when URLs contain credentials that should stay out of
 the config and the Nix store. Configuring either list disables direct Zen
 egress.
 
+### Rotating exits
+
+An exit is a proxy whose address the operator can replace, such as one HTTP
+proxy per VPN tunnel. Exits are tried after `zen.source_prefixes` and before the
+proxy list.
+
+```toml
+[[zen.exits]]
+proxy_url = "http://127.0.0.1:8101"
+rotate_command = "exec airvpn-rotate exit0"
+```
+
+When an anonymous request finds an exit throttled or flagged, slop-proxy runs
+its `rotate_command` through `/bin/sh -c` as the service user, at most once a
+minute per exit and for at most two minutes. The command must exit zero only
+once the proxy serves from a new address. Each Zen host then drops that exit's
+connections and cooldowns on its next request. A failed command leaves the exit
+benched, and the first request a minute later retries it.
+
 ## Per-token limits and metering
 
 Each issued token can carry rolling-window limits. Omitted request or token

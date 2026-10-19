@@ -20,6 +20,7 @@ use crate::experiential::ExperientialClient;
 use crate::gemini::client::GeminiClient;
 use crate::gemini::types::ListedModel;
 use crate::glm::GlmClient;
+use crate::openrouter::OpenRouterClient;
 use crate::pool::anthropic::AnthropicPool;
 use crate::pool::codex::CodexPool;
 use crate::pool::copilot::CopilotPool;
@@ -27,6 +28,7 @@ use crate::pool::deepseek::DeepSeekPool;
 use crate::pool::experiential::ExperientialPool;
 use crate::pool::gemini::{Call, GeminiPool};
 use crate::pool::glm::GlmPool;
+use crate::pool::openrouter::OpenRouterPool;
 use crate::pool::zen::{ZenPool, satisfy_chat_tool_gate, satisfy_tool_gate};
 use crate::pool::{AccountSnapshot, Backend, PoolError, Relay, Route, Served, Slots};
 use crate::provider::Provider;
@@ -87,6 +89,7 @@ pub struct Pools {
    pub glm: GlmPool,
    pub deepseek: DeepSeekPool,
    pub experiential: ExperientialPool,
+   pub openrouter: OpenRouterPool,
    pub copilot: CopilotPool,
    catalogs: RwLock<Arc<Catalogs>>,
 }
@@ -119,6 +122,8 @@ impl Pools {
          ExperientialClient::new(cfg.experiential.clone())?,
       )
       .await?;
+      let openrouter =
+         OpenRouterPool::load(db.clone(), OpenRouterClient::new(cfg.openrouter.clone())?).await?;
       let copilot = CopilotPool::load(db.clone(), CopilotClient::new(cfg.copilot.clone())).await?;
       let pools = Self {
          codex,
@@ -128,6 +133,7 @@ impl Pools {
          glm,
          deepseek,
          experiential,
+         openrouter,
          copilot,
          catalogs: RwLock::default(),
       };
@@ -137,7 +143,7 @@ impl Pools {
       Ok(pools)
    }
 
-   const fn slots(&self) -> [&Slots; 8] {
+   const fn slots(&self) -> [&Slots; 9] {
       [
          &self.codex.slots,
          &self.anthropic.slots,
@@ -146,6 +152,7 @@ impl Pools {
          &self.glm.slots,
          &self.deepseek.slots,
          &self.experiential.slots,
+         &self.openrouter.slots,
          &self.copilot.slots,
       ]
    }
@@ -168,6 +175,10 @@ impl Pools {
          (
             &cfg.experiential.egress,
             Some(self.experiential.backend.egresses()),
+         ),
+         (
+            &cfg.openrouter.egress,
+            Some(self.openrouter.backend.egresses()),
          ),
       ]
       .into_iter()
@@ -350,6 +361,7 @@ impl Pools {
          | Provider::Glm
          | Provider::DeepSeek
          | Provider::Experiential
+         | Provider::OpenRouter
          | Provider::Copilot => Err(PoolError::BadRequest {
             provider,
             model: route.model.to_owned(),
@@ -382,7 +394,8 @@ fn announce(provider: Provider, count: usize) {
       | Provider::Zen
       | Provider::Glm
       | Provider::DeepSeek
-      | Provider::Experiential => None,
+      | Provider::Experiential
+      | Provider::OpenRouter => None,
    };
    match (count, login) {
       (0, Some(login)) => tracing::warn!("no {provider} accounts in the database; run `{login}`"),

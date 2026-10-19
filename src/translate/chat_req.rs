@@ -119,12 +119,10 @@ pub fn to_chat(req: &ResponsesRequest) -> ChatRequest {
             && last.role == "assistant"
             && (last.content.is_none() || last.tool_calls.is_some()) =>
          {
-            last.content = Some(
-               last
-                  .content
-                  .take()
-                  .map_or_else(|| parts(content), |existing| existing.append(parts(content))),
-            );
+            last.content = Some(last.content.take().map_or_else(
+               || parts(content),
+               |existing| existing.append(parts(content)),
+            ));
          },
          InputItem::Message {
             ref role,

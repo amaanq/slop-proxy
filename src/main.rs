@@ -20,6 +20,7 @@ mod experiential;
 mod gemini;
 mod glm;
 mod oauth;
+mod openrouter;
 mod pool;
 mod pricing;
 mod provider;

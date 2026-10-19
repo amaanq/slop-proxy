@@ -8,8 +8,8 @@ pub mod decompress;
 mod desktop;
 pub mod error;
 pub mod facts;
-pub mod handoff;
 mod gemini;
+pub mod handoff;
 pub mod metrics;
 pub mod openai;
 pub mod pipeline;
@@ -37,9 +37,9 @@ use crate::codex::types::ResponsesRequest;
 use crate::config::Config;
 use crate::db::Db;
 use crate::db::usage::UsageRecord;
-use crate::server::handoff::{Inherited, Predecessor, Socket};
 use crate::pool::Pools;
 use crate::pricing::{Prices, Tokens};
+use crate::server::handoff::{Inherited, Predecessor, Socket};
 use crate::translate::UsageCapture;
 
 #[derive(Clone)]
@@ -132,7 +132,11 @@ pub async fn serve(db: Db, cfg: Config, bind: &str) -> Result<()> {
    }));
 
    let mut sockets = vec![(Socket::Api, &listener)];
-   sockets.extend(metrics_listener.as_ref().map(|metrics| (Socket::Metrics, metrics)));
+   sockets.extend(
+      metrics_listener
+         .as_ref()
+         .map(|metrics| (Socket::Metrics, metrics)),
+   );
    handoff::accept(&sockets, drain.clone())?;
    if let Some(metrics_socket) = metrics_listener {
       tracing::info!("metrics on http://{}/metrics", metrics_socket.local_addr()?);

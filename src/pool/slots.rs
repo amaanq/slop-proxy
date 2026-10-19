@@ -583,6 +583,7 @@ impl Slots {
          | Provider::Glm
          | Provider::DeepSeek
          | Provider::Experiential
+         | Provider::OpenRouter
          | Provider::Zen => Err(RefreshError::Terminal(format!(
             "{} issues static keys, there is nothing to exchange",
             self.provider
@@ -819,7 +820,8 @@ fn test_slot(id: i64, trusted: bool, provider: Provider) -> Slot {
          | Provider::Glm
          | Provider::DeepSeek
          | Provider::Zen
-         | Provider::Experiential => AuthMode::ApiKey,
+         | Provider::Experiential
+         | Provider::OpenRouter => AuthMode::ApiKey,
       },
       plan: None,
       http_referer: None,

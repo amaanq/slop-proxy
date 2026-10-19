@@ -47,7 +47,11 @@ pub async fn messages(
    match provider {
       // Z.ai speaks this dialect, so the body it needs is the one that
       // arrived and the reply needs no translating back.
-      Provider::Anthropic | Provider::Glm | Provider::DeepSeek | Provider::Experiential => {
+      Provider::Anthropic
+      | Provider::Glm
+      | Provider::DeepSeek
+      | Provider::Experiential
+      | Provider::OpenRouter => {
          return relay::messages(state, auth, headers, body, peek, provider).await;
       },
       Provider::Zen
@@ -133,7 +137,8 @@ pub async fn count_tokens(
       | Provider::DeepSeek
       | Provider::OpenAi
       | Provider::Copilot
-      | Provider::Experiential => {},
+      | Provider::Experiential
+      | Provider::OpenRouter => {},
    }
    let req = match serde_json::from_slice::<AnthropicRequest>(&body) {
       Ok(req) => req,

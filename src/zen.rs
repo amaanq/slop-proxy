@@ -219,7 +219,11 @@ async fn fetch_context_windows(url: &str) -> reqwest::Result<HashMap<String, i64
       context: i64,
    }
 
-   let catalog = reqwest::get(url).await?.error_for_status()?.json::<Catalog>().await?;
+   let catalog = reqwest::get(url)
+      .await?
+      .error_for_status()?
+      .json::<Catalog>()
+      .await?;
    Ok(catalog
       .opencode
       .models

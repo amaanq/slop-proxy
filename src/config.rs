@@ -26,6 +26,7 @@ pub struct Config {
    pub glm: RelayConfig,
    pub deepseek: RelayConfig,
    pub experiential: RelayConfig,
+   pub openrouter: RelayConfig,
    pub copilot: CopilotConfig,
    pub pricing: PricingConfig,
    pub models: ModelsConfig,
@@ -289,6 +290,8 @@ pub struct ModelsConfig {
    /// Model patterns served by GitHub Copilot's chat-completions endpoint.
    /// Empty by default, set to opt in.
    pub copilot_patterns: Vec<String>,
+   /// Model patterns relayed verbatim to `OpenRouter` over /v1/messages.
+   pub openrouter_patterns: Vec<String>,
    /// Model patterns refused on every surface, whichever backend serves them.
    pub blocked_patterns: Vec<String>,
 }
@@ -309,6 +312,7 @@ impl Default for ModelsConfig {
          deepseek_patterns: vec!["deepseek-*".into()],
          experiential_patterns: Vec::new(),
          copilot_patterns: Vec::new(),
+         openrouter_patterns: vec!["minimax/*".into()],
          blocked_patterns: Vec::new(),
       }
    }
@@ -346,7 +350,7 @@ impl ModelsConfig {
       best.map(|(_, provider)| provider)
    }
 
-   const fn sets(&self) -> [(Provider, &Vec<String>); 9] {
+   const fn sets(&self) -> [(Provider, &Vec<String>); 10] {
       [
          (Provider::Anthropic, &self.anthropic_patterns),
          (Provider::Gemini, &self.gemini_patterns),
@@ -357,6 +361,7 @@ impl ModelsConfig {
          (Provider::DeepSeek, &self.deepseek_patterns),
          (Provider::Experiential, &self.experiential_patterns),
          (Provider::Copilot, &self.copilot_patterns),
+         (Provider::OpenRouter, &self.openrouter_patterns),
       ]
    }
 

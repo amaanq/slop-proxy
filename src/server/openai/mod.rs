@@ -153,7 +153,11 @@ pub async fn chat_completions(
       },
       Provider::Zen if state.cfg.models.zen_dialect(&resolved.model) != ZenDialect::Messages => {},
       Provider::OpenAi => {},
-      Provider::Glm | Provider::DeepSeek | Provider::Experiential | Provider::Zen => {
+      Provider::Glm
+      | Provider::DeepSeek
+      | Provider::Experiential
+      | Provider::OpenRouter
+      | Provider::Zen => {
          log_rejected(&state, &auth, "chat", &req.model);
          return translation_error(DIALECT, "this model is served over /v1/messages");
       },
@@ -723,6 +727,7 @@ fn prepare_request(
       | Provider::Glm
       | Provider::DeepSeek
       | Provider::Experiential
+      | Provider::OpenRouter
       | Provider::Copilot => false,
    };
    if !responses_native {
@@ -803,7 +808,9 @@ pub async fn backend_get(
    Extension(auth): Extension<AuthInfo>,
    uri: Uri,
 ) -> Response {
-   let Some(path) = uri.path_and_query().and_then(|path| path.as_str().strip_prefix("/backend-api"))
+   let Some(path) = uri
+      .path_and_query()
+      .and_then(|path| path.as_str().strip_prefix("/backend-api"))
    else {
       return translation_error(DIALECT, "not a backend-api path");
    };

@@ -23,8 +23,8 @@ use crate::oauth::TokenSet;
 use crate::pool::Pools;
 use crate::pricing::Prices;
 use crate::provider::{AuthMode, Provider};
-use crate::server::{AppState, Inner, metrics, router};
 use crate::server::metrics::{Metrics, Totals};
+use crate::server::{AppState, Inner, metrics, router};
 
 const MOCK_SSE: &str = concat!(
    "event: response.created\n",

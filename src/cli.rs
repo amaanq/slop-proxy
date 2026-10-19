@@ -212,7 +212,11 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
          Provider::OpenAi => oauth::login(&db, label).await,
          Provider::Anthropic => anthropic::login(&db, label).await,
          Provider::Copilot => copilot::login(&db, label).await,
-         Provider::Gemini | Provider::DeepSeek | Provider::Experiential | Provider::Zen => {
+         Provider::Gemini
+         | Provider::DeepSeek
+         | Provider::Experiential
+         | Provider::OpenRouter
+         | Provider::Zen => {
             bail!("{provider} has no login flow, use `accounts add-key --provider {provider}`")
          },
          Provider::Glm => {
@@ -300,11 +304,17 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
       Command::Handoff { bind } => {
          let paths = [("--db", args.db), ("--config", args.config)]
             .into_iter()
-            .filter_map(|(flag, path)| Some([flag.to_owned(), path?.to_string_lossy().into_owned()]))
+            .filter_map(|(flag, path)| {
+               Some([flag.to_owned(), path?.to_string_lossy().into_owned()])
+            })
             .flatten();
-         let listen = bind.into_iter().flat_map(|addr| ["--bind".to_owned(), addr]);
+         let listen = bind
+            .into_iter()
+            .flat_map(|addr| ["--bind".to_owned(), addr]);
          let arguments = paths.chain(["serve".to_owned()]).chain(listen);
-         Successor::new(&env::current_exe()?, arguments).request().await
+         Successor::new(&env::current_exe()?, arguments)
+            .request()
+            .await
       },
       Command::Stats { since, until } => stats::run(&db, since, until).await,
       Command::Models => models(&db, &cfg).await,

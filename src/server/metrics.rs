@@ -82,7 +82,10 @@ pub fn spawn(
       let stopped = async move {
          let _ = drain.wait_for(|&draining| draining).await;
       };
-      if let Err(err) = axum::serve(listener, app).with_graceful_shutdown(stopped).await {
+      if let Err(err) = axum::serve(listener, app)
+         .with_graceful_shutdown(stopped)
+         .await
+      {
          tracing::error!("metrics listener failed: {err}");
       }
    });
@@ -181,10 +184,17 @@ impl Totals {
          .tools
          .fold(delta.tools, |row| [row.user.clone(), row.tool.clone()]);
       self.insights.fold(delta.insights, |row| {
-         [row.user.clone(), row.account.clone(), row.stop_reason.clone()]
+         [
+            row.user.clone(),
+            row.account.clone(),
+            row.stop_reason.clone(),
+         ]
       });
       for part in delta.sessions {
-         let session = self.sessions.entry((part.user, part.session_key)).or_default();
+         let session = self
+            .sessions
+            .entry((part.user, part.session_key))
+            .or_default();
          session.accounts.extend(part.account_id);
          session.deepest = session.deepest.max(part.deepest);
          session.tokens += part.tokens;
@@ -203,7 +213,8 @@ impl Totals {
          });
          row.sessions += 1;
          row.deepest = row.deepest.max(session.deepest);
-         row.switches += i64::try_from(session.accounts.len().saturating_sub(1)).unwrap_or(i64::MAX);
+         row.switches +=
+            i64::try_from(session.accounts.len().saturating_sub(1)).unwrap_or(i64::MAX);
          row.tokens_max = row.tokens_max.max(session.tokens);
       }
       users.into_values().collect()
@@ -238,7 +249,6 @@ impl Totals {
       text
    }
 }
-
 
 type Column<R, V> = (&'static str, &'static str, fn(&R) -> V);
 

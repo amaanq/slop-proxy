@@ -520,9 +520,10 @@ impl Db {
          .reports
          .call(move |conn| {
             let txn = conn.transaction()?;
-            let last_id = txn.query_row("SELECT COALESCE(MAX(id), 0) FROM usage_log", [], |row| {
-               row.get::<_, i64>(0)
-            })?;
+            let last_id =
+               txn.query_row("SELECT COALESCE(MAX(id), 0) FROM usage_log", [], |row| {
+                  row.get::<_, i64>(0)
+               })?;
             let accounts = txn.query_row(
                "SELECT COALESCE(group_concat(id || ':' || COALESCE(label, '') || ':'
                                   || COALESCE(email, '') || ':' || provider, ','), '')

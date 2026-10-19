@@ -382,7 +382,10 @@ impl Relay {
       }
    }
 
-   #[expect(clippy::cognitive_complexity, reason = "one select loop over both sockets")]
+   #[expect(
+      clippy::cognitive_complexity,
+      reason = "one select loop over both sockets"
+   )]
    async fn run(mut self, mut client: WebSocket, mut upstream: Socket) {
       let mut keepalive = interval(PING_INTERVAL);
       keepalive.set_missed_tick_behavior(MissedTickBehavior::Delay);

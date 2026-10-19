@@ -16,6 +16,8 @@ pub enum Provider {
    DeepSeek,
    Experiential,
    Copilot,
+   #[pound(name = "openrouter")]
+   OpenRouter,
 }
 
 impl FromStr for Provider {

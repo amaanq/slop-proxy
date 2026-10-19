@@ -5,6 +5,7 @@ pub mod deepseek;
 pub mod experiential;
 pub mod gemini;
 pub mod glm;
+pub mod openrouter;
 pub mod pools;
 pub mod slots;
 pub mod zen;

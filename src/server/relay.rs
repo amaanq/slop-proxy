@@ -351,6 +351,7 @@ async fn dispatch(
             .execute(route, relay("/v1/messages"))
             .await
       },
+      Provider::OpenRouter => pools.openrouter.execute(route, relay("/v1/messages")).await,
       Provider::Zen => {
          let relay = relay("/messages");
          let opened = timeout(ZEN_FIRST_FRAME, async {

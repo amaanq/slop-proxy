@@ -7,11 +7,11 @@ use std::env;
 use std::fmt;
 use std::fs;
 use std::io;
+use std::iter;
 use std::net::TcpListener as StdListener;
 use std::os::fd::{AsFd as _, AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
 use std::os::linux::net::SocketAddrExt as _;
 use std::os::unix::net::{SocketAddr, UnixDatagram};
-use std::iter;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::str::FromStr;
@@ -123,7 +123,11 @@ impl Predecessor {
    pub fn relieve(self) {
       // SAFETY: kill has no memory effects.
       if unsafe { libc::kill(self.0, libc::SIGTERM) } != 0_i32 {
-         tracing::warn!("signalling predecessor {}: {}", self.0, io::Error::last_os_error());
+         tracing::warn!(
+            "signalling predecessor {}: {}",
+            self.0,
+            io::Error::last_os_error()
+         );
       }
    }
 }
@@ -271,7 +275,8 @@ async fn hand_off(
 /// Moves the sockets to 3, 4, ... in the child. Copying them above that
 /// range first keeps one from landing on another before it has moved.
 fn place_sockets(descriptors: &[RawFd]) -> io::Result<()> {
-   let floor = RawFd::try_from(descriptors.len()).map_or(RawFd::MAX, |count| LISTEN_FDS_START + count);
+   let floor =
+      RawFd::try_from(descriptors.len()).map_or(RawFd::MAX, |count| LISTEN_FDS_START + count);
    let mut copies = Vec::with_capacity(descriptors.len());
    for &descriptor in descriptors {
       // SAFETY: fcntl on a descriptor this process owns.

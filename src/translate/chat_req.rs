@@ -7,7 +7,9 @@ use miniz_oxide::deflate::compress_to_vec_zlib;
 use serde::Serialize;
 use serde_json::value::RawValue;
 
-use crate::codex::types::{ContentPart, InputItem, ResponsesRequest, ToolChoice, ToolDef};
+use crate::codex::types::{
+   ContentPart, InputItem, ResponsesRequest, SummaryPart, ToolChoice, ToolDef,
+};
 use crate::gemini::signatures;
 use crate::translate::chat::{
    ChatContent, ChatMessage, ChatPart, ChatRequest, ChatToolCall, ChatToolChoice, ChatToolDef,
@@ -18,7 +20,13 @@ use crate::translate::empty_schema;
 /// One assistant turn becomes one message. Strict backends (zen's Console
 /// upstream) 400 an assistant tool call that is not followed by its result,
 /// and omp sends parallel calls and their narration as separate items.
-fn push_tool_call(messages: &mut Vec<ChatMessage>, call_id: &str, name: &str, arguments: String) {
+fn push_tool_call(
+   messages: &mut Vec<ChatMessage>,
+   thought: &mut Option<String>,
+   call_id: &str,
+   name: &str,
+   arguments: String,
+) {
    let call = ChatToolCall {
       id: Some(call_id.to_owned()),
       kind: Some("function".into()),
@@ -36,12 +44,16 @@ fn push_tool_call(messages: &mut Vec<ChatMessage>, call_id: &str, name: &str, ar
       && last.role == "assistant"
    {
       last.tool_calls.get_or_insert_default().push(call);
+      if last.reasoning_content.is_none() {
+         last.reasoning_content = thought.take();
+      }
       return;
    }
 
    messages.push(ChatMessage {
       role: "assistant".into(),
       tool_calls: Some(vec![call]),
+      reasoning_content: thought.take(),
       ..Default::default()
    });
 }
@@ -93,6 +105,10 @@ pub fn to_chat(req: &ResponsesRequest) -> ChatRequest {
       content: Some(ChatContent::Text(req.instructions.clone())),
       ..Default::default()
    }];
+   // DeepSeek's thinking mode 400s a tool-call turn replayed without the
+   // reasoning that produced it. The bridge hands that out as a summary it
+   // finishes after the calls, so a replay may carry it on either side.
+   let mut thought = None::<String>;
    for item in &req.input {
       match *item {
          InputItem::Message {
@@ -113,21 +129,32 @@ pub fn to_chat(req: &ResponsesRequest) -> ChatRequest {
          InputItem::Message {
             ref role,
             ref content,
-         } => messages.push(ChatMessage {
-            // Chat completions has no `developer` role.
-            role: match role.as_str() {
-               "developer" => "system",
-               other => other,
+         } => {
+            if role != "assistant" {
+               thought = None;
             }
-            .to_owned(),
-            content: Some(parts(content)),
-            ..Default::default()
-         }),
+            messages.push(ChatMessage {
+               // Chat completions has no `developer` role.
+               role: match role.as_str() {
+                  "developer" => "system",
+                  other => other,
+               }
+               .to_owned(),
+               content: Some(parts(content)),
+               ..Default::default()
+            });
+         },
          InputItem::FunctionCall {
             ref call_id,
             ref name,
             ref arguments,
-         } => push_tool_call(&mut messages, call_id, name, arguments.clone()),
+         } => push_tool_call(
+            &mut messages,
+            &mut thought,
+            call_id,
+            name,
+            arguments.clone(),
+         ),
          InputItem::FunctionCallOutput {
             ref call_id,
             ref output,
@@ -147,12 +174,26 @@ pub fn to_chat(req: &ResponsesRequest) -> ChatRequest {
             ref input,
          } => push_tool_call(
             &mut messages,
+            &mut thought,
             call_id,
             name,
             serde_json::to_string(&Freeform { input }).unwrap_or_default(),
          ),
+         InputItem::Reasoning { ref summary, .. } => {
+            let text = summary
+               .iter()
+               .map(|&SummaryPart::SummaryText { ref text }| text.as_str())
+               .collect::<String>();
+            thought = (!text.is_empty()).then_some(text);
+            if let Some(last) = messages.last_mut()
+               && last.tool_calls.is_some()
+               && last.reasoning_content.is_none()
+            {
+               last.reasoning_content = thought.take();
+            }
+         },
          // Gemini rejects an unknown role rather than ignoring it.
-         InputItem::Reasoning { .. } | InputItem::AdditionalTools { .. } | InputItem::Other => {},
+         InputItem::AdditionalTools { .. } | InputItem::Other => {},
       }
    }
 

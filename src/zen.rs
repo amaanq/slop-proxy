@@ -5,9 +5,11 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use axum::body::Bytes;
 use reqwest::header::CONTENT_TYPE;
+use tokio::time::sleep;
 
 use crate::clock::{unix_now, unix_now_ms};
 use crate::config::ZenConfig;
@@ -36,6 +38,13 @@ struct Host {
 /// A walk that runs out reports a one second retry while untried addresses
 /// remain, too short to be worth skipping the host for.
 const DRAINED_SECS: i64 = 60;
+
+/// Zen relays this `DeepSeek` thinking-mode 400 for byte-identical bodies it
+/// served minutes earlier, so a resend on the same exit usually clears it.
+const REPLAY_REJECTION: &str = "thinking mode must be passed back";
+const REPLAY_TRIES: u32 = 3;
+const REPLAY_PAUSE: Duration = Duration::from_millis(250);
+const UNAVAILABLE_MAX_SECS: i64 = 60;
 
 pub struct ZenModel {
    pub id: String,
@@ -90,27 +99,45 @@ impl ZenClient {
          let url = format!("{}{path}", host.base_url);
          let url = url.as_str();
          let attempt = move |http: reqwest::Client| async move {
-            let mut builder = http
-               .post(url)
-               .header("Accept", "*/*")
-               .header("x-opencode-session", session)
-               .header("x-opencode-session-id", session)
-               .header("x-opencode-request", request_id)
-               .header("x-opencode-client", "cli")
-               .header("x-opencode-project", "global");
-            builder = match key {
-               Some(key) => builder.bearer_auth(key),
-               None => builder.header("x-api-key", "public"),
-            };
-            if path.ends_with("/messages") {
-               builder = builder.header("anthropic-version", "2023-06-01");
+            let mut tries = 1;
+            loop {
+               let mut builder = http
+                  .post(url)
+                  .header("Accept", "*/*")
+                  .header("x-opencode-session", session)
+                  .header("x-opencode-session-id", session)
+                  .header("x-opencode-request", request_id)
+                  .header("x-opencode-client", "cli")
+                  .header("x-opencode-project", "global");
+               builder = match key {
+                  Some(key) => builder.bearer_auth(key),
+                  None => builder.header("x-api-key", "public"),
+               };
+               if path.ends_with("/messages") {
+                  builder = builder.header("anthropic-version", "2023-06-01");
+               }
+               let response = builder
+                  .header(CONTENT_TYPE, "application/json")
+                  .body(req.clone())
+                  .send()
+                  .await?;
+               match classify(response, Classify::STRICT).await {
+                  Err(SendError::BadRequest(body))
+                     if tries < REPLAY_TRIES && body.contains(REPLAY_REJECTION) =>
+                  {
+                     tracing::warn!(tries, "zen refused a thinking replay, resending: {body}");
+                     tries += 1;
+                     sleep(REPLAY_PAUSE).await;
+                  },
+                  Err(SendError::BadRequest(body)) if body.contains("Model is unavailable") => {
+                     return Err(SendError::ModelLimited {
+                        retry_after: retry_after_ms(&body),
+                        body,
+                     });
+                  },
+                  other => return other,
+               }
             }
-            let response = builder
-               .header(CONTENT_TYPE, "application/json")
-               .body(req.clone())
-               .send()
-               .await?;
-            classify(response, Classify::STRICT).await
          };
          outcome = if key.is_some() {
             host.egresses.send(attempt).await
@@ -130,10 +157,13 @@ impl ZenClient {
 
    pub async fn models(&self) -> Result<Vec<ZenModel>, SendError> {
       let host = &self.hosts[0];
-      let url = format!("{}/models", host.base_url);
+      let listing_url = format!("{}/models", host.base_url);
+      let url = listing_url.as_str();
       let response = host
          .egresses
-         .send_anonymous(|http| http.get(url.as_str()).send())
+         .send_anonymous(|http| async move {
+            classify(http.get(url).send().await?, Classify::STRICT).await
+         })
          .await?;
       let listing: IdList = json(response, Classify::STRICT).await?;
       let windows = self.context_windows().await;
@@ -190,6 +220,16 @@ async fn fetch_context_windows(url: &str) -> reqwest::Result<HashMap<String, i64
       .into_iter()
       .filter_map(|(id, model)| Some((id, model.limit?.context)))
       .collect())
+}
+
+/// Zen puts its backoff in the message text, as `retry-after-ms=<n>`. Its
+/// "Model is unavailable" hints run near 19 minutes while re-asking costs one
+/// 400, so a client honouring `Retry-After` waits a minute at most.
+fn retry_after_ms(body: &str) -> Option<i64> {
+   let (_, rest) = body.split_once("retry-after-ms=")?;
+   let digits = rest.split(|digit: char| !digit.is_ascii_digit()).next()?;
+   let millis = digits.parse::<i64>().ok()?;
+   (millis > 0).then(|| ((millis + 999) / 1000).min(UNAVAILABLE_MAX_SECS))
 }
 
 fn request_id() -> String {

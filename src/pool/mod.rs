@@ -481,7 +481,10 @@ impl<B: Backend> Pool<B> {
                   attempts: prior_attempts,
                }),
                Err(SendError::BadRequest(body)) => Err(Self::bad_request(route, B::reason(body))),
-               Err(SendError::RateLimited { retry_after, .. }) => Err(PoolError::AllCoolingDown {
+               Err(
+                  SendError::RateLimited { retry_after, .. }
+                  | SendError::ModelLimited { retry_after, .. },
+               ) => Err(PoolError::AllCoolingDown {
                   retry_after: retry_after.unwrap_or(30),
                   attempts: prior_attempts,
                }),

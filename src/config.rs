@@ -171,7 +171,7 @@ impl Default for ZenConfig {
             "https://dev.opencode.ai/inference/v1".into(),
          ],
          models_dev_url: "https://models.dev/api.json".into(),
-         user_agent: "opencode/1.19.0 ai-sdk/provider-utils/4.0.40 runtime/bun/1.3.13".into(),
+         user_agent: "opencode/latest/2.1.4/cli".into(),
          egress: EgressConfig::default(),
       }
    }

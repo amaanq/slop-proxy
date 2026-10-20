@@ -11,7 +11,7 @@ use axum::body::Bytes;
 use reqwest::header::CONTENT_TYPE;
 use tokio::time::sleep;
 
-use crate::clock::{unix_now, unix_now_ms};
+use crate::clock::unix_now;
 use crate::config::ZenConfig;
 use crate::egress::{Egresses, Exit};
 use crate::upstream::{Classify, IdList, SendError, classify, json};
@@ -93,8 +93,8 @@ impl ZenClient {
       req: &Bytes,
    ) -> Result<reqwest::Response, SendError> {
       let key = key.filter(|key| !key.is_empty());
-      let request_id = request_id();
-      let request_id = request_id.as_str();
+      let (traceparent, b3) = trace_context();
+      let (traceparent, b3) = (traceparent.as_str(), b3.as_str());
       let now = unix_now();
       let last = self.hosts.len() - 1;
       let mut outcome = Err(SendError::Network("no zen hosts".into()));
@@ -112,12 +112,15 @@ impl ZenClient {
                   .header("Accept", "*/*")
                   .header("x-opencode-session", session)
                   .header("x-opencode-session-id", session)
-                  .header("x-opencode-request", request_id)
+                  .header("x-session-affinity", session)
+                  .header("x-session-id", session)
                   .header("x-opencode-client", "cli")
-                  .header("x-opencode-project", "global");
+                  .header("x-opencode-project", "global")
+                  .header("traceparent", traceparent)
+                  .header("b3", b3);
                builder = match key {
                   Some(key) => builder.bearer_auth(key),
-                  None => builder.header("x-api-key", "public"),
+                  None => builder.bearer_auth("public"),
                };
                if path.ends_with("/messages") {
                   builder = builder.header("anthropic-version", "2023-06-01");
@@ -242,19 +245,19 @@ fn retry_after_ms(body: &str) -> Option<i64> {
    (millis > 0).then(|| ((millis + 999) / 1000).min(UNAVAILABLE_MAX_SECS))
 }
 
-fn request_id() -> String {
-   const ALPHANUMERIC: &[u8; 62] =
-      b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-   let mut bytes = [0_u8; 14];
+fn trace_context() -> (String, String) {
+   let mut bytes = [0_u8; 32];
    getrandom::fill(&mut bytes).expect("the OS random source is readable");
-   // Zen's free tier checks that the per-millisecond counter in the low 12
-   // bits is OpenCode's first value, 1, for both message and session ids.
-   let timestamp = (unix_now_ms().saturating_mul(0x1000) + 1) & 0xffff_ffff_ffff;
-   let random = bytes
+   let hex = bytes
       .iter()
-      .map(|&byte| char::from(ALPHANUMERIC[usize::from(byte) % ALPHANUMERIC.len()]))
+      .map(|byte| format!("{byte:02x}"))
       .collect::<String>();
-   format!("msg_{timestamp:012x}{random}")
+   let (trace, rest) = hex.split_at(32);
+   let (span, parent) = rest.split_at(16);
+   (
+      format!("00-{trace}-{span}-01"),
+      format!("{trace}-{span}-1-{parent}"),
+   )
 }
 
 #[cfg(test)]

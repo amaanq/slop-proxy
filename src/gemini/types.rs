@@ -165,6 +165,7 @@ pub enum FunctionCallingMode {
    Auto,
    Any,
    None,
+   Validated,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

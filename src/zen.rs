@@ -3,6 +3,7 @@
 //! caller wrote it and comes back as frames that caller already understands.
 
 use std::collections::HashMap;
+use std::slice;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -20,6 +21,7 @@ const CONTEXT_REFRESH_SECS: i64 = 12 * 60 * 60;
 
 pub struct ZenClient {
    hosts: Vec<Host>,
+   subscription: Host,
    models_dev_url: String,
    context_windows: RwLock<Arc<HashMap<String, i64>>>,
    context_fetched_at: AtomicI64,
@@ -55,24 +57,27 @@ impl ZenClient {
    pub fn new(cfg: ZenConfig) -> misstep::Result<Self> {
       misstep::ensure!(!cfg.base_urls.is_empty(), "zen needs at least one base url");
       let exits = Exit::all(&cfg.egress);
+      let host = |base_url: String| {
+         Ok(Host {
+            base_url: base_url.trim_end_matches('/').to_owned(),
+            egresses: Egresses::sharing(
+               &cfg.egress,
+               "zen",
+               Some(&cfg.user_agent),
+               Arc::clone(&exits),
+            )?,
+            drained_until: AtomicI64::new(0),
+         })
+      };
       let hosts = cfg
          .base_urls
          .into_iter()
-         .map(|base_url| {
-            Ok(Host {
-               base_url: base_url.trim_end_matches('/').to_owned(),
-               egresses: Egresses::sharing(
-                  &cfg.egress,
-                  "zen",
-                  Some(&cfg.user_agent),
-                  Arc::clone(&exits),
-               )?,
-               drained_until: AtomicI64::new(0),
-            })
-         })
+         .map(host)
          .collect::<misstep::Result<_>>()?;
+      let subscription = host(cfg.go_base_url)?;
       Ok(Self {
          hosts,
+         subscription,
          models_dev_url: cfg.models_dev_url,
          context_windows: RwLock::default(),
          context_fetched_at: AtomicI64::new(0),
@@ -96,9 +101,14 @@ impl ZenClient {
       let (traceparent, b3) = trace_context();
       let (traceparent, b3) = (traceparent.as_str(), b3.as_str());
       let now = unix_now();
-      let last = self.hosts.len() - 1;
+      let hosts = if key.is_some() {
+         slice::from_ref(&self.subscription)
+      } else {
+         &*self.hosts
+      };
+      let last = hosts.len() - 1;
       let mut outcome = Err(SendError::Network("no zen hosts".into()));
-      for (index, host) in self.hosts.iter().enumerate() {
+      for (index, host) in hosts.iter().enumerate() {
          if key.is_none() && index < last && host.drained_until.load(Ordering::Relaxed) > now {
             continue;
          }
@@ -324,6 +334,7 @@ mod tests {
       let (second_url, second_requests) = spawn_proxy(StatusCode::OK).await;
       let client = ZenClient::new(ZenConfig {
          base_urls: vec!["http://zen.invalid/v1".into()],
+         go_base_url: "http://zen.invalid/go/v1".into(),
          models_dev_url: "http://models.invalid".into(),
          user_agent: "opencode/1.18.31".into(),
          egress: EgressConfig {
@@ -365,6 +376,7 @@ mod tests {
       let (working_url, working_requests) = spawn_proxy(StatusCode::OK).await;
       let client = ZenClient::new(ZenConfig {
          base_urls: vec!["http://zen.invalid/v1".into()],
+         go_base_url: "http://zen.invalid/go/v1".into(),
          models_dev_url: "http://models.invalid".into(),
          user_agent: "opencode/1.18.31".into(),
          egress: EgressConfig {
@@ -428,6 +440,7 @@ mod tests {
       }
       let client = ZenClient::new(ZenConfig {
          base_urls: vec!["http://zen.invalid/v1".into()],
+         go_base_url: "http://zen.invalid/go/v1".into(),
          models_dev_url: "http://models.invalid".into(),
          user_agent: "opencode/1.18.31".into(),
          egress: EgressConfig {

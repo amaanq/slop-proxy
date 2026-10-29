@@ -155,6 +155,9 @@ impl RelayConfig {
 pub struct ZenConfig {
    /// Tried in order, the next once every egress is throttled on the last.
    pub base_urls: Vec<String>,
+   /// Where a stored key goes. `base_urls` bill a key against Console
+   /// credits and ignore its Go subscription.
+   pub go_base_url: String,
    /// Zen's own `/models` names ids and nothing else. models.dev publishes
    /// zen as its `opencode` provider, which is where opencode reads limits.
    pub models_dev_url: String,
@@ -170,6 +173,7 @@ impl Default for ZenConfig {
             "https://opencode.ai/inference/v1".into(),
             "https://dev.opencode.ai/inference/v1".into(),
          ],
+         go_base_url: "https://opencode.ai/inference/go/openai/v1".into(),
          models_dev_url: "https://models.dev/api.json".into(),
          user_agent: "opencode/latest/2.1.4/cli".into(),
          egress: EgressConfig::default(),

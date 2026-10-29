@@ -302,7 +302,7 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
       },
       Command::Serve { bind } => {
          let bind = bind.unwrap_or_else(|| cfg.bind.clone());
-         server::serve(db, cfg, &bind).await
+         Box::pin(server::serve(db, cfg, &bind)).await
       },
       Command::Handoff { bind } => {
          let paths = [("--db", args.db), ("--config", args.config)]

@@ -145,6 +145,11 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
    ),
    ("api_tokens", "pinned_account", "INTEGER"),
    ("api_tokens", "reserved_only", "INTEGER NOT NULL DEFAULT 0"),
+   (
+      "api_tokens",
+      "metered_providers",
+      "TEXT NOT NULL DEFAULT ''",
+   ),
 ];
 
 /// Indexes over columns `ADDED_COLUMNS` introduces, so they are built after

@@ -444,6 +444,7 @@ async fn token_request_limit_enforced() {
    db.set_token_limits(
       &id.to_string(),
       &TokenLimits {
+         metered: Vec::new(),
          providers: Vec::new(),
          requests: Some(1),
          tokens: None,

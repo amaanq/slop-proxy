@@ -18,6 +18,7 @@ pub struct AuthInfo {
    pub token_id: i64,
    pub user: String,
    pub meter_id: Option<i64>,
+   pub tokens_spent: Option<i64>,
    pub limits: TokenLimits,
 }
 
@@ -27,6 +28,7 @@ impl From<AuthenticatedToken> for AuthInfo {
          token_id: token.id,
          user: token.user,
          meter_id: None,
+         tokens_spent: None,
          limits: token.limits,
       }
    }
@@ -184,10 +186,11 @@ pub async fn admit_token(
       time::sleep(Duration::from_millis(admission.slowdown_ms as u64)).await;
    }
    auth.meter_id = Some(admission.meter_id);
+   auth.tokens_spent = admission.tokens_spent;
    Ok((auth, admission))
 }
 
-fn insert_header(response: &mut Response, name: &'static str, value: i64) {
+pub fn insert_header(response: &mut Response, name: &'static str, value: i64) {
    response
       .headers_mut()
       .insert(HeaderName::from_static(name), HeaderValue::from(value));

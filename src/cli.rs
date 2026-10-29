@@ -199,6 +199,9 @@ pub struct LimitArgs {
    /// Providers this token may reach, comma separated. Omit to allow all.
    #[pound(long, delimiter = ",")]
    providers: Vec<Provider>,
+   /// Providers the token limit counts, comma separated. Omit to count all.
+   #[pound(long, delimiter = ",")]
+   metered: Vec<Provider>,
    /// Serve this token only from the named account, by id, email or label
    #[pound(long)]
    pin_account: Option<String>,
@@ -530,6 +533,7 @@ impl LimitArgs {
          reserved_only: self.reserved_only,
          pinned_account,
          providers: self.providers,
+         metered: self.metered,
       })
    }
 }

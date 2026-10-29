@@ -30,6 +30,8 @@ pub struct TokenLimits {
    /// Providers this token may reach. Empty means every one, so a token
    /// created before the column existed keeps its old reach.
    pub providers: Vec<Provider>,
+   /// Providers whose traffic spends `tokens`. Empty means every one.
+   pub metered: Vec<Provider>,
 }
 
 impl TokenLimits {
@@ -37,9 +39,12 @@ impl TokenLimits {
       self.providers.is_empty() || self.providers.contains(&provider)
    }
 
-   fn encode(&self) -> String {
-      self
-         .providers
+   pub fn meters(&self, provider: Provider) -> bool {
+      self.metered.is_empty() || self.metered.contains(&provider)
+   }
+
+   fn encode(providers: &[Provider]) -> String {
+      providers
          .iter()
          .map(Provider::as_str)
          .collect::<Vec<_>>()
@@ -139,7 +144,8 @@ impl Db {
             Ok(conn.execute(
                "UPDATE api_tokens
              SET request_limit = ?3, token_limit = ?4, window_seconds = ?5, slowdown_ms = ?6,
-                 prefer_trusted = ?7, reserved_only = ?8, pinned_account = ?9, allowed_providers = ?10
+                 prefer_trusted = ?7, reserved_only = ?8, pinned_account = ?9, allowed_providers = ?10,
+                 metered_providers = ?11
              WHERE id = ?1 OR token_prefix = ?2",
                params![
                   id,
@@ -151,7 +157,8 @@ impl Db {
                   limits.prefer_trusted,
                   limits.reserved_only,
                   limits.pinned_account,
-                  limits.encode(),
+                  TokenLimits::encode(&limits.providers),
+                  TokenLimits::encode(&limits.metered),
                ],
             )?)
          })
@@ -164,7 +171,7 @@ impl Db {
          .call(move |conn| {
             let mut stmt = conn.prepare(
                "SELECT id, user, request_limit, token_limit, window_seconds, slowdown_ms,
-                    prefer_trusted, reserved_only, pinned_account, allowed_providers
+                    prefer_trusted, reserved_only, pinned_account, allowed_providers, metered_providers
              FROM api_tokens WHERE token_hash = ?1 AND revoked_at IS NULL",
             )?;
             let mut rows = stmt.query_map(params![token_hash], |row| {
@@ -182,7 +189,7 @@ impl Db {
 
 const API_TOKEN_COLS: &str = "id, user, token_prefix, created_at, revoked_at,
    request_limit, token_limit, window_seconds, slowdown_ms, prefer_trusted,
-   reserved_only, pinned_account, allowed_providers";
+   reserved_only, pinned_account, allowed_providers, metered_providers";
 
 fn api_token_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ApiToken> {
    Ok(ApiToken {
@@ -205,6 +212,7 @@ fn limits_from_row(row: &rusqlite::Row<'_>, base: usize) -> rusqlite::Result<Tok
       reserved_only: row.get(base + 5)?,
       pinned_account: row.get(base + 6)?,
       providers: TokenLimits::decode(&row.get::<_, String>(base + 7)?),
+      metered: TokenLimits::decode(&row.get::<_, String>(base + 8)?),
    })
 }
 

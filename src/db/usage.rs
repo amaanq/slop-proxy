@@ -103,6 +103,9 @@ pub struct Admission {
    pub tokens_remaining: Option<i64>,
    pub reset_after: i64,
    pub slowdown_ms: i64,
+   /// Seconds until the token limit frees up, when it is spent but only
+   /// binds the metered providers the route has not been resolved to yet.
+   pub tokens_spent: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -254,10 +257,15 @@ impl Db {
                let retry_after = retry_after(oldest_request, window_ms, now);
                return Ok(Err(AdmissionError::RequestLimit { retry_after }));
             }
-            if limits.tokens.is_some_and(|limit| tokens >= limit) {
+            let tokens_spent = if limits.tokens.is_some_and(|limit| tokens >= limit) {
                let retry_after = retry_after(oldest_tokens.or(oldest_request), window_ms, now);
-               return Ok(Err(AdmissionError::TokenLimit { retry_after }));
-            }
+               if limits.metered.is_empty() {
+                  return Ok(Err(AdmissionError::TokenLimit { retry_after }));
+               }
+               Some(retry_after)
+            } else {
+               None
+            };
 
             txn.execute(
                "DELETE FROM api_meter WHERE token_id = ?1 AND ts_ms <= ?2",
@@ -278,6 +286,7 @@ impl Db {
                tokens_remaining: limits.tokens.map(|limit| (limit - tokens).max(0)),
                reset_after: retry_after(oldest_request.or(Some(now)), window_ms, now),
                slowdown_ms: limits.slowdown_ms,
+               tokens_spent,
             }))
          })
          .await

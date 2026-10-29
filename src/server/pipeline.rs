@@ -24,7 +24,7 @@ use crate::db::usage::UsageRecord;
 use crate::egress::egress_of;
 use crate::pool::{PoolError, Route, Served};
 use crate::provider::Provider;
-use crate::server::auth::AuthInfo;
+use crate::server::auth::{AuthInfo, insert_header};
 use crate::server::error::{Dialect, error_response, pool_error_response};
 use crate::server::facts::RequestFacts;
 use crate::server::relay::forwarded_response;
@@ -40,7 +40,7 @@ pub fn record(
    facts: RequestFacts,
 ) -> UsageRecord {
    UsageRecord {
-      meter_id: auth.meter_id,
+      meter_id: auth.meter_id.filter(|_| auth.limits.meters(provider)),
       token_id: Some(auth.token_id),
       user: auth.user.clone(),
       provider: Some(provider),
@@ -89,6 +89,22 @@ pub fn admit(
             provider.as_str()
          ),
       )));
+   }
+   if let Some(retry_after) = auth.tokens_spent
+      && auth.limits.meters(provider)
+   {
+      log_rejected(state, auth, endpoint, requested);
+      let mut response = error_response(
+         dialect,
+         StatusCode::TOO_MANY_REQUESTS,
+         "rate_limit_error",
+         &format!(
+            "API token token limit exceeded for the {} backend",
+            provider.as_str()
+         ),
+      );
+      insert_header(&mut response, "retry-after", retry_after);
+      return Err(Box::new(response));
    }
    Ok(provider)
 }

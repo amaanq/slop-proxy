@@ -48,6 +48,7 @@ async fn retry_after_on_request_limit_for_both_dialects() {
    db.set_token_limits(
       &id.to_string(),
       &TokenLimits {
+         metered: Vec::new(),
          providers: Vec::new(),
          requests: Some(1),
          tokens: None,
@@ -140,6 +141,7 @@ async fn retry_after_on_token_limit() {
    db.set_token_limits(
       &id.to_string(),
       &TokenLimits {
+         metered: Vec::new(),
          providers: Vec::new(),
          requests: None,
          tokens: Some(10),
@@ -274,6 +276,7 @@ async fn rate_limit_headers_present_on_success() {
    db.set_token_limits(
       &id.to_string(),
       &TokenLimits {
+         metered: Vec::new(),
          providers: Vec::new(),
          requests: Some(5),
          tokens: Some(100_000),

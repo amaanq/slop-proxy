@@ -338,6 +338,16 @@ impl Slots {
       slot.state.lock().await.status == Status::Disabled
    }
 
+   pub async fn is_cooling(&self, slot: &Slot) -> bool {
+      slot
+         .state
+         .lock()
+         .await
+         .status
+         .cooling(clock::unix_now())
+         .is_some()
+   }
+
    pub async fn note_catalog(&self, slot: &Slot, catalog: Arc<ModelsResponse>) {
       let mut state = slot.state.lock().await;
       state.catalog = Some(catalog);

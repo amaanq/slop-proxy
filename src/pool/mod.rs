@@ -218,11 +218,14 @@ impl<B: Backend> Pool<B> {
          if !slot.serves(user) || pinned_account.is_some_and(|id| id != slot.id) {
             continue;
          }
+         // A 429 benches the account without a fresh usage report, so its stored
+         // windows still show the headroom it had before the limit hit.
+         let cooling = self.slots.is_cooling(slot).await;
          for window in self.slots.limit_windows(slot, limit).await {
             let aggregate = by_name
                .entry(window.name.clone())
                .or_insert((0.0_f64, 0_usize, None));
-            aggregate.0 += window.utilization;
+            aggregate.0 += if cooling { 1.0_f64 } else { window.utilization };
             aggregate.1 += 1;
             aggregate.2 = match (aggregate.2, window.resets_at) {
                (Some(left), Some(right)) => Some(left.min(right)),

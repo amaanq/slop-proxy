@@ -4,8 +4,10 @@ use crate::codex::turn_state::TurnState;
 use crate::db::Db;
 use crate::db::accounts::{Account, AccountField, AccountStatus};
 use crate::oauth;
+use crate::oauth::TokenSet;
 use crate::oauth::anthropic;
 use crate::oauth::copilot;
+use crate::oauth::jwt;
 use crate::oauth::refresh::{RefreshError, refresh_at};
 use crate::provider::{AuthMode, Provider};
 use std::collections::BTreeMap;
@@ -605,6 +607,8 @@ impl Slots {
                tracing::error!("persisting refreshed tokens for {}: {err}", slot.display);
                return Err(());
             }
+
+            self.note_plan(slot, &tokens).await;
             credentials.access_token.clone_from(&tokens.access_token);
             credentials.refresh_token = tokens.refresh_token;
             credentials.expires_at = tokens.expires_at;
@@ -627,6 +631,39 @@ impl Slots {
             self.cool(slot, 30, "refresh failure").await;
             Err(())
          },
+      }
+   }
+
+   /// A subscription bought or lapsed after login reaches the account only
+   /// through a refresh, since nothing else rereads the plan.
+   async fn note_plan(&self, slot: &Slot, tokens: &TokenSet) {
+      let plan = match self.provider {
+         Provider::OpenAi => tokens
+            .id_token
+            .as_deref()
+            .and_then(|id_token| jwt::parse_id_token(id_token).ok()?.plan_type),
+         Provider::Anthropic => anthropic::subscription_tier(&tokens.access_token).await,
+         Provider::Copilot => tokens
+            .access_token
+            .split(';')
+            .find_map(|field| field.strip_prefix("sku="))
+            .map(str::to_owned),
+         Provider::Gemini
+         | Provider::Glm
+         | Provider::DeepSeek
+         | Provider::Experiential
+         | Provider::OpenRouter
+         | Provider::Zen => None,
+      };
+      let Some(plan) = plan.filter(|plan| slot.plan.as_ref() != Some(plan)) else {
+         return;
+      };
+      if let Err(err) = self
+         .db
+         .set_account(slot.id, AccountField::PlanType(plan))
+         .await
+      {
+         tracing::warn!("persisting refreshed plan for {}: {err}", slot.display);
       }
    }
 

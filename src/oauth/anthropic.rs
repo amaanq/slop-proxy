@@ -100,7 +100,7 @@ pub async fn login(db: &Db, label: Option<String>) -> Result<()> {
 
 /// The subscription tier lives on the profile rather than the token
 /// response, and distinguishes a 5x plan from a 20x one.
-async fn subscription_tier(access_token: &str) -> Option<String> {
+pub async fn subscription_tier(access_token: &str) -> Option<String> {
    #[derive(Deserialize)]
    struct Profile {
       organization: Option<Org>,

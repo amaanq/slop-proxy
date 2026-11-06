@@ -98,6 +98,7 @@ pub enum AccountField {
    AllowedUsers(String),
    HttpReferer(Option<String>),
    TurnState(String),
+   PlanType(String),
 }
 
 impl AccountField {
@@ -109,6 +110,7 @@ impl AccountField {
          Self::AllowedUsers(users) => ("allowed_users", users.into()),
          Self::HttpReferer(referer) => ("http_referer", referer.into()),
          Self::TurnState(token) => ("turn_state", token.into()),
+         Self::PlanType(plan) => ("plan_type", plan.into()),
       }
    }
 }

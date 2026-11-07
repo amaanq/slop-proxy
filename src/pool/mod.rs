@@ -504,12 +504,22 @@ impl<B: Backend> Pool<B> {
       self.wait_out_own_cooldown(ranked.first()).await;
       let mut last_err = Option::<SendError>::None;
       let mut attempts = 0_u32;
+      let mut server_cooling = false;
       for slot in ranked {
          if attempts >= B::ATTEMPTS {
             break;
          }
+
+         let serves = route.model.is_empty() || self.slots.serves_model(&slot, route.model).await;
+         // An account missing a preview model 400s it, so falling through to
+         // one turns a short rate limit on the serving account into a 400.
+         if !serves && server_cooling {
+            break;
+         }
+
          if self.slots.model_cooling(&slot, route.model).await || !self.slots.try_claim(&slot).await
          {
+            server_cooling |= serves;
             continue;
          }
          attempts += 1;
@@ -555,6 +565,7 @@ impl<B: Backend> Pool<B> {
                   .slots
                   .cool_rate_limited(&slot, retry_after, B::RATE_LIMIT.max, B::RATE_LIMIT.base)
                   .await;
+               server_cooling |= serves;
                last_err = Some(SendError::RateLimited { retry_after, body });
             },
             Err(SendError::ModelLimited { retry_after, body }) => {
@@ -562,6 +573,7 @@ impl<B: Backend> Pool<B> {
                   .unwrap_or(B::RATE_LIMIT.base)
                   .min(B::RATE_LIMIT.max);
                self.slots.cool_model(&slot, route.model, secs).await;
+               server_cooling |= serves;
                last_err = Some(SendError::ModelLimited { retry_after, body });
             },
             Err(SendError::BadRequest(body)) if self.backend.retryable_bad_request(&body) => {

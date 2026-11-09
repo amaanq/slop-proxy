@@ -1,11 +1,12 @@
-use std::mem;
 use std::time::{Duration, Instant};
+use std::{fmt, mem};
 
 use axum::body::{Body, Bytes};
 use axum::http::response::Builder;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
-use serde::Deserialize;
+use serde::de::{IgnoredAny, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer};
 use serde_json::value::RawValue;
 use tokio::time::timeout;
 
@@ -15,6 +16,7 @@ use crate::pool::anthropic::Relay as AnthropicRelay;
 use crate::pool::{PoolError, Relay, Route, Served, UsageWindow};
 use crate::provider::Provider;
 use crate::server::auth::AuthInfo;
+use crate::server::chat::first_turn_key;
 use crate::server::error::{Dialect, error_response, pool_error_response};
 use crate::server::facts::RequestFacts;
 use crate::server::pipeline::{self, Scan, respond};
@@ -34,6 +36,7 @@ pub struct Peek {
    pub fast: bool,
    user_id: Option<String>,
    system: Option<Box<RawValue>>,
+   opening: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -45,6 +48,73 @@ struct PeekBody {
    thinking: Option<ThinkingPeek>,
    metadata: Option<MetadataPeek>,
    system: Option<Box<RawValue>>,
+   #[serde(deserialize_with = "opening_text")]
+   messages: Option<String>,
+}
+
+/// Reads the first message and skips the rest without buffering them.
+fn opening_text<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+   D: Deserializer<'de>,
+{
+   struct First;
+
+   impl<'de> Visitor<'de> for First {
+      type Value = Option<String>;
+
+      fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+         formatter.write_str("a message array")
+      }
+
+      fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+      where
+         A: SeqAccess<'de>,
+      {
+         let first = seq.next_element::<OpeningPeek>()?;
+         while seq.next_element::<IgnoredAny>()?.is_some() {}
+         Ok(first.and_then(OpeningPeek::text))
+      }
+   }
+
+   deserializer.deserialize_seq(First)
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct OpeningPeek {
+   content: Option<ContentPeek>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ContentPeek {
+   Text(String),
+   Blocks(Vec<BlockPeek>),
+   Other(IgnoredAny),
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct BlockPeek {
+   text: Option<String>,
+}
+
+impl OpeningPeek {
+   /// Text only, since `cache_control` lands on this message while it is
+   /// the latest one and moves off it on the next turn.
+   fn text(self) -> Option<String> {
+      match self.content? {
+         ContentPeek::Text(text) => Some(text),
+         ContentPeek::Blocks(blocks) => {
+            let texts = blocks
+               .into_iter()
+               .filter_map(|block| block.text)
+               .collect::<Vec<_>>();
+            (!texts.is_empty()).then(|| texts.join("\n"))
+         },
+         ContentPeek::Other(_) => None,
+      }
+   }
 }
 
 #[derive(Default, Deserialize)]
@@ -79,6 +149,7 @@ impl Peek {
          fast: peek.speed.as_deref() == Some("fast"),
          user_id: peek.metadata.and_then(|meta| meta.user_id),
          system: peek.system,
+         opening: peek.messages,
       }
    }
 
@@ -97,6 +168,17 @@ impl Peek {
       format!(
          "sys-{:016x}",
          u64::from_le_bytes(digest[..8].try_into().unwrap())
+      )
+   }
+
+   /// Claude Code mints a new session id in `metadata.user_id` on every
+   /// restart, so a resumed conversation keyed on it lands on another
+   /// account and rebuilds its whole prompt cache. The opening message
+   /// survives the restart.
+   fn route_key(&self, auth: &AuthInfo) -> String {
+      self.opening.as_ref().map_or_else(
+         || self.session_key(auth),
+         |opening| first_turn_key(&auth.user, Some(opening)),
       )
    }
 }
@@ -280,6 +362,7 @@ pub async fn messages(
    );
    record.effort = peek.effort.clone();
    record.session_key = peek.session_key(&auth);
+   let route_key = peek.route_key(&auth);
    if provider == Provider::Anthropic
       && let Some(refused) = refuses_non_claude_code(&state, &auth, &headers)
    {
@@ -288,7 +371,7 @@ pub async fn messages(
    }
    let route = Route {
       api_key_only: peek.fast,
-      ..auth.route(&record.session_key, &peek.upstream_model)
+      ..auth.route(&route_key, &peek.upstream_model)
    };
    let body = normalized_body(&body, &peek, provider);
    let (served, first) = dispatch(&state, route, provider, body, &headers, &peek).await;
@@ -431,7 +514,7 @@ pub async fn count_tokens(
       return refused;
    }
 
-   let key = peek.session_key(&auth);
+   let key = peek.route_key(&auth);
    let resp = match state
       .pools
       .anthropic

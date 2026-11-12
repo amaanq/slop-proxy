@@ -215,9 +215,10 @@ impl Default for AnthropicConfig {
 pub struct CodexConfig {
    pub base_url: String,
    pub originator: String,
-   pub user_agent: String,
-   /// Sent as the `version` header and `client_version` query on backend calls.
-   pub version: String,
+   /// Pins the codex release sent in the `version` header, the
+   /// `client_version` query and the user agent. Unset, the proxy follows
+   /// codex's latest GitHub release.
+   pub version: Option<String>,
    /// Base instructions sent in the `instructions` field of every request.
    pub instructions: Option<String>,
    pub instructions_file: Option<PathBuf>,
@@ -238,8 +239,7 @@ impl Default for CodexConfig {
       Self {
          base_url: "https://chatgpt.com/backend-api/codex".into(),
          originator: "codex_cli_rs".into(),
-         user_agent: "codex_cli_rs/0.153.4 (Linux; x86_64)".into(),
-         version: "0.153.4".into(),
+         version: None,
          instructions: None,
          instructions_file: None,
          forward_max_tokens: true,

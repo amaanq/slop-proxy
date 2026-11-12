@@ -87,6 +87,7 @@ pub async fn serve(db: Db, cfg: Config, bind: &str) -> Result<()> {
 
    let pools = Pools::load(&db, &cfg).await?;
    pools.refresh_catalogs().await;
+   pools.codex.refresh_version().await;
    let prices = Prices::new(&cfg.db_path, cfg.pricing.url.clone());
    prices.load().await;
    let state = AppState(Arc::new(Inner {
@@ -117,6 +118,15 @@ pub async fn serve(db: Db, cfg: Config, bind: &str) -> Result<()> {
       loop {
          tick.tick().await;
          catalog_state.pools.refresh_catalogs().await;
+      }
+   }));
+   let version_state = state.clone();
+   tasks.push(tokio::spawn(async move {
+      let mut tick = time::interval(Duration::from_hours(6));
+      tick.tick().await;
+      loop {
+         tick.tick().await;
+         version_state.pools.codex.refresh_version().await;
       }
    }));
    let reload_state = state.clone();

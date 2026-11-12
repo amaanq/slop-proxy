@@ -608,6 +608,7 @@ async fn models(db: &Db, cfg: &Config) -> Result<()> {
    }
 
    let client = CodexClient::new(cfg.codex.clone());
+   client.refresh_version().await;
    let pool = CodexPool::load(db.clone(), client).await?;
 
    let models = match pool.list_models().await {

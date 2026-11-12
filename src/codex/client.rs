@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
@@ -63,6 +63,7 @@ pub struct Usage {
 pub struct CodexClient {
    http: reqwest::Client,
    cfg: CodexConfig,
+   version: RwLock<String>,
    /// Every request goes to chatgpt.com, so one name-to-value map is the
    /// whole jar. Cloudflare's clearance cookie is what it is for.
    cookies: Mutex<BTreeMap<String, String>>,
@@ -75,6 +76,15 @@ struct Retry {
    max_output_tokens: Option<u64>,
    #[serde(flatten)]
    rest: serde_json::Map<String, serde_json::Value>,
+}
+
+/// The release sent until the first GitHub lookup answers.
+const FALLBACK_VERSION: &str = "0.168.0";
+const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/openai/codex/releases/latest";
+
+#[derive(Deserialize)]
+struct Release {
+   tag_name: String,
 }
 
 const EARLY_REFUSAL_COOLDOWN: i64 = 60;
@@ -249,17 +259,69 @@ impl CodexClient {
       let http = reqwest::Client::builder()
          .connect_timeout(Duration::from_secs(30))
          .tcp_keepalive(Duration::from_secs(30))
-         .user_agent(cfg.user_agent.clone())
          .build()
          .expect("building http client");
+      let version = cfg.version.clone().unwrap_or_else(|| FALLBACK_VERSION.to_owned());
       Self {
          http,
          cfg,
+         version: RwLock::new(version),
          cookies: Mutex::default(),
       }
    }
 
+   pub fn version(&self) -> String {
+      self.version.read().expect("codex version lock poisoned").clone()
+   }
+
+   pub fn user_agent(&self) -> String {
+      format!("{}/{} (Linux; x86_64)", self.cfg.originator, self.version())
+   }
+
+   /// Moves to codex's latest release unless the config pins one.
+   pub async fn refresh_version(&self) {
+      if self.cfg.version.is_some() {
+         return;
+      }
+
+      let release = async {
+         self.http
+            .get(LATEST_RELEASE_URL)
+            .header(header::USER_AGENT, "slop-proxy")
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Release>()
+            .await
+      };
+      let tag = match release.await {
+         Ok(release) => release.tag_name,
+         Err(err) => {
+            tracing::warn!(%err, "codex release lookup failed");
+            return;
+         },
+      };
+      let is_version = |version: &&str| {
+         !version.is_empty()
+            && version
+               .chars()
+               .all(|symbol| symbol.is_ascii_digit() || symbol == '.')
+      };
+      let Some(latest) = tag.strip_prefix("rust-v").filter(is_version) else {
+         tracing::warn!(tag, "codex release tag is not rust-v<version>");
+         return;
+      };
+
+      let mut current = self.version.write().expect("codex version lock poisoned");
+      if *current != latest {
+         tracing::info!(from = %current, to = latest, "codex version");
+         latest.clone_into(&mut current);
+      }
+   }
+
    async fn round_trip(&self, req: reqwest::RequestBuilder) -> reqwest::Result<reqwest::Response> {
+      let req = req.header(header::USER_AGENT, self.user_agent());
       let cookie = {
          let jar = self.cookies.lock().expect("cookie jar lock poisoned");
          jar.iter()
@@ -293,7 +355,7 @@ impl CodexClient {
       req.bearer_auth(token)
          .header("chatgpt-account-id", account)
          .header("originator", self.cfg.originator.as_str())
-         .header("version", self.cfg.version.as_str())
+         .header("version", self.version())
    }
 
    pub async fn post(
@@ -378,7 +440,7 @@ impl CodexClient {
          .get(format!(
             "{}/models?client_version={}",
             self.cfg.base_url.trim_end_matches('/'),
-            self.cfg.version
+            self.version()
          ))
          .timeout(Duration::from_secs(10));
       let resp = self

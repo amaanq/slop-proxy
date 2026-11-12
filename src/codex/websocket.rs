@@ -203,14 +203,16 @@ impl CodexClient {
                .join(",")
          })
          .unwrap_or(routing);
+      let version = self.version();
+      let user_agent = self.user_agent();
       let mut headers = HeaderMap::new();
       for (name, value) in [
          ("authorization", authorization.as_str()),
          ("chatgpt-account-id", account),
          ("openai-beta", "responses=experimental"),
          ("originator", self.config().originator.as_str()),
-         ("version", self.config().version.as_str()),
-         ("user-agent", self.config().user_agent.as_str()),
+         ("version", version.as_str()),
+         ("user-agent", user_agent.as_str()),
          ("session_id", caller_session),
          ("session-id", caller_session),
          ("thread_id", thread),
@@ -324,7 +326,7 @@ mod tests {
          headers["x-codex-routing-hint"],
          "model=gpt-6-astra,feature=enabled"
       );
-      assert_eq!(headers["version"], "0.153.4");
+      assert_eq!(headers["version"], "0.168.0");
       assert_eq!(headers["session-id"], "session");
       assert_eq!(headers["thread-id"], "session");
    }

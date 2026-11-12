@@ -216,6 +216,10 @@ async fn dial(
 }
 
 impl Pool<CodexClient> {
+   pub async fn refresh_version(&self) {
+      self.backend.refresh_version().await;
+   }
+
    pub async fn websocket_failed(&self, account_id: Option<i64>, why: &str) {
       if let Some(slot) = self.slot(account_id).await {
          self.slots.cool_failure(&slot, why).await;

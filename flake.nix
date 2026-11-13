@@ -153,8 +153,8 @@
                 Group = "slop-proxy";
                 StateDirectory = "slop-proxy";
                 RuntimeDirectory = "slop-proxy";
-                ExecStart = "${lib.getExe cfg.package} ${flags} serve --bind ${cfg.bind}";
-                ExecReload = "${lib.getExe cfg.package} ${flags} handoff --bind ${cfg.bind}";
+                ExecStart = "${lib.getExe' cfg.package "slop-proxy"} ${flags} serve --bind ${cfg.bind}";
+                ExecReload = "${lib.getExe' cfg.package "slop-proxy"} ${flags} handoff --bind ${cfg.bind}";
                 Restart = "on-failure";
                 RestartSec = 5;
                 LimitNOFILE = 65536;

@@ -24,6 +24,7 @@ mod openrouter;
 mod pool;
 mod pricing;
 mod provider;
+mod radiance;
 mod server;
 mod stats;
 mod translate;

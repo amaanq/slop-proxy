@@ -27,6 +27,7 @@ pub struct Config {
    pub deepseek: RelayConfig,
    pub experiential: RelayConfig,
    pub openrouter: RelayConfig,
+   pub radiance: RelayConfig,
    pub copilot: CopilotConfig,
    pub pricing: PricingConfig,
    pub models: ModelsConfig,
@@ -296,6 +297,9 @@ pub struct ModelsConfig {
    pub copilot_patterns: Vec<String>,
    /// Model patterns relayed verbatim to `OpenRouter` over /v1/messages.
    pub openrouter_patterns: Vec<String>,
+   /// Model patterns relayed verbatim to a radiance server over /v1/messages.
+   /// Empty by default, set to opt in.
+   pub radiance_patterns: Vec<String>,
    /// Model patterns refused on every surface, whichever backend serves them.
    pub blocked_patterns: Vec<String>,
 }
@@ -317,6 +321,7 @@ impl Default for ModelsConfig {
          experiential_patterns: Vec::new(),
          copilot_patterns: Vec::new(),
          openrouter_patterns: vec!["minimax/*".into()],
+         radiance_patterns: Vec::new(),
          blocked_patterns: Vec::new(),
       }
    }
@@ -354,7 +359,7 @@ impl ModelsConfig {
       best.map(|(_, provider)| provider)
    }
 
-   const fn sets(&self) -> [(Provider, &Vec<String>); 10] {
+   const fn sets(&self) -> [(Provider, &Vec<String>); 11] {
       [
          (Provider::Anthropic, &self.anthropic_patterns),
          (Provider::Gemini, &self.gemini_patterns),
@@ -366,6 +371,7 @@ impl ModelsConfig {
          (Provider::Experiential, &self.experiential_patterns),
          (Provider::Copilot, &self.copilot_patterns),
          (Provider::OpenRouter, &self.openrouter_patterns),
+         (Provider::Radiance, &self.radiance_patterns),
       ]
    }
 

@@ -219,6 +219,7 @@ pub async fn run(args: Cli, cfg: Config) -> Result<()> {
          | Provider::DeepSeek
          | Provider::Experiential
          | Provider::OpenRouter
+         | Provider::Radiance
          | Provider::Zen => {
             bail!("{provider} has no login flow, use `accounts add-key --provider {provider}`")
          },

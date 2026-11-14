@@ -7,6 +7,7 @@ pub mod gemini;
 pub mod glm;
 pub mod openrouter;
 pub mod pools;
+pub mod radiance;
 pub mod slots;
 pub mod zen;
 

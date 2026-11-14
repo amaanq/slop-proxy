@@ -51,7 +51,8 @@ pub async fn messages(
       | Provider::Glm
       | Provider::DeepSeek
       | Provider::Experiential
-      | Provider::OpenRouter => {
+      | Provider::OpenRouter
+      | Provider::Radiance => {
          return relay::messages(state, auth, headers, body, peek, provider).await;
       },
       Provider::Zen
@@ -138,7 +139,8 @@ pub async fn count_tokens(
       | Provider::OpenAi
       | Provider::Copilot
       | Provider::Experiential
-      | Provider::OpenRouter => {},
+      | Provider::OpenRouter
+      | Provider::Radiance => {},
    }
    let req = match serde_json::from_slice::<AnthropicRequest>(&body) {
       Ok(req) => req,

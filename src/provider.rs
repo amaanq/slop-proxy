@@ -18,6 +18,7 @@ pub enum Provider {
    Copilot,
    #[pound(name = "openrouter")]
    OpenRouter,
+   Radiance,
 }
 
 impl FromStr for Provider {

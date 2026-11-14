@@ -435,6 +435,7 @@ async fn dispatch(
             .await
       },
       Provider::OpenRouter => pools.openrouter.execute(route, relay("/v1/messages")).await,
+      Provider::Radiance => pools.radiance.execute(route, relay("/v1/messages")).await,
       Provider::Zen => {
          let relay = relay("/messages");
          let opened = timeout(ZEN_FIRST_FRAME, async {

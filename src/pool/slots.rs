@@ -596,6 +596,7 @@ impl Slots {
          | Provider::DeepSeek
          | Provider::Experiential
          | Provider::OpenRouter
+         | Provider::Radiance
          | Provider::Zen => Err(RefreshError::Terminal(format!(
             "{} issues static keys, there is nothing to exchange",
             self.provider
@@ -653,6 +654,7 @@ impl Slots {
          | Provider::DeepSeek
          | Provider::Experiential
          | Provider::OpenRouter
+         | Provider::Radiance
          | Provider::Zen => None,
       };
       let Some(plan) = plan.filter(|plan| slot.plan.as_ref() != Some(plan)) else {
@@ -868,7 +870,8 @@ fn test_slot(id: i64, trusted: bool, provider: Provider) -> Slot {
          | Provider::DeepSeek
          | Provider::Zen
          | Provider::Experiential
-         | Provider::OpenRouter => AuthMode::ApiKey,
+         | Provider::OpenRouter
+         | Provider::Radiance => AuthMode::ApiKey,
       },
       plan: None,
       http_referer: None,

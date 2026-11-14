@@ -157,6 +157,7 @@ pub async fn chat_completions(
       | Provider::DeepSeek
       | Provider::Experiential
       | Provider::OpenRouter
+      | Provider::Radiance
       | Provider::Zen => {
          log_rejected(&state, &auth, "chat", &req.model);
          return translation_error(DIALECT, "this model is served over /v1/messages");
@@ -728,6 +729,7 @@ fn prepare_request(
       | Provider::DeepSeek
       | Provider::Experiential
       | Provider::OpenRouter
+      | Provider::Radiance
       | Provider::Copilot => false,
    };
    if !responses_native {

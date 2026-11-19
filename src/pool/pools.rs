@@ -107,6 +107,7 @@ pub struct Catalogs {
    pub zen: Arc<[ZenModel]>,
    pub glm: Arc<[Model]>,
    pub deepseek: Arc<[String]>,
+   pub radiance: Arc<[String]>,
    pub copilot: Arc<[String]>,
 }
 
@@ -226,12 +227,13 @@ impl Pools {
          fresh.map_or_else(|| Arc::clone(old), Arc::from)
       }
 
-      let (anthropic, gemini, zen, glm, deepseek, copilot) = tokio::join!(
+      let (anthropic, gemini, zen, glm, deepseek, radiance, copilot) = tokio::join!(
          self.anthropic.catalog(),
          self.gemini.models(),
          self.zen.models(),
          self.glm.models(),
          self.deepseek.models(),
+         self.radiance.models(),
          self.copilot.models(),
       );
       let previous = self.catalogs();
@@ -241,6 +243,7 @@ impl Pools {
          zen: keep(zen, &previous.zen),
          glm: keep(glm, &previous.glm),
          deepseek: keep(deepseek, &previous.deepseek),
+         radiance: keep(radiance, &previous.radiance),
          copilot: keep(copilot, &previous.copilot),
       };
       *self.catalogs.write().expect("catalogs lock poisoned") = Arc::new(next);

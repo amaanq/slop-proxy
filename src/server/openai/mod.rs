@@ -244,6 +244,13 @@ fn messages_catalog(state: &AppState) -> Catalog {
    );
    data.extend(
       catalogs
+         .radiance
+         .iter()
+         .filter(|id| state.cfg.models.route(id) == Provider::Radiance)
+         .map(|id| synthetic(id.clone())),
+   );
+   data.extend(
+      catalogs
          .zen
          .iter()
          .filter(|model| state.cfg.models.zen_dialect(&model.id) == ZenDialect::Messages)

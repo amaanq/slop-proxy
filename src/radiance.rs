@@ -4,7 +4,7 @@ use axum::body::Bytes;
 
 use crate::config::RelayConfig;
 use crate::egress::Egresses;
-use crate::upstream::{Classify, SendError, classify};
+use crate::upstream::{Classify, IdList, SendError, classify, json};
 
 const BASE_URL: &str = "http://[::1]:8080";
 
@@ -21,6 +21,20 @@ impl RadianceClient {
 
    pub const fn egresses(&self) -> &Egresses {
       &self.egresses
+   }
+
+   pub async fn models(&self, key: &str) -> Result<Vec<String>, SendError> {
+      let resp = self
+         .egresses
+         .send(|http| {
+            http
+               .get(format!("{}/v1/models", self.cfg.base_url_or(BASE_URL)))
+               .bearer_auth(key)
+               .send()
+         })
+         .await?;
+      let listing: IdList = json(resp, Classify::STRICT).await?;
+      Ok(listing.data.into_iter().map(|entry| entry.id).collect())
    }
 
    pub async fn post(

@@ -6,6 +6,14 @@ use crate::upstream::SendError;
 /// Session-sticky pool over radiance server keys.
 pub type RadiancePool = Pool<RadianceClient>;
 
+impl RadiancePool {
+   pub async fn models(&self) -> Option<Vec<String>> {
+      self
+         .first_answer(async |backend, key, _| backend.models(key).await)
+         .await
+   }
+}
+
 impl Backend for RadianceClient {
    const PROVIDER: Provider = Provider::Radiance;
    type Request = Relay;
